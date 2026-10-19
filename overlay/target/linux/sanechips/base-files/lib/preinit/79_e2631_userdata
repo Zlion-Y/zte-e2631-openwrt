@@ -7,8 +7,13 @@ e2631_userdata_preinit() {
     [ "$(cat /sys/class/mtd/mtd10/size 2>/dev/null)" = "49283072" ] || return 0
 
     if ! grep -qs '^10$' /sys/class/ubi/ubi[0-9]*/mtd_num 2>/dev/null; then
-        /usr/sbin/ubiattach /dev/ubi_ctrl -m 10 >/dev/null 2>&1 || return 0
+        /usr/sbin/ubiattach -d 0 /dev/ubi_ctrl -m 10 >/dev/null 2>&1 || return 0
     fi
+
+    # Require the expected E2631 userdata volume on UBI0.
+    # Never initialize or format NAND during boot.
+    [ "$(cat /sys/class/ubi/ubi0/mtd_num 2>/dev/null)" = "10" ] || return 0
+    [ "$(cat /sys/class/ubi/ubi0_0/name 2>/dev/null)" = "userdata" ] || return 0
 
     for vol in /sys/class/ubi/ubi[0-9]*_[0-9]*; do
         [ -r "$vol/name" ] || continue
