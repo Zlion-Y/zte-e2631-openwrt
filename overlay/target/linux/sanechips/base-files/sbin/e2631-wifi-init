@@ -1,0 +1,66 @@
+#!/bin/sh
+# E2631 Wi-Fi initialization backend for LuCI.
+# Do not enable an unencrypted AP automatically.
+
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+LOCK=/tmp/e2631-wifi-init.lock
+LOG=/tmp/e2631-wifi-init.log
+
+radio_ready() {
+    iw phy 2>/dev/null | grep -q '^Wiphy'
+}
+
+case "${1:-}" in
+    status)
+        if [ -d "$LOCK" ]; then
+            echo INITIALIZING
+        elif radio_ready; then
+            echo DRIVER_READY
+        else
+            echo DRIVER_OFF
+        fi
+        ;;
+
+    start)
+        if radio_ready; then
+            echo DRIVER_READY
+            exit 0
+        fi
+
+        if ! mkdir "$LOCK" 2>/dev/null; then
+            echo ALREADY_INITIALIZING
+            exit 0
+        fi
+
+        (
+            trap 'rmdir "$LOCK" 2>/dev/null' EXIT
+
+            echo "Starting MT7916 initialization"
+
+            /sbin/e2631-wifi-on 0
+
+            i=0
+            while ! radio_ready; do
+                i=$((i + 1))
+                if [ "$i" -ge 30 ]; then
+                    echo "ERROR: wireless PHY not detected"
+                    exit 1
+                fi
+                sleep 1
+            done
+
+            echo "MT7916 driver ready"
+
+            ubus call network reload >/dev/null 2>&1
+
+            echo "Initialization finished"
+        ) </dev/null >"$LOG" 2>&1 &
+
+        echo INITIALIZATION_STARTED
+        ;;
+
+    *)
+        echo "Usage: $0 start|status" >&2
+        exit 2
+        ;;
+esac
