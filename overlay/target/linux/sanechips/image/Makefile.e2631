@@ -34,7 +34,7 @@ define Device/zte_zxhn-e2631
   # it (its id table carries 14c3:7906/790a), but the firmware it asks for is the
   # mt7916_*.bin set, not mt7915_*.bin - hence kmod-mt7916-firmware here.
   DEVICE_PACKAGES := kmod-mt7915e kmod-mt7916-firmware e2631-fwslot \
-	luci luci-i18n-base-zh-cn luci-proto-ppp luci-app-ttyd ttyd luci-theme-argon
+	luci luci-i18n-base-zh-cn luci-proto-ppp luci-app-ttyd ttyd luci-theme-bootstrap ubi-utils block-mount
   # The factory package needs an official package as its version-header
   # template, and those are not redistributed, so it is only built when
   # CONFIG_E2631_VENDOR_TEMPLATE names one. CI leaves it empty and gets

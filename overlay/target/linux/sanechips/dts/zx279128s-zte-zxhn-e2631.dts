@@ -465,10 +465,21 @@
 				read-only;
 			};
 
+			/* Independent 47 MiB NAND data area. */
+			partition@3f00000 {
+				label = "userdata";
+				reg = <0x03f00000 0x02f00000>;
+			};
+
 			/* Vendor plugin area: 0x6e00000..0x7f00000 on this board. Left
 			 * alone; it is AES-128-ECB at rest and only readable through the
 			 * vendor kernel.
 			 */
 		};
 	};
+};
+
+/* Serialize PL310 cache maintenance with protected PCIe MMIO reads. */
+&l2cc {
+    zte,l2c-io-read-lock;
 };

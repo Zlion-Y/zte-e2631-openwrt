@@ -439,10 +439,9 @@ warn('cpu enable-method matches the string the compiled platsmp registers',
       ['e2631-fwslot', 'switching back to the stock slot'],
       ['uhttpd', 'the web server the UI is served from'],
       ['luci', 'the web UI itself'],
-      // Checked by name rather than by "some theme is present": apply.sh clones
-      // this package from GitHub, and the earlier failure mode of that feed
-      // handling was a build that succeeded and silently shipped no LuCI at all.
-      ['luci-theme-argon', 'the requested theme; without it the UI stays on bootstrap'],
+      // Verify the official Bootstrap theme explicitly.
+      // The E2631 image no longer includes the third-party Argon theme.
+      ['luci-theme-bootstrap', 'official LuCI theme'],
       // The chip is an MT7916: mt7915e binds it but requests mt7916_wa/wm/
       // rom_patch.bin, which only kmod-mt7916-firmware installs. Shipping the
       // mt7915 set instead looks like a dead radio with no error anywhere else.
