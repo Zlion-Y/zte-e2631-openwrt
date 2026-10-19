@@ -1,0 +1,75 @@
+#!/bin/sh
+# E2631 userdata safety probe.
+# Read-only. Never attach, erase or format NAND.
+
+MTD=/sys/class/mtd/mtd10
+EXPECTED=b9edd8b8e7e04adb41073f13da184554dce18a81254bdbc5e8cf9adede882d41
+
+[ "$(cat "$MTD/name" 2>/dev/null)" = userdata ] || {
+    echo WRONG_MTD
+    exit 1
+}
+
+[ "$(cat "$MTD/size" 2>/dev/null)" = 49283072 ] || {
+    echo WRONG_SIZE
+    exit 1
+}
+
+[ "$(cat "$MTD/erasesize" 2>/dev/null)" = 131072 ] || {
+    echo WRONG_ERASESIZE
+    exit 1
+}
+
+for u in /sys/class/ubi/ubi[0-9]*; do
+    [ -r "$u/mtd_num" ] || continue
+
+    number=${u##*/}
+    source=$(cat "$u/mtd_num")
+
+    if [ "$source" = 10 ]; then
+        for v in /sys/class/ubi/"$number"_[0-9]*; do
+            [ -r "$v/name" ] || continue
+
+            if [ "$(cat "$v/name")" = userdata ]; then
+                echo "READY:/dev/${v##*/}"
+                exit 0
+            fi
+        done
+
+        echo UBI_ATTACHED_UNEXPECTED_LAYOUT
+        exit 1
+    fi
+
+    if [ "$number" = ubi0 ]; then
+        echo UBI0_OCCUPIED
+        exit 1
+    fi
+done
+
+if [ "${1:-}" != "--scan-erased" ]; then
+    echo UNATTACHED_NEEDS_SCAN
+    exit 0
+fi
+
+[ -c /dev/mtd10 ] || {
+    echo MTD_DEVICE_MISSING
+    exit 1
+}
+
+command -v sha256sum >/dev/null 2>&1 || {
+    echo SHA256SUM_MISSING
+    exit 1
+}
+
+result=$(sha256sum /dev/mtd10 2>/dev/null) || {
+    echo NAND_READ_ERROR
+    exit 1
+}
+
+hash=${result%% *}
+
+if [ "$hash" = "$EXPECTED" ]; then
+    echo ERASED_CANDIDATE
+else
+    echo NONEMPTY_OR_UNEXPECTED_DATA
+fi

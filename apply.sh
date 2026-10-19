@@ -35,7 +35,7 @@ cp "$HERE/tools/mkfactory.mjs" "$TREE/tools/e2631-mkfactory.mjs"
 # runnable on the device, and rc.common refuses to enable a service script that
 # is not executable.
 for f in sbin/e2631-probe sbin/e2631-trial sbin/e2631-commit sbin/e2631-leds sbin/e2631-hb \
-	 sbin/e2631-linkspeed sbin/e2631-wifi-on sbin/e2631-wifi-ap sbin/e2631-wifi-init sbin/e2631-userdata-status sbin/e2631-wifi-boot sbin/e2631-fwstate \
+	 sbin/e2631-linkspeed sbin/e2631-wifi-on sbin/e2631-wifi-ap sbin/e2631-wifi-init sbin/e2631-userdata-status sbin/e2631-userdata-probe sbin/e2631-wifi-boot sbin/e2631-fwstate \
 	 etc/init.d/e2631-trial etc/init.d/e2631-wifi-eeprom etc/init.d/e2631-wifi-load \
 	 etc/init.d/e2631-leds etc/init.d/e2631-hb \
 	 etc/hotplug.d/firmware/11-mt76-caldata; do
