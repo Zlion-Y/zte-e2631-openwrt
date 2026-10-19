@@ -44,7 +44,11 @@ factory_wireless() {
             *) return 1 ;;
         esac
 
-        [ "$disabled" = 1 ] || return 1
+        # OpenWrt default configuration may omit disabled.
+        case "$disabled" in
+            ''|1) ;;
+            *) return 1 ;;
+        esac
     done
 
     return 0
