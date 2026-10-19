@@ -1,0 +1,33 @@
+#!/bin/sh
+# Read-only E2631 userdata detection.
+# Never erase, format, attach or detach UBI.
+
+[ "$(cat /sys/class/mtd/mtd10/name 2>/dev/null)" = "userdata" ] || {
+    echo WRONG_MTD
+    exit 1
+}
+
+[ "$(cat /sys/class/mtd/mtd10/size 2>/dev/null)" = "49283072" ] || {
+    echo WRONG_SIZE
+    exit 1
+}
+
+for u in /sys/class/ubi/ubi[0-9]*; do
+    [ -r "$u/mtd_num" ] || continue
+    [ "$(cat "$u/mtd_num")" = "10" ] || continue
+
+    n=${u##*/}
+
+    for v in /sys/class/ubi/"$n"_[0-9]*; do
+        [ -r "$v/name" ] || continue
+        [ "$(cat "$v/name")" = "userdata" ] || continue
+
+        echo "READY:/dev/${v##*/}"
+        exit 0
+    done
+
+    echo UBI_ATTACHED_NO_USERDATA
+    exit 1
+done
+
+echo NO_UBI_ATTACHED
