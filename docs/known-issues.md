@@ -1,5 +1,13 @@
 # Known issues
 
+
+> **Historical verification notice:** Several entries below describe
+> earlier v1.2/gen1 firmware tests. The newer `6ab4488` build has
+> working automatic Wi-Fi AP initialization and UBIFS Extroot on
+> an already initialized device. Older issues are retained until
+> each is independently retested; they are not automatically fixed.
+
+
 The honest list, in two forms: a machine-readable block for tooling and grep, and one
 short section per issue for the human who has to decide whether to care. "Verified" means
 it was reproduced on this board with the evidence named; "unverified" means it is a

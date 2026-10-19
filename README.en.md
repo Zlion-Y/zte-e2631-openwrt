@@ -2,6 +2,38 @@
 
 [中文](README.md) · **English**
 
+## Current development status (2026-10-19)
+
+Maintained by [tigaotg](https://github.com/tigaotg), based on
+[Zlion-Y/zte-e2631-openwrt](https://github.com/Zlion-Y/zte-e2631-openwrt).
+Original contributors and development history are preserved.
+
+**Hardware-verified experimental build: `6ab4488`**
+
+- Linux 6.18.55 boots on the dual-core ZX279128S.
+- The PL310 L2 cache workaround is operational.
+- OpenWrt boots from firmware slot B; factory slot A remains intact.
+- Both MT7916 Wi-Fi AP interfaces initialize automatically.
+- The 47 MiB userdata partition mounts as UBI/UBIFS Extroot
+  on the tested device, with approximately 37.5 MiB usable.
+- LuCI is accessible.
+
+**Outstanding limitations:**
+
+- Extroot configuration includes a device-specific UUID.
+- Blank userdata initialization has not been validated.
+- Wi-Fi association stability and repeated cold boots need further testing.
+- Exact reproduction of the tested firmware build is not yet established.
+- Initial open Wi-Fi and an empty root password create security risks.
+
+The `e2631-experimental-6ab4488` Release is currently a draft.
+This firmware is **not ready for general installation**.
+
+The documentation below also contains historical testing records.
+
+---
+
+
 **To build this: [BUILD.md](BUILD.md).** It is the single supported path from a clone to
 a package that flashes, and it lists the two inputs this repository cannot hand you (the
 pinned base tree, the vendor version-header template) plus the failure modes.
