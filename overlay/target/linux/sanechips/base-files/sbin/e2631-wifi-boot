@@ -65,17 +65,20 @@ if [ -e /etc/e2631-wifi-noautoload ]; then
 fi
 
 # A previous attempt may have caused a hard lockup.
-# Skip automatic initialization until manually recovered.
+# Skip this boot, clear the marker, and permit retry on a later boot.
 if [ -e "$PENDING" ]; then
-    log "previous Wi-Fi initialization unfinished; skipping"
+    log "previous initialization unfinished; skipping once and clearing marker"
+    rm -f "$PENDING" || exit 1
+    sync
     exit 0
 fi
 
-touch "$PENDING" || exit 1
-sync
-
 log "waiting ${DEFER}s"
 sleep "$DEFER"
+
+# Mark only after the startup delay, before touching the radio.
+touch "$PENDING" || exit 1
+sync
 
 # Keep the original PCIe binding sequence.
 if ! radio_ready; then
