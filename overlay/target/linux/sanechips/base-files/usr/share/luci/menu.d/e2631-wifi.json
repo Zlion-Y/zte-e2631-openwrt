@@ -1,0 +1,16 @@
+{
+  "admin/network/e2631_wifi": {
+    "title": "E2631 无线初始化",
+    "order": 85,
+    "action": {
+      "type": "view",
+      "path": "e2631/wifi"
+    },
+    "depends": {
+      "acl": ["e2631-wifi-init"],
+      "fs": {
+        "/sbin/e2631-wifi-init": "executable"
+      }
+    }
+  }
+}
