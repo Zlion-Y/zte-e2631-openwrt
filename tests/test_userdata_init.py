@@ -54,6 +54,7 @@ with tempfile.TemporaryDirectory() as temp:
         fake.write_text(
             "#!/bin/sh\n"
             f'echo "{name} $*" >> "$E2631_TEST_LOG"\n'
+            f'[ "${{E2631_FAIL_STEP:-}}" != "{name}" ]\n'
         )
         fake.chmod(0o700)
         replacements[f"/usr/sbin/{name}"] = str(fake)
@@ -142,5 +143,44 @@ with tempfile.TemporaryDirectory() as temp:
     assert r.returncode != 0
     assert not log.read_text()
     print("PASS: UBI0 已占用时拒绝写入")
+
+
+    # Failure injection: each stage must stop immediately.
+    (ubi / "ubi0").rmdir()
+
+    failures = {
+        "ubiformat": [
+            "ubiformat /dev/mtd10 -y"
+        ],
+        "ubiattach": [
+            "ubiformat /dev/mtd10 -y",
+            "ubiattach /dev/ubi_ctrl -m 10 -d 0"
+        ],
+        "ubimkvol": [
+            "ubiformat /dev/mtd10 -y",
+            "ubiattach /dev/ubi_ctrl -m 10 -d 0",
+            "ubimkvol /dev/ubi0 -N userdata -m"
+        ],
+    }
+
+    for stage, expected in failures.items():
+        log.write_text("")
+
+        result = run(
+            "--apply",
+            E2631_CONFIRM="ERASE_MTD10_USERDATA_47M",
+            E2631_FAIL_STEP=stage,
+        )
+
+        assert result.returncode != 0, (
+            stage, result.stdout, result.stderr
+        )
+
+        actual = log.read_text().splitlines()
+        assert actual == expected, (stage, actual)
+
+        assert "UBI_VOLUME_CREATED" not in result.stdout
+
+        print(f"PASS: {stage} 失败后停止执行")
 
 print("PASS: 全部隔离模拟测试通过")
