@@ -1,0 +1,122 @@
+#!/bin/sh
+# E2631: stage internal JFFS2 configuration on a mounted UBIFS volume.
+# Never formats, erases, attaches, or mounts NAND.
+set -eu
+umask 077
+
+[ "$#" -eq 3 ] && [ "$1" = "--stage" ] || {
+    echo "Usage: $0 --stage SOURCE_UPPER MOUNTED_UBIFS" >&2
+    exit 2
+}
+
+SRC=$2
+DST=$3
+
+case "$SRC:$DST" in
+    /*:/*) ;;
+    *) echo "REFUSED_RELATIVE_PATH"; exit 1 ;;
+esac
+
+[ -d "$SRC" ] && [ ! -L "$SRC" ] || {
+    echo "REFUSED_INVALID_SOURCE"
+    exit 1
+}
+[ -d "$DST" ] && [ ! -L "$DST" ] || {
+    echo "REFUSED_INVALID_DESTINATION"
+    exit 1
+}
+
+SRC=$(readlink -f "$SRC")
+DST=$(readlink -f "$DST")
+
+case "$SRC" in
+    */upper) ;;
+    *) echo "REFUSED_NOT_UPPER"; exit 1 ;;
+esac
+
+[ "$SRC" != "$DST" ] && [ "$DST" != "/" ] || {
+    echo "REFUSED_UNSAFE_PATH"
+    exit 1
+}
+
+case "$SRC" in
+    "$DST"/*) echo "REFUSED_NESTED_PATH"; exit 1 ;;
+esac
+case "$DST" in
+    "$SRC"/*) echo "REFUSED_NESTED_PATH"; exit 1 ;;
+esac
+
+SRC_MOUNT=${SRC%/upper}
+
+awk -v p="$SRC_MOUNT" \
+    '$2 == p && $3 == "jffs2" {ok=1} END {exit !ok}' \
+    /proc/mounts || {
+    echo "REFUSED_SOURCE_NOT_JFFS2"
+    exit 1
+}
+
+awk -v p="$DST" \
+    '$2 == p && $3 == "ubifs" &&
+    ($1 == "/dev/ubi0_0" || $1 == "ubi0:userdata") {
+        ok=1
+    } END {exit !ok}' /proc/mounts || {
+    echo "REFUSED_TARGET_NOT_UBIFS"
+    exit 1
+}
+
+[ "$(cat /sys/class/ubi/ubi0/mtd_num 2>/dev/null)" = 10 ] || {
+    echo "REFUSED_WRONG_UBI_MTD"
+    exit 1
+}
+
+[ "$(cat /sys/class/ubi/ubi0_0/name 2>/dev/null)" = userdata ] || {
+    echo "REFUSED_WRONG_UBI_VOLUME"
+    exit 1
+}
+
+[ -z "$(find "$DST" -mindepth 1 -maxdepth 1 -print -quit)" ] || {
+    echo "REFUSED_DESTINATION_NOT_EMPTY"
+    exit 1
+}
+
+if [ -f "$SRC/etc/config/fstab" ] &&
+    grep -Eq '^[[:space:]]*option[[:space:]]+uuid' \
+        "$SRC/etc/config/fstab"; then
+    echo "REFUSED_UUID_BOUND_FSTAB"
+    exit 1
+fi
+
+if [ -e "$SRC/sbin/block" ] || [ -L "$SRC/sbin/block" ]; then
+    echo "REFUSED_LEGACY_BLOCK_HELPER"
+    exit 1
+fi
+
+# Copy into a staging directory first.
+# A failed copy must never leave an apparently completed upper/work pair.
+STAGE="$DST/.e2631-stage"
+
+[ ! -e "$STAGE" ] && [ ! -L "$STAGE" ] || {
+    echo "REFUSED_STALE_STAGING"
+    exit 1
+}
+
+mkdir "$STAGE"
+
+if ! cp -a "$SRC/." "$STAGE/"; then
+    echo "FAILED_COPY_STAGING_PRESERVED"
+    exit 1
+fi
+
+if [ -f "$SRC/etc/shadow" ]; then
+    cmp -s "$SRC/etc/shadow" "$STAGE/etc/shadow" || {
+        echo "FAILED_SHADOW_CHECK"
+        exit 1
+    }
+fi
+
+# Promote only after the copy and critical-file check succeeded.
+mv "$STAGE" "$DST/upper"
+mkdir "$DST/work"
+
+sync
+echo "STAGED_CONFIG_PRESERVED"

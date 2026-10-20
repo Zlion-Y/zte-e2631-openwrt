@@ -10,6 +10,8 @@ USE_PROCD=1
 PROG=/sbin/e2631-hb
 
 start_service() {
+    # Diagnostic heartbeat is opt-in.
+    [ -e /etc/e2631-hb-enable ] || return 0
 	procd_open_instance hb
 	procd_set_param command "$PROG" 3
 	procd_set_param respawn 3600 5 0
