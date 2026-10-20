@@ -1,0 +1,21 @@
+{
+  "e2631-wifi-init": {
+    "description": "Manage E2631 MT7916 initialization",
+    "read": {
+      "ubus": {
+        "file": ["exec"]
+      },
+      "file": {
+        "/sbin/e2631-wifi-init status": ["exec"]
+      }
+    },
+    "write": {
+      "ubus": {
+        "file": ["exec"]
+      },
+      "file": {
+        "/sbin/e2631-wifi-init start": ["exec"]
+      }
+    }
+  }
+}

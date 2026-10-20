@@ -35,7 +35,7 @@ cp "$HERE/tools/mkfactory.mjs" "$TREE/tools/e2631-mkfactory.mjs"
 # runnable on the device, and rc.common refuses to enable a service script that
 # is not executable.
 for f in sbin/e2631-probe sbin/e2631-trial sbin/e2631-commit sbin/e2631-leds sbin/e2631-hb \
-	 sbin/e2631-linkspeed sbin/e2631-wifi-on sbin/e2631-wifi-ap sbin/e2631-fwstate \
+	 sbin/e2631-linkspeed sbin/e2631-wifi-on sbin/e2631-wifi-ap sbin/e2631-wifi-init sbin/e2631-userdata-status sbin/e2631-userdata-probe sbin/e2631-userdata-firstboot sbin/e2631-userdata-init sbin/e2631-wifi-boot sbin/e2631-fwstate \
 	 etc/init.d/e2631-trial etc/init.d/e2631-wifi-eeprom etc/init.d/e2631-wifi-load \
 	 etc/init.d/e2631-leds etc/init.d/e2631-hb \
 	 etc/hotplug.d/firmware/11-mt76-caldata; do
@@ -51,19 +51,7 @@ if [ -f "$TREE/feeds.conf.default" ]; then
 	rm -f "$TREE/feeds.conf"
 fi
 
-# The Argon theme is not in any official feed, and its Makefile is a plain
-# luci.mk package, so it goes in as a local package. It ships
-# root/etc/uci-defaults/30_luci-theme-argon, which sets main.mediaurlbase; that
-# runs before luci-base's 30_luci-theme-bootstrap, and bootstrap only writes the
-# option when it is still unset, so Argon stays the default.
-# Deliberately not silently skipped if the clone fails: DEVICE_PACKAGES names the
-# package, so the build stops with a clear error instead of shipping bootstrap.
-if [ ! -e "$TREE/package/luci-theme-argon/Makefile" ]; then
-	git clone -q --depth 1 --single-branch -b master \
-		https://github.com/jerrykuku/luci-theme-argon "$TREE/package/luci-theme-argon" ||
-		echo "WARN: could not clone luci-theme-argon; the image build will fail on DEVICE_PACKAGES" >&2
-fi
-
+# E2631: use the official Bootstrap theme only.
 # A dead mirror is worse than a slow one: OpenWrt's curl is started with
 # --connect-timeout but no transfer watchdog, so a host that accepts the
 # connection and then sends nothing (ftpmirror.gnu.org did exactly that here,

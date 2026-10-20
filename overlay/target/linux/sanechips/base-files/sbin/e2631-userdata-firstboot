@@ -1,0 +1,56 @@
+#!/bin/sh
+# ZTE E2631 userdata first-boot controller.
+# Read-only planning stage. No NAND writes.
+
+PROBE=${E2631_PROBE_BIN:-/sbin/e2631-userdata-probe}
+
+case "${1:-}" in
+    --plan)
+        MODE=normal
+        ;;
+    --scan)
+        MODE=scan
+        ;;
+    *)
+        echo "Usage: $0 --plan|--scan" >&2
+        exit 2
+        ;;
+esac
+
+if [ "$MODE" = scan ]; then
+    STATE=$("$PROBE" --scan-erased) || {
+        echo "PROBE_FAILED:$STATE"
+        exit 1
+    }
+else
+    STATE=$("$PROBE") || {
+        echo "PROBE_FAILED:$STATE"
+        exit 1
+    }
+fi
+
+echo "DETECTED:$STATE"
+
+case "$STATE" in
+    READY:/dev/ubi0_0)
+        echo "ACTION:PRESERVE_EXISTING_USERDATA"
+        ;;
+    READY:*)
+        echo "ACTION:CHECK_UBI_DEVICE_NUMBER"
+        ;;
+    UNATTACHED_NEEDS_SCAN)
+        echo "ACTION:REQUIRE_ERASED_CHECK"
+        ;;
+    ERASED_CANDIDATE)
+        echo "ACTION:ELIGIBLE_FOR_INITIALIZATION_REVIEW"
+        ;;
+    NONEMPTY_OR_UNEXPECTED_DATA)
+        echo "ACTION:DO_NOT_FORMAT"
+        ;;
+    *)
+        echo "ACTION:STOP_AND_INVESTIGATE"
+        exit 1
+        ;;
+esac
+
+exit 0

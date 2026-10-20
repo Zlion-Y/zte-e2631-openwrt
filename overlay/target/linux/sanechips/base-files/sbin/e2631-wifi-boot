@@ -1,0 +1,123 @@
+#!/bin/sh
+# E2631 automatic MT7916 initialization.
+# Provision an open setup AP only for factory Wi-Fi configuration.
+# Preserve user configuration on subsequent boots.
+
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+
+DEFER=${1:-25}
+PENDING=/etc/e2631-wifi-boot-pending
+PROVISIONED=/etc/e2631-wifi-provisioned
+
+log() {
+    echo "e2631-wifi-boot: $*" > /dev/kmsg
+}
+
+radio_ready() {
+    iw phy 2>/dev/null | grep -q '^Wiphy'
+}
+
+ap_ready() {
+    iw dev 2>/dev/null | grep -q 'type AP'
+}
+
+factory_wireless() {
+    [ -s /etc/config/wireless ] || return 0
+
+    sections=$(uci -q show wireless |
+        sed -n 's/^\(wireless\.[^=]*\)=wifi-iface$/\1/p')
+
+    [ -n "$sections" ] || return 0
+
+    for s in $sections; do
+        ssid=$(uci -q get "$s.ssid")
+        enc=$(uci -q get "$s.encryption")
+        disabled=$(uci -q get "$s.disabled")
+
+        case "$ssid" in
+            ''|OpenWrt|E2631-OpenWrt) ;;
+            *) return 1 ;;
+        esac
+
+        case "$enc" in
+            ''|none) ;;
+            *) return 1 ;;
+        esac
+
+        # OpenWrt default configuration may omit disabled.
+        case "$disabled" in
+            ''|1) ;;
+            *) return 1 ;;
+        esac
+    done
+
+    return 0
+}
+
+case "$DEFER" in
+    ''|*[!0-9]*) exit 2 ;;
+esac
+
+# Emergency opt-out.
+if [ -e /etc/e2631-wifi-noautoload ]; then
+    log "automatic Wi-Fi disabled"
+    exit 0
+fi
+
+# A previous attempt may have caused a hard lockup.
+# Skip this boot, clear the marker, and permit retry on a later boot.
+if [ -e "$PENDING" ]; then
+    log "previous initialization unfinished; skipping once and clearing marker"
+    rm -f "$PENDING" || exit 1
+    sync
+    exit 0
+fi
+
+log "waiting ${DEFER}s"
+sleep "$DEFER"
+
+# Mark only after the startup delay, before touching the radio.
+touch "$PENDING" || exit 1
+sync
+
+# Keep the original PCIe binding sequence.
+if ! radio_ready; then
+    /sbin/e2631-wifi-on 0 || exit 1
+fi
+
+i=0
+until radio_ready; do
+    i=$((i + 1))
+    if [ "$i" -ge 30 ]; then
+        log "MT7916 initialization failed"
+        exit 1
+    fi
+    sleep 1
+done
+
+log "MT7916 ready"
+
+if [ ! -e "$PROVISIONED" ] && factory_wireless; then
+    log "creating first-boot OpenWrt AP"
+
+    /sbin/e2631-wifi-ap OpenWrt || exit 1
+
+    if ! ap_ready; then
+        log "setup AP did not start"
+        exit 1
+    fi
+
+    touch "$PROVISIONED" || exit 1
+else
+    # Never rewrite user SSID, encryption, or passwords.
+    ubus call network reload >/dev/null 2>&1
+    wifi up >/dev/null 2>&1
+
+    touch "$PROVISIONED" || exit 1
+fi
+
+rm -f "$PENDING"
+sync
+
+log "automatic Wi-Fi initialization complete"
+exit 0

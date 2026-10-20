@@ -1,0 +1,14 @@
+diff --git a/themes/luci-theme-bootstrap/ucode/template/themes/bootstrap/footer.ut b/themes/luci-theme-bootstrap/ucode/template/themes/bootstrap/footer.ut
+index d51079b..5300a98 100644
+--- a/themes/luci-theme-bootstrap/ucode/template/themes/bootstrap/footer.ut
++++ b/themes/luci-theme-bootstrap/ucode/template/themes/bootstrap/footer.ut
+@@ -13,7 +13,8 @@
+ 				{% endif %}
+ 			</span>
+ 			<ul class="breadcrumb pull-right" id="modemenu" style="display:none"></ul>
+-		</footer>
++		<span class="e2631-credit" style="margin-left:12px">E2631 OpenWrt &middot; Developed by <a href="https://github.com/tigaotg" target="_blank" rel="noopener noreferrer">tigaotg</a></span>
++			</footer>
+ 		<script>L.require('menu-bootstrap')</script>
+ 		{% endif %}
+ 	</body>

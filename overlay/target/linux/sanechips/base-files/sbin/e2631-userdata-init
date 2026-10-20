@@ -1,0 +1,90 @@
+#!/bin/sh
+# E2631 userdata initialization.
+# NEVER called automatically during boot.
+set -eu
+
+MODE=${1:-}
+
+case "$MODE" in
+    --plan) ;;
+    --apply)
+        if [ "${E2631_CONFIRM:-}" != "ERASE_MTD10_USERDATA_47M" ]; then
+            echo "REFUSED_NO_CONFIRM"
+            exit 3
+        fi
+        ;;
+    *)
+        echo "Usage: $0 --plan|--apply" >&2
+        exit 2
+        ;;
+esac
+
+MTD=/sys/class/mtd/mtd10
+
+for item in \
+    "name:userdata" \
+    "size:49283072" \
+    "erasesize:131072" \
+    "writesize:2048"
+do
+    field=${item%%:*}
+    expected=${item#*:}
+    actual=$(cat "$MTD/$field" 2>/dev/null || true)
+
+    if [ "$actual" != "$expected" ]; then
+        echo "REFUSED_WRONG_GEOMETRY:$field"
+        exit 1
+    fi
+done
+
+if [ -e /sys/class/ubi/ubi0 ]; then
+    echo "REFUSED_UBI0_OCCUPIED"
+    exit 1
+fi
+
+for u in /sys/class/ubi/ubi[0-9]*; do
+    [ -r "$u/mtd_num" ] || continue
+    if [ "$(cat "$u/mtd_num")" = "10" ]; then
+        echo "REFUSED_USERDATA_ALREADY_ATTACHED"
+        exit 1
+    fi
+done
+
+if grep -q '^/dev/mtd10 ' /proc/mounts 2>/dev/null; then
+    echo "REFUSED_MTD_MOUNTED"
+    exit 1
+fi
+
+# Overrides are allowed only for non-destructive simulation.
+if [ "$MODE" = "--apply" ]; then
+    PROBE=/sbin/e2631-userdata-probe
+else
+    PROBE=${E2631_PROBE_BIN:-/sbin/e2631-userdata-probe}
+fi
+
+STATE=$("$PROBE" --scan-erased) || {
+    echo "REFUSED_PROBE_FAILED"
+    exit 1
+}
+
+if [ "$STATE" != ERASED_CANDIDATE ]; then
+    echo "REFUSED_STATE:$STATE"
+    exit 1
+fi
+
+echo "PLAN: initialize mtd10 as UBI0"
+echo "PLAN: create dynamic userdata volume"
+
+if [ "$MODE" = "--plan" ]; then
+    echo "DRY_RUN_ONLY"
+    exit 0
+fi
+
+# Destructive operations: never call this from automatic boot.
+# The caller must independently authorize initialization.
+/usr/sbin/ubiformat /dev/mtd10 -y
+/usr/sbin/ubiattach /dev/ubi_ctrl -m 10 -d 0
+/usr/sbin/ubimkvol /dev/ubi0 -N userdata -m
+
+echo "UBI_VOLUME_CREATED"
+echo "UBIFS mount and first-boot setup still require validation"

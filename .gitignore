@@ -38,3 +38,4 @@ payload/
 # on this machine and the vendor template package. Never commit it - .env.example
 # is the checked-in version.
 /.env
+tests/__pycache__/

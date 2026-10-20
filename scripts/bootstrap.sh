@@ -78,6 +78,19 @@ say "installing feed packages"
 ( cd "$E2631_TREE" && ./scripts/feeds install -a 2>&1 | grep -E "Ignoring|Installing" | tail -8 )
 [ -d "$E2631_TREE/package/feeds/packages" ] || die "feed install produced no package/feeds/packages"
 
+# ---- E2631 LuCI attribution -----------------------------------------------
+# Apply after cloning/installing feeds, before compiling LuCI.
+LUCIPATCH="$E2631_KIT/patches/luci-bootstrap-footer.patch"
+
+if git -C "$E2631_TREE/feeds/luci" apply --reverse --check "$LUCIPATCH" 2>/dev/null; then
+        say "LuCI footer attribution already applied"
+elif git -C "$E2631_TREE/feeds/luci" apply --check "$LUCIPATCH"; then
+        git -C "$E2631_TREE/feeds/luci" apply "$LUCIPATCH"
+        say "LuCI footer attribution applied: tigaotg"
+else
+        die "LuCI footer patch cannot be applied; check upstream template"
+fi
+
 # ---- 4. the seed config ----------------------------------------------------
 say "seeding .config from seed/e2631.config"
 cp "$E2631_KIT/seed/e2631.config" "$E2631_TREE/.config"
