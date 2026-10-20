@@ -2,6 +2,22 @@
 
 [中文](README.md) · **English**
 
+## Complete maintainer handoff — 2026-10-20
+
+**This branch archives the development code and evidence; it is not a general-use firmware release.** The original port, vendor-compatible packaging and A/B recovery were established by [Zlion-Y and contributors](https://github.com/Zlion-Y/zte-e2631-openwrt). The work recorded here is subsequent development and hardware testing.
+
+- **[Full handoff (Chinese): implementation links, validation and blockers](docs/HANDOFF-2026-10-20-zh.md)**, intended for the original maintainer.
+- **Verified on one E2631**: Linux 6.18.55 boots; the PL310 I/O serialization log is present; delayed MT7916 initialization yields 2.4/5 GHz APs on a normal reboot without logging in, and a modified SSID/WPA2 key survives reboot; an **already initialized** 47 MiB userdata NAND area provides UBIFS Extroot (`/dev/ubi0_0` on `/overlay`, about 37.5 MiB filesystem total, 35.5 MiB free at the observed point).
+- **Wi-Fi distinction**: the `START=95` procd service, ~25-second delay, controlled `0x7906` PCIe binding, and startup markers solve the observed **early-boot blocking/automatic AP** problem on the tested reboot sequence. Repeated *cold* boots, DMA-related lockups, association hangs and long-duration stability **have not** been independently cleared.
+- **Unfinished userdata setup**: read-only status/probe/firstboot scripts and a guarded `e2631-userdata-init` exist, plus nine passing isolated mock tests. Initialization still stops after `ubiformat/ubiattach/ubimkvol`; first writable UBIFS mount, configuration migration, validation and an activation gate are incomplete. `e2631-userdata-migrate` is an **unsafe-for-production prototype**: BusyBox `cp -a` has not been shown to preserve OverlayFS whiteouts/xattrs and commit/power-loss atomicity is absent.
+- **Heartbeat** is now opt-in via `/etc/e2631-hb-enable` in the uploaded source. This later source change was **not in** the previously statically verified local firmware image.
+- **Branch guide**: `handoff/consolidated-2026-10-20` = all uploaded local source and handoff docs; `handoff/local-2026-10-20` = untouched backup of the last local commit; `feature/wifi-autoboot` = wireless development; default `main` does **not** contain this complete feature/WIP set. Do not force-push or present this branch as a release.
+- **Security warning**: the experimental open SSID `OpenWrt` coupled with an unset administrator password permits nearby administrative access. Production defaults must be secured; never auto-format NAND or overwrite stock slot A.
+
+The older status and historical upstream notes below are retained as evidence, not as current results.
+
+---
+
 ## Current development status (2026-10-19)
 
 Maintained by [tigaotg](https://github.com/tigaotg), based on
