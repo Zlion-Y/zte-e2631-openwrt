@@ -1,5 +1,24 @@
 # Known issues
 
+> **2026-10-20 addendum — see [full handoff](HANDOFF-2026-10-20-zh.md).**
+> The branch `handoff/consolidated-2026-10-20` contains newly uploaded
+> read-only userdata status/probe/firstboot scripts, a **guarded but destructive**
+> `e2631-userdata-init` prototype, nine passing isolated mock tests, and a
+> partial JFFS2→UBIFS migration script. **Do not run `--apply` on an existing
+> UBIFS-equipped router.** These tools are *not* a complete safe first-boot workflow:
+> the blank volume has not been initialized/mounted/migrated/activated end to end;
+> OverlayFS character-device whiteouts (19 observed) and trusted xattrs cannot be
+> assumed to survive BusyBox `cp -a`; `upper` and `work` promotion has no
+> power-fail atomicity. The ROM `fstab` defaults to an enabled Extroot target
+> and requires a compatibility-safe activation gate before a first-install release.
+> Heartbeat service is opt-in in newer source, not in the previously verified image.
+>
+> **Keep the historical WIFI-COLD-BIND-HANG / WIFI-ASSOC-HARD-HANG reports open**
+> until repeated cold starts, associations and stress tests have been reproduced
+> on the latest build. Normal reboot, automatic dual-band AP creation and
+> preservation of changed wireless settings *were* verified on one device.
+> The experimental initial open SSID plus no root password is unsafe for release.
+
 
 > **Historical verification notice:** Several entries below describe
 > earlier v1.2/gen1 firmware tests. The newer `6ab4488` build has
