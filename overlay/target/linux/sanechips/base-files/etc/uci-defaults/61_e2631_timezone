@@ -1,0 +1,14 @@
+#!/bin/sh
+# v1.3: the image defaults to UTC with the global NTP pool; this board is used
+# in CN (factory tag carries @CTCC). Show Asia/Shanghai and sync from domestic
+# servers - verified live: jumped to CST within seconds after the switch.
+uci batch <<EOF
+set system.@system[0].zonename='Asia/Shanghai'
+set system.@system[0].timezone='CST-8'
+delete system.ntp.server
+add_list system.ntp.server='ntp.aliyun.com'
+add_list system.ntp.server='ntp1.aliyun.com'
+add_list system.ntp.server='cn.pool.ntp.org'
+commit system
+EOF
+exit 0

@@ -4,10 +4,10 @@
 # Stock firmware semantics (from its manual) are kept where they are worth
 # keeping and deliberately broken where being different is more useful:
 #
-#   booting            red   blink fast   (stock: same)
+#   booting            red   blink slow   (user request: slower than the 200 ms stock)
 #   up, no default route  red  solid      (stock: same)
-#   up, internet route    green slow pulse (stock: solid green - so the two
-#                                            systems are tellable at a glance)
+#   up, internet route    green solid    (user request: steady, not the slow
+#                                            pulse it used to be)
 #   flashing a slot       blue  blink fast (stock: all three blink)
 #
 # The channels are named <function>:<color> by the LED core, so they are looked
@@ -16,16 +16,16 @@
 # script. All three are active-low, which the LED core already inverts.
 . /lib/functions.sh
 
-up_ms=200
-off_ms=200
-pulse_on=120
-pulse_off=1880
+up_ms=600
+off_ms=600
+pulse_on=0
+pulse_off=0
 
 find_led() {
 	local want=$1 l
 	for l in /sys/class/leds/*; do
 		case "${l##*/}" in
-		*":$want") echo "$l"; return 0 ;;
+		*":$want"|"$want":*) echo "$l"; return 0 ;;
 		esac
 	done
 	return 1
@@ -74,7 +74,7 @@ while :; do
 	if upgrading; then
 		state "$red" off; state "$green" off; state "$blue" blink
 	elif online; then
-		state "$red" off; state "$green" pulse; state "$blue" off
+		state "$red" off; state "$green" on; state "$blue" off
 	elif [ "$(cut -d' ' -f1 /proc/uptime | cut -d. -f1)" -lt 45 ]; then
 		state "$red" blink; state "$green" off; state "$blue" off
 	else

@@ -439,10 +439,32 @@ warn('cpu enable-method matches the string the compiled platsmp registers',
       ['e2631-fwslot', 'switching back to the stock slot'],
       ['uhttpd', 'the web server the UI is served from'],
       ['luci', 'the web UI itself'],
-      // Checked by name rather than by "some theme is present": apply.sh clones
-      // this package from GitHub, and the earlier failure mode of that feed
-      // handling was a build that succeeded and silently shipped no LuCI at all.
-      ['luci-theme-argon', 'the requested theme; without it the UI stays on bootstrap'],
+      // Checked by name rather than by "some theme is present": the earlier
+      // failure mode of that feed handling was a build that succeeded and
+      // silently shipped no LuCI at all. Argon is the vendored default
+      // (v1.0..v1.2's theme, kept by vendoring the source into this repo),
+      // Bootstrap the in-tree fallback.
+      ['luci-theme-argon', 'the default theme (vendored in-repo)'],
+      ['luci-theme-bootstrap', 'the official fallback theme'],
+      // v1.3: without the nft flowtable statement, fw4's flow_offloading is a
+      // no-op - the whole hardware-acceleration story rides on this package.
+      ['kmod-nft-offload', 'the nft flowtable statement fw4 compiles into'],
+      // v1.3: the userdata extroot tooling (ubiformat/ubiattach/ubimkvol) and
+      // the block-mount machinery the fstab gate runs through.
+      ['ubi-utils', 'userdata extroot initialization'],
+      ['block-mount', 'the fstab/extroot machinery'],
+      // v1.3: the ZTE mesh controller and its LuCI page (vendored from
+      // cnjn/zte-mesh). A missing kmod-veth means the sandbox cannot attach.
+      ['zte-mesh', 'the sandboxed ZTE multiapd controller'],
+      ['luci-app-zte-mesh', 'the LuCI page for the mesh controller'],
+      // v1.3: the board page (slots / online update / switch back to stock)
+      ['luci-app-e2631', 'the E2631 board page in LuCI'],
+      ['kmod-veth', 'the veth pair the mesh sandbox attaches with'],
+      // v1.3: https for the online updater; the mtd tool parks/restores the
+      // config backup on userdata; without it an update drops settings.
+      // (the ustream package carries the mbedtls version in its name)
+      ['libustream-mbedtls20201210', 'https for e2631-upgrade'],
+      ['mtd', 'erase/write for the config backup on userdata'],
       // The chip is an MT7916: mt7915e binds it but requests mt7916_wa/wm/
       // rom_patch.bin, which only kmod-mt7916-firmware installs. Shipping the
       // mt7915 set instead looks like a dead radio with no error anywhere else.

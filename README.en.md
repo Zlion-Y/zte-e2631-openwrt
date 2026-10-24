@@ -119,12 +119,39 @@ without ever extracting into it, so it reported whatever the previous run had le
 it now extracts first. Any "what is really in the rootfs" answer that comes from a
 directory you did not just unpack is a stale answer.
 
-## Status on the real board (2026-10-14, slot 1 = `e2631-openwrt-gen1.bin`)
+## Status on the real board (2026-10-24, v1.3; the v1.2 notes are kept below)
 
-Current package: Release **`v1.2`** -- `e2631-openwrt-v1.2.bin`, 20,972,052 B, sha256
+Current package: Release **`v1.3`** -- the theme is "from flashable to usable", with the evidence
+chain for every item in [docs/known-issues.md](docs/known-issues.md):
+
+1. **Flow offloading on by default (hardware acceleration)**: the v1.2 ceiling of 305/190 Mbit/s
+   was never a missing engine -- the gmac driver has carried the PPE hardware path
+   (`zx279128s-ppe.c`, TC_SETUP_FT) all along; what was missing is the nft flowtable statement
+   package and the firewall switch.  v1.3 ships `kmod-nft-offload` plus
+   `flow_offloading=1` (and hw), and defaults RPS/XPS, IRQ affinity and PAUSE-frame
+   advertisement off (that last one traced to an upload ceiling on the sibling ZX279133 port,
+   right.com.cn thread-8486503).  Known limits: PPPoE may not take the hardware path; the PPE
+   table holds 384 entries, overflow falls back to software.
+2. **Wi-Fi autoload on by default**: sequencing and recovery from tigaotg's handoff PR#1
+   (verified on this hardware: dual-band auto-broadcast, SSID/key change survives reboot).
+   First boot provisions WPA2-PSK (key derived from the unit MAC, printed on the console),
+   never an open network.  Opt out with `/etc/e2631-wifi-noautoload`.  The association
+   hard-hang stays open (see known-issues).
+3. **47 MiB userdata partition (optional extroot, triple-gated)**: the window
+   0x3f00000..0x6e00000 is free in every vendor version checked (all four upgrade packages
+   declare identical slot tables; the stock kernel declares nothing beyond 0x2fc0000; the
+   programmer dump shows 0x3cc0000..0x72c0000 erased).  preinit only attaches the UBI; the
+   activation gate requires a real UBIFS superblock before enabling the fstab mount (boot can
+   never format the volume); the initializer needs an explicit E2631_CONFIRM.
+4. **The diagnostic heartbeat is opt-in** (`touch /etc/e2631-hb-enable` restores it); LuCI moves
+   to the official Bootstrap theme (apply.sh no longer clones a third-party repo).
+
+### The v1.2 wording, kept for its measured numbers
+
+`v1.2` -- `e2631-openwrt-v1.2.bin`, 20,972,052 B, sha256
 `02b35106a1259ed1aed04c35cb6b037c635b6fb68f3e2906da2931cb96d12ddc`.  Its kernel region is
 byte-identical to the `gen1` image in the table below (the one flashed and run on the box), so the
-boot path carries no new variable; everything that differs is in the rootfs:
+boot path carried no new variable; everything that differed was in the rootfs:
 
 | release | rootfs side |
 |---|---|
@@ -132,9 +159,8 @@ boot path carries no new variable; everything that differs is in the rootfs:
 | `v1.1` | adds `/sbin/e2631-wifi-ap`; the first-boot auto-revert becomes opt-in (`touch /etc/e2631-trial-arm`) |
 | `v1.2` | fixes that helper: named-section parsing (the generator writes `radioN`/`default_radioN`, not `@wifi-iface[n]`), the `+N` path suffix for a second phy on one device, and a `wifi down/up` cycle instead of a bare `wifi reload`.  Confirmed on the box: `phy1-ap0 type AP ssid E2631 channel 36 (5180 MHz)`, hostapd running, **phone sees the 5G network** |
 
-Manual radio, two commands, with the boot still silent (no `/etc/e2631-wifi-autoload`, no driver
-loaded): `/sbin/e2631-wifi-on 0` then `/sbin/e2631-wifi-ap`.  Worked on the real board; the old
-`v1.0` notes are kept only for their measured numbers, which did not change.
+Manual radio, two commands (`/sbin/e2631-wifi-on 0` then `/sbin/e2631-wifi-ap`) -- the verified
+v1.2 path, still available as the fallback.
 
 | | |
 |---|---|

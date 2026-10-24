@@ -12,6 +12,7 @@
 Windows 侧工具（`host/`），以及带证据注记的两份中文工作文档（`docs/`）。**这里已经没有 CI** ——
 构建发生在本机的 WSL 里，`make check`（跑 `wsl/check-kit.sh` 与 ash/dts 门禁）加上
 `node build/host/release.mjs` 就是原来放在 workflow 里的那些检查。
+**当前状态总览：[docs/v1.3-progress.md](docs/v1.3-progress.md)**（已完成/待办，与博客同步）。
 
     git clone --branch pr-zte-zxhn-h3600 https://github.com/Zlion-Y/openwrt-sanechips-mirror openwrt
     git -C openwrt checkout db8b8d4130457dbe46558a7cea872dd2dae539e6
@@ -88,21 +89,41 @@ musl.libc.org 在 12 秒探测窗口内一个字节都不给）。三件事让�
 于是它报的是上一轮留在那儿的东西 —— 现在它先解包。任何"根文件系统里到底有什么"的回答，
 只要来自一个你本次没有刚解出来的目录，那就是个过期答案。
 
-## 真机上的状态（2026-10-14，槽 1 = `e2631-openwrt-gen1.bin`）
+## 真机上的状态（2026-10-24，v1.3；v1.2 及更早见 git 历史）
 
-当前包：Release **`v1.2`** —— `e2631-openwrt-v1.2.bin`，20,972,052 B，sha256
-`02b35106a1259ed1aed04c35cb6b037c635b6fb68f3e2906da2931cb96d12ddc`。它的内核段与下表里那个 `gen1` 镜像
-（就是刷进板子并跑着的那一个）**逐字节相同** ⇒ 启动路径没有新变量；所有差异都在 rootfs 里：
+当前包：Release **`v1.3`** —— 主题"从能刷到能用"。相对 v1.2 的四件事，每件的证据链在
+[docs/known-issues.md](docs/known-issues.md)：
 
-| release | rootfs 侧 |
+1. **流卸载默认开启（硬件加速）**：v1.2 的 305/190 Mbit/s 封顶不是缺引擎——gmac 驱动一直带着
+   PPE 硬件流卸载（`zx279128s-ppe.c`），缺的只是 nft flowtable 语句包和防火墙开关。
+   v1.3 补齐 `kmod-nft-offload` + `flow_offloading=1`（含 hw），并默认启用 RPS/XPS、
+   IRQ 亲中和 PAUSE 帧通告关闭（后者的依据是同族 ZX279133 端口的实测，恩山 thread-8486503）。
+   已知边界：PPPoE 可能不走硬件路径；PPE 表 384 条，溢出自动回落软件路径。
+2. **Wi-Fi 开机自启（默认开启）**：时序与恢复机制来自 tigaotg 的交接 PR#1（真机验证过双频自动
+   广播、改 SSID/密码重启保留）。首次开机配 WPA2-PSK（密码由本机 MAC 派生并打印在 console），
+   绝不广播开放网络；上次启动未完成则跳过本次自启。不想要：`touch /etc/e2631-wifi-noautoload`。
+   客户端关联硬死机仍列为 open（见 known-issues）。
+3. **47 MiB userdata 分区（可选 extroot，三重门控）**：分区表新增 `userdata`
+   （0x3f00000..0x6e00000）。窗口安全性核对过三条独立证据（四包版本头槽表一致、原厂内核分区
+   止于 0x2fc0000、编程器全片 0x3cc0000..0x72c0000 擦空）。preinit 只挂 UBI；激活门读到
+   UBIFS 超级块魔数才开 fstab 挂载（**开机永不格式化**）；初始化器要显式
+   `E2631_CONFIRM=ERASE_USERDATA_PARTITION`。分区按名字发现，不依赖 mtd 编号。
+4. **心跳诊断默认关闭**（`touch /etc/e2631-hb-enable` 恢复）；Argon 主题保留为默认——
+   源码 vendor 进仓库（apply.sh 不再运行时克隆第三方仓库），Bootstrap 作后备。
+
+| | |
 |---|---|
-| `v1.0` | 第一个能刷能启的包；没有 `/sbin/e2631-wifi-ap`；600 秒 trial 保险仍会自动退回原厂槽 |
-| `v1.1` | 加上 `/sbin/e2631-wifi-ap`；首启自动回退改成需要手动武装（`touch /etc/e2631-trial-arm`） |
-| `v1.2` | 修好那个 helper：命名段解析（生成器写的是 `radioN`/`default_radioN`，不是 `@wifi-iface[n]`）、一个器件上第二条 phy 的 `+N` path 后缀、以及用 `wifi down/up` 而不是光 `wifi reload`。真机确认：`phy1-ap0 type AP ssid E2631 channel 36 (5180 MHz)`、hostapd 在跑、**手机能看到 5G** |
+| 通过原厂 `supgrade.html` 页面刷入 | **可用** —— 页面原样收下这个包，写入槽 1，serial 自己从 33 走到 34，然后重启进我们的 OpenWrt |
+| 从 OpenWrt 切回原厂系统 | **可用** —— `e2631-fwslot switch` + `reboot`，failsafe 里也够得着；LuCI 板卡页也有按钮 |
+| 在线更新（GitHub Release） | **可用** —— `e2631-upgrade run`（或 LuCI 备份/升级页"在线升级"标签）；ghproxy 加速可配 |
+| LuCI（Argon 主题、全中文）、`reboot`、LED 状态灯 | **可用** —— 启动红慢闪→联网绿常亮/未联网红常亮→联网自动切换 |
+| 有线（PPE 硬件流卸载） | **≥395 Mbps 实测、CPU 7%** —— OPPO CDN 32 线程；WAN 软件计数器不动（硬件直转铁证） |
+| Wi-Fi（MT7916） | **双频自动加载、开放 AP 首启（用户自设密码）**；5G 23dBm；关联硬死机/冷启 1/3 仍 open（有 pending 自恢复） |
 
-手动开射频，两条命令，开机仍然静默（没有 `/etc/e2631-wifi-autoload`，驱动没加载）：
-`/sbin/e2631-wifi-on 0` 然后 `/sbin/e2631-wifi-ap`。真机可用；老的 `v1.0` 注记只因为里面那些实测数字
-没变才留着。
+历史包（v1.0 首个能刷能启、v1.1 加 `e2631-wifi-ap` 并改手动武装回退、v1.2 修 wifi-ap 三个真机问题）
+的注记随 release 保留；v1.3 起手动开射频的旧流程退居后备（`e2631-wifi-on 0` + `e2631-wifi-ap` 仍可用）。
+
+### 旧状态表（v1.2 口径，留作对照）
 
 | | |
 |---|---|
@@ -168,6 +189,9 @@ nvmem MAC 接线和 JFFS2 那组补丁；它的 `tools/*.py` 筛查被重写成�
   最早那批 DTB、分区表和 flash 事实，很大一块出自这里。
 - **@cnjn** —— [linux-mainline-zte-zxslc-sr1010](https://github.com/cnjn/linux-mainline-zte-zxslc-sr1010)：
   ZX279133 的 UART 逆向与主线补丁系列，是这条线上的前序工作。E2631 的若干结论是拿它当对照才确认（或被推翻）的。
+  同作者的 [zte-mesh](https://github.com/cnjn/zte-mesh)（原厂 multiapd 沙箱化当 mesh 主控，[恩山帖](https://www.right.com.cn/forum/thread-8486503-1-1.html)）
+  自 v1.3 起以 `overlay/package/network/zte-mesh` 整体引入：PAUSE 帧压上传、PPPoE 不走硬转、JFFS2 清除标记放数据区
+  这几条同族坑也是他的实测先指出来的。
 - [openwrt.style.dev/h3600](https://openwrt.style.dev/h3600/) —— 海外的 H3600 适配记录。
   2026-10-15 抓它时返回 502，而且站内并存三套互不兼容的回退说法 ⇒ 把它当线索，不要当权威。
 - [恩山无线论坛上关于这台机器的讨论](https://www.right.com.cn/forum/thread-8487689-1-3.html) —— 中文社区那一侧的记录，

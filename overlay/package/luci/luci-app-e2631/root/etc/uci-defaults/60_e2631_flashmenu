@@ -1,0 +1,10 @@
+#!/bin/sh
+# Point 系统→备份/升级 at our flash-view fork (e2631flash.js) which adds the
+# online-update section on top of the stock backup/flash page. uci-defaults
+# run before rpcd starts, so patching the ROM file lands in the overlay as a
+# proper write and the menu picks it up on the first boot already.
+F=/usr/share/luci/menu.d/luci-mod-system.json
+if [ -f "$F" ] && grep -q '"path": "system/flash"' "$F"; then
+	sed -i 's|"path": "system/flash"|"path": "system/e2631flash"|' "$F"
+fi
+exit 0

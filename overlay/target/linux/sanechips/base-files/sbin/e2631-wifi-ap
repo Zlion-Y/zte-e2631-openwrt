@@ -99,6 +99,10 @@ if [ -z "$secs" ]; then
 		uci set "wireless.radio$n.type=mac80211"
 		uci set "wireless.radio$n.path=$devpath"
 		uci set "wireless.radio$n.channel=auto"
+		# country CN, not the mt76 default "00": the global regdomain caps every
+		# band at 20 dBm, which cost 3 dB on 5 GHz vs what the vendor ships
+		# (verified live: 20.00 -> 23.00 dBm on ch36 after the switch, 2026-10-24)
+		uci set "wireless.radio$n.country=CN"
 		uci set "wireless.radio$n.disabled=0"
 		uci -q delete "wireless.default_radio$n"
 		uci set "wireless.default_radio$n=wifi-iface"
@@ -130,8 +134,14 @@ else
 	enc_val=psk2
 fi
 
-# the wifi-device can be disabled too; clear both gates for what we are about to start
-for d in $(device_sections); do uci set "$d.disabled=0"; done
+# the wifi-device can be disabled too; clear both gates for what we are about to start.
+# country goes on BOTH paths: netifd's generator (which wrote these sections)
+# leaves it unset, and mt76 then runs the "00" global regdomain - that caps
+# every band at 20 dBm, 3 dB below what this radio ships with on 5 GHz.
+for d in $(device_sections); do
+	uci set "$d.disabled=0"
+	uci -q get "$d.country" >/dev/null || uci set "$d.country=CN"
+done
 
 for s in $secs; do
 	uci set "$s.disabled=0"

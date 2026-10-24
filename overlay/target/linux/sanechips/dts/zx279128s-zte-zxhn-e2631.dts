@@ -465,10 +465,39 @@
 				read-only;
 			};
 
+			/* Independent 47 MiB NAND data area, behind both image
+			 * slots. Safe by three independent lines of evidence
+			 * (2026-10-24): every official upgrade package from
+			 * V1.0.0.4B4 (2023) through V1.0.0.8B8 (2026) carries
+			 * the same slot table and the stock upgrader only ever
+			 * erases 0x2300000..0x3f00000; the stock kernel's own
+			 * /proc/mtd declares nothing beyond 0x2fc0000; and the
+			 * full programmer dump shows 0x3cc0000..0x72c0000
+			 * erased on this unit (the first used block beyond the
+			 * window is at 0x72c0000). Used as an optional UBI/
+			 * UBIFS extroot for /overlay - the activation gate in
+			 * /etc/init.d/e2631-userdata only lets a volume that
+			 * already carries a UBIFS superblock take over.
+			 */
+			partition@3f00000 {
+				label = "userdata";
+				reg = <0x03f00000 0x02f00000>;
+			};
+
 			/* Vendor plugin area: 0x6e00000..0x7f00000 on this board. Left
 			 * alone; it is AES-128-ECB at rest and only readable through the
 			 * vendor kernel.
 			 */
 		};
 	};
+};
+
+/* Serialize PL310 cache maintenance with protected PCIe MMIO reads; the
+ * option and the DTS flag both come from the base tree (patch 004/005,
+ * CONFIG_CACHE_L2X0_IO_LOCK=y is already in the target config).  Confirmed
+ * live by tigaotg: "L2C: serializing device reads with maintenance
+ * operations" on the console.
+ */
+&l2cc {
+	zte,l2c-io-read-lock;
 };

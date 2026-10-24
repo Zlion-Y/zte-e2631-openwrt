@@ -1,0 +1,152 @@
+#!/bin/sh
+# Automatic MT7916 bring-up, run as a procd instance from
+# /etc/init.d/e2631-wifi-load (START=95) so the boot-critical path never
+# touches the radio.  The sequencing (defer -> pending marker -> bind ->
+# wait -> provision) comes from tigaotg's handoff PR#1, verified on this
+# board: dual-band APs broadcast ~60 s after power-on and a changed SSID/
+# key survives reboot.  What this version changes on top:
+#
+#   - the first boot provisions WPA2-PSK, never an open network, and it
+#     also sets the root password (an open AP plus a passwordless LuCI is
+#     a root shell for whoever walks past);
+#   - the first-boot SSID is this unit's FACTORY name, read from the vendor
+#     "tag" partition (the pair S / S+"-5G" is unmistakable in there);
+#     "E2631" is only the fallback when no tag pair is readable;
+#   - the pending marker is only created after the deferral, so a power
+#     cut during the wait leaves no stale marker behind.
+#
+# The association hard-hang (docs/known-issues.md WIFI-ASSOC-HARD-HANG) is
+# still open: if a client kills the box, the next boot sees the pending
+# marker, skips the radio once, and the router comes back wired-only.
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+
+DEFER=${1:-25}
+PENDING=/etc/e2631-wifi-boot-pending
+PROVISIONED=/etc/e2631-wifi-provisioned
+
+log() { echo "e2631-wifi-boot: $*" > /dev/kmsg; }
+
+radio_ready() { iw phy 2>/dev/null | grep -q '^Wiphy'; }
+ap_ready()    { iw dev 2>/dev/null | grep -q 'type AP'; }
+
+# The factory WLAN name, read from the vendor "tag" partition.  The tag is a
+# per-unit record written at the factory: MAC base at +0x1e, then the shipped
+# 2.4G SSID and its 5G sibling (always <2.4G name>-5G on this family - the
+# same convention the vendor mesh uses), SN, carrier code, model.  Instead of
+# pinning byte offsets (only one tag sample was ever dumped, and entry lengths
+# vary per unit), scan the first page for a printable run S for which another
+# run equals S+"-5G": that pair cannot be anything but the two factory SSIDs.
+# Evidence: build/board/backup/mtd2-tag.bin has "ChinaNet-ygckk9" at 0x4e and
+# "ChinaNet-ygckk9-5G" at 0x6f on this unit.
+factory_ssid() {
+	tdev=""
+	for d in /sys/class/mtd/mtd[0-9]*; do
+		[ -r "$d/name" ] || continue
+		[ "$(cat "$d/name")" = "tag" ] || continue
+		tdev=/dev/mtd${d##*/mtd}
+		break
+	done
+	[ -n "$tdev" ] && [ -e "$tdev" ] || return 1
+	runs=/tmp/e2631-tag-runs.$$
+	# '\40-\176' not '[:print:]': the busybox in this image silently no-ops a
+	# complemented character CLASS (verified on the device, 2026-10-24), while
+	# an explicit octal range translates correctly - with the class form the
+	# whole factory-SSID read failed and fell back to "E2631".
+	dd if="$tdev" bs=2048 count=1 2>/dev/null | tr -c '\40-\176' '\n' | \
+		awk 'length($0) >= 4 && length($0) <= 31' > "$runs"
+	found=""
+	while read -r s1; do
+		if grep -Fqx -- "${s1}-5G" "$runs"; then found="$s1"; break; fi
+	done < "$runs"
+	rm -f "$runs"
+	[ -n "$found" ] || return 1
+	echo "$found"
+}
+
+# true when /etc/config/wireless still looks factory-made: one of the known
+# default SSIDs (including this unit's tag SSID) and no encryption a user
+# could have chosen.  Anything edited disqualifies the file, and provisioning
+# never runs again.
+factory_wireless() {
+	[ -s /etc/config/wireless ] || return 0
+	sections=$(uci -q show wireless | sed -n 's/^\(wireless\.[^=]*\)=wifi-iface$/\1/p')
+	[ -n "$sections" ] || return 0
+	fssid=$(factory_ssid)
+	for s in $sections; do
+		ssid=$(uci -q get "$s.ssid")
+		case "$ssid" in
+			''|OpenWrt|E2631|E2631-OpenWrt|"$fssid"|"$fssid-5G") ;;
+			*) return 1 ;;
+		esac
+		case "$(uci -q get "$s.encryption")" in
+			''|none|psk2) ;;
+			*) return 1 ;;
+		esac
+		case "$(uci -q get "$s.disabled")" in
+			''|1) ;;
+			*) return 1 ;;
+		esac
+	done
+	return 0
+}
+
+case "$DEFER" in ''|*[!0-9]*) exit 2 ;; esac
+
+if [ -e /etc/e2631-wifi-noautoload ]; then
+	log "automatic Wi-Fi disabled"
+	exit 0
+fi
+
+# A previous attempt never finished - it may be the one that killed the box.
+# Skip this boot, clear the marker, retry on the next one.
+if [ -e "$PENDING" ]; then
+	log "previous initialization unfinished; skipping once and clearing marker"
+	rm -f "$PENDING"
+	sync
+	exit 0
+fi
+
+log "waiting ${DEFER}s"
+sleep "$DEFER"
+
+touch "$PENDING" || exit 1
+sync
+
+if ! radio_ready; then
+	/sbin/e2631-wifi-on 0 || exit 1
+fi
+
+i=0
+until radio_ready; do
+	i=$((i + 1))
+	if [ "$i" -ge 30 ]; then
+		log "MT7916 initialization failed"
+		exit 1
+	fi
+	sleep 1
+done
+
+log "MT7916 ready"
+
+if [ ! -e "$PROVISIONED" ] && factory_wireless; then
+	SSID=$(factory_ssid) || SSID=E2631
+	# First boot provisions an OPEN network on purpose (2026-10-24 decision):
+	# no Wi-Fi key and no root/admin password are preset - the user sets both.
+	log "first boot: open network $SSID (no password)"
+	log "SECURITY: set your Wi-Fi key (Network -> Wireless) and the admin password (System -> Administration) NOW"
+	if ! /sbin/e2631-wifi-ap "$SSID" || ! ap_ready; then
+		log "setup AP did not start; run: /sbin/e2631-wifi-ap $SSID"
+		exit 1
+	fi
+	touch "$PROVISIONED" || exit 1
+else
+	# Never rewrite a user's SSID, encryption or password.
+	ubus call network reload >/dev/null 2>&1
+	wifi up >/dev/null 2>&1
+	touch "$PROVISIONED" || exit 1
+fi
+
+rm -f "$PENDING"
+sync
+log "automatic Wi-Fi initialization complete"
+exit 0

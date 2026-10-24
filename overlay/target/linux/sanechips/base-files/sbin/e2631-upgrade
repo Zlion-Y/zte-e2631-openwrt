@@ -1,0 +1,128 @@
+#!/bin/sh
+# Online updater for the E2631 port: check the GitHub releases of
+# Zlion-Y/zte-e2631-openwrt, download the factory package, verify it, and run
+# sysupgrade against it. The vendor system (slot 0) is never written by any
+# of this; see lib/upgrade/platform.sh and docs/updates.md.
+#
+#   e2631-upgrade check [file.bin]   newest release vs /etc/e2631-version
+#                                     (with a file argument: verify that file)
+#   e2631-upgrade run                download + flash slot 1 + reboot
+#   e2631-upgrade apply [file.bin]   flash an already-downloaded package
+#
+# Mirror: GitHub can be slow to reach directly; set a prefix proxy with
+#   uci set e2631.upd.mirror='https://ghproxy.example/'
+#   uci commit e2631
+# It is prepended to every https://github.com/... URL (release asset and
+# SHA256SUMS alike). The sha256 verification covers whatever actually
+# arrives, accelerated or not.
+#
+# Settings are NOT backed up anywhere on flash by design: download your
+# config archive first (System -> Backup) if you want it after the upgrade.
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+
+API=https://api.github.com/repos/Zlion-Y/zte-e2631-openwrt/releases/latest
+DLDIR=/tmp/e2631-upgrade
+
+log() { echo "e2631-upgrade: $*"; }
+die() { echo "e2631-upgrade: $*" >&2; exit 1; }
+
+# fwslot installs to /usr/sbin on this layout; resolve once, fall back hard
+E2631_FWSLOT="$(command -v e2631-fwslot 2>/dev/null)"
+[ -n "$E2631_FWSLOT" ] || E2631_FWSLOT=/usr/sbin/e2631-fwslot
+
+mirror() { # print the configured accelerator prefix, may be empty
+	local m
+	m=$(uci -q get e2631.upd.mirror || echo "")
+	case "$m" in
+	""|http://*|https://*) printf '%s' "$m" ;;
+	*) printf 'https://%s/' "$(printf '%s' "$m" | sed 's:/*$::')" ;;
+	esac
+}
+
+deref() { # deref <url>: apply the mirror to github URLs only
+	case "$1" in
+	https://github.com/*) printf '%s%s' "$(mirror)" "$1" ;;
+	*) printf '%s' "$1" ;;
+	esac
+}
+
+fetch() { # fetch <url> <outfile>
+	local u; u=$(deref "$1")
+	if command -v uclient-fetch >/dev/null 2>&1; then
+		uclient-fetch -q -O "$2" "$u" || return 1
+	elif command -v wget >/dev/null 2>&1; then
+		wget -q -O "$2" "$u" || return 1
+	else
+		log "no https-capable downloader (install libustream-*)"
+		return 1
+	fi
+}
+
+latest() { # prints "tag asset-url"
+	mkdir -p "$DLDIR"
+	fetch "$API" "$DLDIR/rel.json" || return 1
+	tag=$(sed -n 's/.*"tag_name":[[:space:]]*"\([^"]*\)".*/\1/p' "$DLDIR/rel.json" | head -1)
+	url=$(sed -n 's/.*"browser_download_url":[[:space:]]*"\([^"]*\.bin\)".*/\1/p' "$DLDIR/rel.json" | head -1)
+	[ -n "$tag" ] && [ -n "$url" ] || return 1
+	echo "$tag $url"
+}
+
+verify() { # verify <file> <expected-sha-or-empty>
+	local f=$1 want=$2 got
+	if [ -n "$want" ]; then
+		got=$(sha256sum "$f" | awk '{print $1}')
+		[ "$want" = "$got" ] || die "sha256 mismatch (want $want got $got)"
+		log "sha256 verified"
+	fi
+	$E2631_FWSLOT check "$f" >/dev/null 2>&1 || die "fwslot check rejected the package"
+	log "package ok: $f"
+}
+
+do_check() {
+	if [ -n "${1:-}" ]; then
+		verify "$1" "" && return 0
+		return 1
+	fi
+	rel=$(latest) || die "cannot reach $API (set e2631.upd.mirror for an accelerator)"
+	set -- $rel
+	cur=$(cat /etc/e2631-version 2>/dev/null || echo unknown)
+	log "running: $cur   newest release: $1"
+	[ "$1" = "$cur" ] && log "up to date" || log "update available: $1 ($2)"
+}
+
+do_download() {
+	rel=$(latest) || die "cannot reach $API (set e2631.upd.mirror for an accelerator)"
+	set -- $rel
+	tag=$1; url=$2; bin=$DLDIR/$(basename "$url")
+	log "downloading $(deref "$url")"
+	fetch "$url" "$bin" || die "download failed"
+	want=""
+	if fetch "${url%/*}/SHA256SUMS" "$DLDIR/SHA256SUMS" && [ -s "$DLDIR/SHA256SUMS" ]; then
+		want=$(grep -F "$(basename "$url")" "$DLDIR/SHA256SUMS" | awk '{print $1}')
+	fi
+	[ -n "$want" ] || log "WARN: SHA256SUMS not available, proceeding on fwslot validation alone"
+	verify "$bin" "$want"
+	echo "$tag" > /etc/.e2631-pending-version
+}
+
+do_apply() {
+	local f=${1:-}
+	[ -n "$f" ] || f=$(ls -t "$DLDIR"/*.bin 2>/dev/null | head -1)
+	[ -n "$f" ] && [ -s "$f" ] || die "no package: run 'e2631-upgrade run', or 'apply <file.bin>'"
+	verify "$f" ""
+	log "settings are NOT saved by the update - download your backup first if you need it"
+	log "flashing slot 1 (the vendor slot is never touched)..."
+	if ! /sbin/sysupgrade "$f"; then
+		log "sysupgrade failed - the running image is unchanged"
+		exit 1
+	fi
+}
+
+case "${1:-}" in
+	check)    shift; do_check "$@" ;;
+	run)      do_download && do_apply ;;
+	apply)    shift; do_apply "${1:-}" ;;
+	*) echo "usage: $0 check [file.bin] | run | apply [file.bin]" >&2
+	    echo "  mirror: uci set e2631.upd.mirror='https://ghproxy.example/'" >&2
+	    exit 2 ;;
+esac

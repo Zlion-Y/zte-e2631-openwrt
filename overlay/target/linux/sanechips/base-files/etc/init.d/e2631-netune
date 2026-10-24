@@ -1,0 +1,58 @@
+#!/bin/sh /etc/rc.common
+# Dual-core load spreading for the gmac ports, applied every boot (sysfs
+# does not persist).  Three independent knobs, each with its evidence:
+#
+#  RPS/XPS to CPU1 - the gmac has one RX ring and the driver's NAPI lives on
+#    whichever core takes the IRQ (always CPU0 here).  Pushing the per-packet
+#    work to the idle core measured +4.6% before the flow offload existed;
+#    with established flows offloaded to the PPE, what remains is exactly
+#    this first-packet path, so the knob still earns its keep.
+#
+#  IRQ affinity of 92000000.ethernet to CPU1 - measured on this board:
+#    pinning alone did not move the rate, but with RPS on the same core the
+#    softirq stays local to the IRQ instead of bouncing.
+#
+#  PAUSE frames off - the sibling ZX279133 port (cnjn, right.com.cn
+#    thread-8486503) traced a hard upload ceiling to flow-control frames
+#    from the switch; their stock kernel had them off on WAN only, ours has
+#    them on everywhere.  Disabling the advertisement costs one renegotiation
+#    at boot and removes a known failure mode of this PHY family.
+#
+#  GRO on - the driver already feeds napi_gro_receive(); this only makes the
+#    intent explicit and survives any future default change.
+START=20
+USE_PROCD=0
+
+PORTS="lan1 lan2 lan3 wan"
+
+tune_port() {
+	local ifn=$1
+	[ -d "/sys/class/net/$ifn" ] || return 0
+	for q in "/sys/class/net/$ifn/queues/rx-"*; do
+		[ -d "$q" ] || continue
+		echo 2 > "$q/rps_cpus" 2>/dev/null
+		echo 256 > "$q/rps_flow_cnt" 2>/dev/null
+	done
+	for q in "/sys/class/net/$ifn/queues/tx-"*; do
+		[ -d "$q" ] || continue
+		echo 2 > "$q/xps_cpus" 2>/dev/null
+	done
+	if command -v ethtool >/dev/null 2>&1; then
+		ethtool -A "$ifn" rx off tx off 2>/dev/null
+		ethtool -K "$ifn" gro on 2>/dev/null
+	fi
+}
+
+start() {
+	# RPS needs the flow table steering entries to have a home
+	[ -w /proc/sys/net/core/rps_sock_flow_entries ] && \
+		echo 1024 > /proc/sys/net/core/rps_sock_flow_entries 2>/dev/null
+
+	for p in $PORTS; do tune_port "$p"; done
+
+	# the gmac IRQ, by name, wherever it landed
+	irq=$(grep -m1 '92000000.ethernet' /proc/interrupts 2>/dev/null | sed 's/:.*//;s/^ *//')
+	if [ -n "$irq" ] && [ -w "/proc/irq/$irq/smp_affinity" ]; then
+		echo 2 > "/proc/irq/$irq/smp_affinity" 2>/dev/null
+	fi
+}

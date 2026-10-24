@@ -1,0 +1,18 @@
+{
+	"luci-app-e2631": {
+		"description": "Grant access to E2631 board operations (slot info, online update, switch back to stock)",
+		"read": {
+			"ubus": {
+				"e2631": [ "slots", "check" ],
+				"luci": [ "getInitList" ]
+			},
+			"uci": [ "e2631" ]
+		},
+		"write": {
+			"ubus": {
+				"e2631": [ "switch", "run" ]
+			},
+			"uci": [ "e2631" ]
+		}
+	}
+}

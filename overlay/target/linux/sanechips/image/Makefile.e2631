@@ -33,8 +33,24 @@ define Device/zte_zxhn-e2631
   # The radio is an MT7916AN + MT7976DN (Filogic 630): the mt7915e driver binds
   # it (its id table carries 14c3:7906/790a), but the firmware it asks for is the
   # mt7916_*.bin set, not mt7915_*.bin - hence kmod-mt7916-firmware here.
+  # kmod-nft-offload adds the nft flowtable statement fw4 needs for
+  # firewall flow offloading; with it the driver's PPE path
+  # (zx279128s-ppe.c) forwards established flows without the CPU.  ubi-utils
+  # + block-mount carry the userdata extroot tooling.
+  # zte-mesh + luci-app-zte-mesh (vendored from cnjn/zte-mesh): the ZTE
+  # multiapd controller in a sandbox, so factory-firmware ZTE child routers
+  # can mesh off this box. The ARM32 vendor binary runs natively on this
+  # Cortex-A9; the service ships DISABLED (see the package's config).
+  # Argon (v1.0..v1.2's default theme) is VENDORED at
+  # overlay/package/luci/luci-theme-argon since v1.3: same theme, but no
+  # GitHub clone at apply time. Bootstrap stays in the list as the fallback.
   DEVICE_PACKAGES := kmod-mt7915e kmod-mt7916-firmware e2631-fwslot \
-	luci luci-i18n-base-zh-cn luci-proto-ppp luci-app-ttyd ttyd luci-theme-argon
+	kmod-nft-offload ubi-utils block-mount \
+	zte-mesh luci-app-zte-mesh \
+	luci-app-e2631 \
+	libustream-mbedtls \
+	luci luci-i18n-base-zh-cn luci-proto-ppp luci-app-ttyd ttyd \
+	luci-theme-argon luci-theme-bootstrap
   # The factory package needs an official package as its version-header
   # template, and those are not redistributed, so it is only built when
   # CONFIG_E2631_VENDOR_TEMPLATE names one. CI leaves it empty and gets

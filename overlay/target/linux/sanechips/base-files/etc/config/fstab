@@ -1,0 +1,20 @@
+config global
+	option anon_swap '0'
+	option anon_mount '0'
+	option auto_swap '1'
+	option auto_mount '1'
+	option delay_root '5'
+	option check_fs '0'
+
+# The 47 MiB userdata extroot.  ROM default is DISABLED on purpose: mounting
+# an unformatted UBI volume read-write would silently auto-format it
+# (UBIFS create_default_filesystem on first mount), so the activation gate in
+# /etc/init.d/e2631-userdata flips this to 1 only after the volume was seen
+# to carry a real UBIFS superblock.  Until then the router runs on the
+# internal jffs2 overlay, and booting never formats anything.
+config mount 'e2631_extroot'
+	option device '/dev/ubi0_0'
+	option target '/overlay'
+	option fstype 'ubifs'
+	option options 'rw'
+	option enabled '0'

@@ -1,0 +1,48 @@
+#!/bin/sh
+# E2631: attach the userdata UBI before mount_root, so an already-formatted
+# extroot can be picked up.  Never formats, erases or creates volumes here.
+#
+# Robustness rules this version adds over the PR#1 original:
+#   - the partition is found by NAME, not by a hardcoded mtd number (the
+#     rootfs_data split shifts numbering; mtd10 today is not a promise);
+#   - offset/size are validated against the physical flash (the window must
+#     sit behind both image slots and inside the chip) instead of comparing
+#     against one build's constant;
+#   - if no UBI is attachable the hook exits silently - boot continues on
+#     the internal overlay.
+
+e2631_userdata_mtd() {
+	# prints the mtd index of the userdata partition, nothing if absent
+	for d in /sys/class/mtd/mtd[0-9]*; do
+		[ -r "$d/name" ] || continue
+		[ "$(cat "$d/name")" = "userdata" ] || continue
+		echo "${d##*/mtd}"
+		return 0
+	done
+	return 1
+}
+
+e2631_userdata_preinit() {
+	idx=$(e2631_userdata_mtd) || return 0
+	base=/sys/class/mtd/mtd$idx
+	off=$(cat "$base/offset" 2>/dev/null) || return 0
+	size=$(cat "$base/size" 2>/dev/null) || return 0
+	total=$(cat /sys/class/mtd/mtd0/size 2>/dev/null || echo 0)
+
+	# the declared window must be behind both 28 MiB image slots and fit
+	# inside the chip - anything else is a partition-table change we did
+	# not sanction, and the safest answer is to not touch it
+	[ "$off" -ge 0 ] || return 0
+	[ "$((off + size))" -le "$total" ] || return 0
+	[ "$off" -ge 66384896 ] || return 0   # 0x3f00000: end of slot B
+
+	if ! grep -qs "^$idx\$" /sys/class/ubi/ubi[0-9]*/mtd_num 2>/dev/null; then
+		ubiattach -d 0 /dev/ubi_ctrl -m "$idx" >/dev/null 2>&1 || return 0
+	fi
+
+	[ "$(cat /sys/class/ubi/ubi0/mtd_num 2>/dev/null)" = "$idx" ] || return 0
+	[ "$(cat /sys/class/ubi/ubi0_0/name 2>/dev/null)" = "userdata" ] || return 0
+	return 0
+}
+
+boot_hook_add preinit_main e2631_userdata_preinit

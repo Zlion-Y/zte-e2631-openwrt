@@ -1,0 +1,60 @@
+#!/bin/sh /etc/rc.common
+# Extroot activation gate for the 47 MiB userdata partition.
+#
+# The ROM fstab ships with the extroot mount DISABLED, because a read-write
+# mount of an unformatted UBI volume would auto-format it (UBIFS
+# create_default_filesystem).  This script is the one place that ever flips
+# the mount on, and it does so only when the volume carries a real UBIFS
+# superblock:
+#
+#   /sbin/e2631-userdata-init    (explicit, confirmed) formats the volume;
+#   next boot 79_e2631_userdata  attaches the UBI device in preinit;
+#   this script reads 4 bytes of the volume - "06 10 18 31" is the UBIFS
+#   node magic - and only then commits fstab enabled=1;
+#   the boot after that mounts it as /overlay (extroot).
+#
+# One boot of latency, in exchange for "booting can never format anything".
+START=11
+USE_PROCD=0
+
+vol_device() {
+	idx=""
+	for d in /sys/class/mtd/mtd[0-9]*; do
+		[ -r "$d/name" ] || continue
+		if [ "$(cat "$d/name")" = "userdata" ]; then idx=${d##*/mtd}; break; fi
+	done
+	[ -n "$idx" ] || return 1
+	[ "$(cat /sys/class/ubi/ubi0/mtd_num 2>/dev/null)" = "$idx" ] || return 1
+	[ "$(cat /sys/class/ubi/ubi0_0/name 2>/dev/null)" = "userdata" ] || return 1
+	[ -e /dev/ubi0_0 ] || return 1
+	echo /dev/ubi0_0
+}
+
+ubifs_formatted() {
+	# UBIFS superblock node magic at LEB 0 offset 0 (bytes 06 10 18 31).
+	# md5sum, not od/hexdump: this image's busybox ships neither applet.
+	dev=$(vol_device) || return 1
+	[ "$(dd if="$dev" bs=4 count=1 2>/dev/null | md5sum | cut -c1-32)" = "2c877f7819b017ca63cb0a53e3b12ca3" ]
+}
+
+active() { grep -qs ' /overlay .*ubifs' /proc/mounts; }
+
+start() {
+	if active; then
+		echo "e2631-userdata: extroot is the live /overlay" > /dev/kmsg
+		return 0
+	fi
+	if ! ubifs_formatted; then
+		# not an error: the internal jffs2 overlay stays in charge
+		echo "e2631-userdata: no formatted volume, staying on the internal overlay (to adopt the 47 MiB partition run /sbin/e2631-userdata-init)" > /dev/kmsg
+		return 0
+	fi
+	cur=$(uci -q get fstab.e2631_extroot.enabled)
+	if [ "$cur" = "1" ]; then
+		echo "e2631-userdata: volume ready and enabled; extroot engages on this boot" > /dev/kmsg
+		return 0
+	fi
+	uci set fstab.e2631_extroot.enabled='1'
+	uci commit fstab
+	echo "e2631-userdata: formatted volume found, extroot enabled - it takes over /overlay on the NEXT boot" > /dev/kmsg
+}

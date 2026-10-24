@@ -1,0 +1,108 @@
+#!/bin/sh
+# Guarded, explicit initializer for the userdata UBI/UBIFS volume.
+#
+#   e2631-userdata-init --plan    show every check and the exact commands
+#   E2631_CONFIRM=ERASE_USERDATA_PARTITION e2631-userdata-init --apply
+#
+# Destructive by design, but only after six checks pass and a per-run
+# environment confirmation names the operation.  After it succeeds, the
+# activation gate (/etc/init.d/e2631-userdata) picks the volume up on the
+# NEXT boot - nothing here mounts or activates anything.
+#
+# Guard lineage: the checks and staged-abort structure come from tigaotg's
+# PR#1 prototype (nine isolated mock tests); this version resolves the
+# partition by name instead of a hardcoded mtd10/49283072.
+
+set -u
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+
+FATAL="REFUSE:"
+die() { echo "$FATAL $*"; exit 1; }
+die_noformat() { echo "$FATAL $* (nothing was written)"; exit 1; }
+
+MODE=${1:-}
+[ "$MODE" = "--plan" ] || [ "$MODE" = "--apply" ] || die "usage: $0 --plan | --apply (needs E2631_CONFIRM=ERASE_USERDATA_PARTITION)"
+
+if [ "$(id -u)" != 0 ]; then die "must run as root"; fi
+
+# 1. the partition, by name
+idx=""
+for d in /sys/class/mtd/mtd[0-9]*; do
+	[ -r "$d/name" ] || continue
+	if [ "$(cat "$d/name")" = "userdata" ]; then idx=${d##*/mtd}; break; fi
+done
+[ -n "$idx" ] || die_noformat "no partition named userdata"
+
+base=/sys/class/mtd/mtd$idx
+off=$(cat "$base/offset") || die_noformat "cannot read $base/offset"
+size=$(cat "$base/size") || die_noformat "cannot read $base/size"
+
+# 2. it must be the 47 MiB window behind both image slots (>= 0x3f00000)
+[ "$off" -ge 66384896 ] || die_noformat "mtd$idx starts at $off, expected >= 0x3f00000 - refusing to touch another layout"
+
+# 3. not mounted, and no UBI currently attached to it
+grep -qs "^/dev/mtd$idx " /proc/mounts && die_noformat "mtd$idx is mounted"
+for u in /sys/class/ubi/ubi[0-9]*; do
+	[ -r "$u/mtd_num" ] || continue
+	if [ "$(cat "$u/mtd_num")" = "$idx" ]; then
+		die_noformat "UBI $(basename "$u") is already attached to mtd$idx - detach it first (ubidetach -d 0)"
+	fi
+done
+
+# 4. the block device exists
+[ -e "/dev/mtd$idx" ] || die_noformat "no /dev/mtd$idx node"
+
+# 5. the confirmation names the operation
+if [ "${E2631_CONFIRM:-}" != "ERASE_USERDATA_PARTITION" ]; then
+	die "set E2631_CONFIRM=ERASE_USERDATA_PARTITION to erase and format mtd$idx ($size bytes)"
+fi
+[ "$MODE" = "--apply" ] || { echo "PLAN: all checks passed; with --apply, mtd$idx would be ubiformat'ed, UBI0 attached and a 'userdata' volume created"; exit 0; }
+
+# 6. the content is one of: erased, or already ours
+sum=$(sha256sum "/dev/mtd$idx" 2>/dev/null | cut -d' ' -f1) || die_noformat "cannot read /dev/mtd$idx"
+# first erase block all-0xFF? md5 of 4096 x 0xFF - od/hexdump do not exist in
+# this image's busybox, md5sum does
+allff=$(dd if="/dev/mtd$idx" bs=4096 count=1 2>/dev/null | md5sum | cut -c1-32)
+if [ "$allff" != "6ae59e64850377ee5470c854761551ea" ]; then
+	echo "NOTE: mtd$idx is not fully erased (sha256 $sum)."
+	echo "      Continuing destroys whatever a previous system left there."
+	echo "      The 2026-10 programmer-dump audit says nothing vendor-side has ever"
+	echo "      lived in this window, but verify on YOUR unit before proceeding."
+	printf 'type ERASE_USERDATA_PARTITION to proceed: '
+	read -r answer
+	[ "$answer" = "ERASE_USERDATA_PARTITION" ] || die_noformat "interactive confirmation not given"
+fi
+
+echo "APPLY: ubiformat /dev/mtd$idx -y"
+ubiformat "/dev/mtd$idx" -y || die_noformat "ubiformat failed at an early stage - see above"
+echo "APPLY: ubiattach -d 0 /dev/ubi_ctrl -m $idx"
+ubiattach -d 0 /dev/ubi_ctrl -m "$idx" || die_noformat "ubiformat succeeded but ubiattach failed; run it by hand before rebooting"
+echo "APPLY: ubimkvol /dev/ubi0 -N userdata -m"
+ubimkvol /dev/ubi0 -N userdata -m || { ubidetach -d 0 2>/dev/null; die_noformat "ubimkvol failed; UBI0 detached again"; }
+
+# Finish the format HERE, under the user's explicit confirmation, instead of
+# leaving a blank volume for some later mount to trip over.  A read-write
+# mount of an empty volume is what creates the UBIFS superblock
+# (create_default_filesystem); doing it in this script keeps that behaviour
+# out of the boot path entirely.
+mkdir -p /tmp/e2631-udfmt
+echo "APPLY: mount -t ubifs /dev/ubi0_0 /tmp/e2631-udfmt  (creates the filesystem)"
+if ! mount -t ubifs /dev/ubi0_0 /tmp/e2631-udfmt; then
+	umount /tmp/e2631-udfmt 2>/dev/null
+	die_noformat "the formatting mount failed - the volume exists but is blank; re-run this script after investigating"
+fi
+umount /tmp/e2631-udfmt
+rmdir /tmp/e2631-udfmt
+
+if [ "$(dd if=/dev/ubi0_0 bs=4 count=1 2>/dev/null | md5sum | cut -c1-32)" != "2c877f7819b017ca63cb0a53e3b12ca3" ]; then
+	die_noformat "volume formatted but the UBIFS superblock is not readable back"
+fi
+
+cat <<EOF
+DONE: the 47 MiB userdata volume is formatted and verified.
+      Reboot: preinit attaches it, the activation gate sees the superblock
+      and enables the extroot fstab entry, and from the boot after that
+      /overlay lives on this volume (~35 MiB writable instead of ~8 MiB).
+      No configuration is migrated automatically - the internal overlay
+      keeps working as the fallback either way.
+EOF

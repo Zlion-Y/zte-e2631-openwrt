@@ -1,0 +1,28 @@
+#!/bin/sh
+# Turn firewall flow offloading on by default (v1.3).
+#
+# The image has carried kmod-nf-flow since v1.2 and the gmac driver has had
+# the PPE hardware path (zx279128s-ppe.c, TC_SETUP_FT) all along - what was
+# missing is the nft flowtable statement (kmod-nft-flow-offload) and these
+# two firewall options.  With them, fw4 installs an nft flowtable; the
+# driver accepts the flow block and established IPv4 TCP/UDP flows are
+# forwarded by the packet processor without the CPU.
+#
+# flow_offloading_hw: if the PPE ever refuses the flow block, fw4 falls back
+# to the software flowtable - either way the per-packet netfilter walk for
+# established flows is gone, which is what the 305/190 Mbit/s ceiling was.
+#
+# Known limits carried over from the sibling ZX279133 port (right.com.cn
+# thread-8486503) until this board measures its own numbers:
+#  - PPPoE flows may not take the hardware path - if your WAN is PPPoE and
+#    throughput looks software-bound, test with `fw4 check` output and
+#    iperf over a plain IP uplink;
+#  - the PPE hash table is small (384 entries on this driver); overflow
+#    flows fall back to software gracefully (driver counters: ppe_add_skip,
+#    ppe_add_fail, under /sys/kernel/debug/...).
+uci -q batch <<-EOF
+	set firewall.@defaults[0].flow_offloading='1'
+	set firewall.@defaults[0].flow_offloading_hw='1'
+	commit firewall
+EOF
+exit 0

@@ -1,0 +1,40 @@
+#!/bin/sh
+# Keep the queue tuning applied across link/firewall events. The queue
+# rps/xps settings get reset to the driver default (rps_cpus=1, CPU0) when
+# the flowtable rebinds - which happens on every firewall reload, and fw4
+# reloads on every ifup (procd interface trigger). The sequence observed on
+# the device: ifup -> this hotplug sets 2 -> fw4 reload resets it to 1, one
+# to three seconds later. So re-apply DELAYED, twice, to be the last writer.
+# The writes are INLINE (not via /etc/init.d, whose rc.common/procd path
+# fails silently in hotplug context).
+
+[ "$ACTION" = ifup ] || exit 0
+
+case "$INTERFACE" in
+lan|wan) ;;
+*) exit 0 ;;
+esac
+
+(
+	sleep 4
+	for ifn in lan1 lan2 lan3 wan; do
+		[ -d "/sys/class/net/$ifn" ] || continue
+		for q in /sys/class/net/$ifn/queues/rx-*; do
+			[ -d "$q" ] || continue
+			echo 2 > "$q/rps_cpus" 2>/dev/null
+			echo 256 > "$q/rps_flow_cnt" 2>/dev/null
+		done
+		for q in /sys/class/net/$ifn/queues/tx-*; do
+			[ -d "$q" ] || continue
+			echo 2 > "$q/xps_cpus" 2>/dev/null
+		done
+	done
+	sleep 5
+	for ifn in lan1 lan2 lan3 wan; do
+		[ -d "/sys/class/net/$ifn" ] || continue
+		for q in /sys/class/net/$ifn/queues/rx-*; do
+			[ -d "$q" ] || continue
+			echo 2 > "$q/rps_cpus" 2>/dev/null
+		done
+	done
+) &

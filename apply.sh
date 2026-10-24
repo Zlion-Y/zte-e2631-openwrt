@@ -36,11 +36,20 @@ cp "$HERE/tools/mkfactory.mjs" "$TREE/tools/e2631-mkfactory.mjs"
 # is not executable.
 for f in sbin/e2631-probe sbin/e2631-trial sbin/e2631-commit sbin/e2631-leds sbin/e2631-hb \
 	 sbin/e2631-linkspeed sbin/e2631-wifi-on sbin/e2631-wifi-ap sbin/e2631-fwstate \
+	 sbin/e2631-wifi-boot sbin/e2631-upgrade sbin/e2631-netune-apply \
+	 sbin/e2631-userdata-status sbin/e2631-userdata-firstboot sbin/e2631-userdata-init \
 	 etc/init.d/e2631-trial etc/init.d/e2631-wifi-eeprom etc/init.d/e2631-wifi-load \
-	 etc/init.d/e2631-leds etc/init.d/e2631-hb \
+	 etc/init.d/e2631-leds etc/init.d/e2631-hb etc/init.d/e2631-userdata \
+	 etc/init.d/e2631-netune \
+	 lib/upgrade/platform.sh \
 	 etc/hotplug.d/firmware/11-mt76-caldata; do
 	chmod +x "$TREE/target/linux/sanechips/base-files/$f"
 done
+
+# rc.d enablement deliberately ships NO "S95..." files: a Windows checkout of
+# this repository cannot hold symlinks (the file becomes regular text and rcS
+# would execute it), and rootfs.mk already auto-enables every init script that
+# carries a START= line - the mechanism the v1.2 services rely on.
 
 # Only two feeds matter for this board: packages (kmod-mt7915e, ttyd) and luci.
 # Cloning routing/telephony/video costs several minutes of every local build and
@@ -51,18 +60,10 @@ if [ -f "$TREE/feeds.conf.default" ]; then
 	rm -f "$TREE/feeds.conf"
 fi
 
-# The Argon theme is not in any official feed, and its Makefile is a plain
-# luci.mk package, so it goes in as a local package. It ships
-# root/etc/uci-defaults/30_luci-theme-argon, which sets main.mediaurlbase; that
-# runs before luci-base's 30_luci-theme-bootstrap, and bootstrap only writes the
-# option when it is still unset, so Argon stays the default.
-# Deliberately not silently skipped if the clone fails: DEVICE_PACKAGES names the
-# package, so the build stops with a clear error instead of shipping bootstrap.
-if [ ! -e "$TREE/package/luci-theme-argon/Makefile" ]; then
-	git clone -q --depth 1 --single-branch -b master \
-		https://github.com/jerrykuku/luci-theme-argon "$TREE/package/luci-theme-argon" ||
-		echo "WARN: could not clone luci-theme-argon; the image build will fail on DEVICE_PACKAGES" >&2
-fi
+# v1.3: Argon is vendored at overlay/package/luci/luci-theme-argon - the same
+# default theme as v1.0..v1.2, now shipped in-repo instead of cloned from a
+# third-party GitHub repository at apply time (that clone was this script's
+# only network fetch). Bootstrap stays selected as the fallback theme.
 
 # A dead mirror is worse than a slow one: OpenWrt's curl is started with
 # --connect-timeout but no transfer watchdog, so a host that accepts the

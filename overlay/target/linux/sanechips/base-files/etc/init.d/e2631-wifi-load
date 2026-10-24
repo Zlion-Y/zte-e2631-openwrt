@@ -1,25 +1,27 @@
 #!/bin/sh /etc/rc.common
-# Load the MT7916 after boot, and only when asked to.
+# Bring the MT7916 up automatically, but outside the boot-critical path.
 #
-# Two reasons this is not done from START=05 any more:
-#  - the boot-time stall always sat inside rc.d (console died during the firmware
-#    DMA window, before ssh came up), so an unlucky boot was unrecoverable;
-#  - with the load deferred, a bad experiment costs one reboot instead of a
-#    locked-out boot.
+# Why START=95 and a 25 s deferral (both measured on this board):
+#  - the historical boot-time stall always sat inside rc.d, in the firmware
+#    DMA window, before ssh came up - an unlucky boot was unrecoverable;
+#  - with the load deferred past network/LuCI/ssh, a bad attempt costs one
+#    reboot instead of a locked-out boot, and /sbin/e2631-wifi-boot's pending
+#    marker skips the next boot's attempt entirely after an interrupted one.
 #
-# Autoload is opt-in through /etc/e2631-wifi-autoload: while the association
-# hang is still being chased, the deterministic boot is worth more than a
-# self-starting radio.  Create the file (and reboot, or run
-# /sbin/e2631-wifi-on 0 by hand) once Wi-Fi at boot is the thing under test.
+# Autoload is on by default (v1.3): the first boot provisions a WPA2 AP and
+# prints SSID and key to the console. To keep the radio off, create
+# /etc/e2631-wifi-noautoload (touch it).
 START=95
 USE_PROCD=1
-AUTOLOAD=/etc/e2631-wifi-autoload
 DEFER=${DEFER:-25}
 
 start_service() {
-	[ -e "$AUTOLOAD" ] || { echo "wifi-load: no $AUTOLOAD, radio stays off until 'e2631-wifi-on'" > /dev/kmsg; return 0; }
-	procd_open_instance wifi-load
-	procd_set_param command /sbin/e2631-wifi-on "$DEFER"
+	if [ -e /etc/e2631-wifi-noautoload ]; then
+		echo "wifi-load: autoload disabled (/etc/e2631-wifi-noautoload), radio stays off until 'e2631-wifi-on'" > /dev/kmsg
+		return 0
+	fi
+	procd_open_instance wifi-boot
+	procd_set_param command /sbin/e2631-wifi-boot "$DEFER"
 	procd_set_param stdout 1
 	procd_set_param stderr 1
 	procd_close_instance

@@ -1,0 +1,45 @@
+#!/bin/sh
+# Read-only E2631 userdata detection.  Never erase, format, attach or detach.
+# Finds the partition by name (mtd numbering shifts with the rootfs_data
+# split) and reports the state of the UBI layer on top of it.
+
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+
+find_mtd() {
+	for d in /sys/class/mtd/mtd[0-9]*; do
+		[ -r "$d/name" ] || continue
+		[ "$(cat "$d/name")" = "userdata" ] || continue
+		echo "${d##*/mtd}"
+		return 0
+	done
+	return 1
+}
+
+idx=$(find_mtd) || { echo NO_PARTITION; exit 1; }
+[ "$(cat /sys/class/mtd/mtd$idx/size 2>/dev/null)" -gt 0 ] 2>/dev/null || { echo BAD_SIZE; exit 1; }
+echo "partition: mtd$idx size=$(cat /sys/class/mtd/mtd$idx/size) offset=$(cat /sys/class/mtd/mtd$idx/offset)"
+
+for u in /sys/class/ubi/ubi[0-9]*; do
+	[ -r "$u/mtd_num" ] || continue
+	[ "$(cat "$u/mtd_num")" = "$idx" ] || continue
+
+	n=${u##*/}
+	for v in /sys/class/ubi/"$n"_[0-9]*; do
+		[ -r "$v/name" ] || continue
+		[ "$(cat "$v/name")" = "userdata" ] || continue
+
+		dev=/dev/${v##*/}
+		# md5sum, not od: this image's busybox ships neither od nor hexdump
+		if [ "$(dd if="$dev" bs=4 count=1 2>/dev/null | md5sum | cut -c1-32)" = "2c877f7819b017ca63cb0a53e3b12ca3" ]; then
+			echo "READY:$dev (formatted UBIFS)"
+		else
+			echo "VOLUME:$dev (no UBIFS superblock)"
+		fi
+		exit 0
+	done
+
+	echo UBI_ATTACHED_NO_USERDATA_VOLUME
+	exit 1
+done
+
+echo NO_UBI_ATTACHED

@@ -10,6 +10,11 @@ USE_PROCD=1
 PROG=/sbin/e2631-hb
 
 start_service() {
+	# Diagnostic beacon is opt-in: every 3 s it prints a line to the serial
+	# console and to /root/e2631-hb.log, which is exactly what you want while
+	# chasing the association hang and pure noise on a router that just works.
+	# "touch /etc/e2631-hb-enable" turns it back on.
+	[ -e /etc/e2631-hb-enable ] || return 0
 	procd_open_instance hb
 	procd_set_param command "$PROG" 3
 	procd_set_param respawn 3600 5 0

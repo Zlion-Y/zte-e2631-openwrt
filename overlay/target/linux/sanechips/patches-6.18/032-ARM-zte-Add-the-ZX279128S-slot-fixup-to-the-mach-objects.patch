@@ -1,0 +1,16 @@
+From: E2631 port
+Subject: [PATCH] ARM: zte: build the ZX279128S slot fixup
+
+Wire zx279128s-slotfix.c (shipped by the target's files/ overlay) into the
+mach-zte objects, next to the platform and platsmp objects patch 007 added.
+The fixup itself is described in the source file's header comment.
+
+--- a/arch/arm/mach-zte/Makefile
++++ b/arch/arm/mach-zte/Makefile
+@@ -3,4 +3,6 @@ obj-$(CONFIG_SOC_ZX297520V3) += zx297520v
+ obj-$(CONFIG_SOC_ZX279128S) += zx279128s.o
+ ifdef CONFIG_SMP
+ obj-$(CONFIG_SOC_ZX279128S) += platsmp-zx279128s.o
+ endif
++
++obj-$(CONFIG_SOC_ZX279128S) += zx279128s-slotfix.o
