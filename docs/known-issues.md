@@ -11,8 +11,8 @@ points at something in the repository or at a measurement.
 
 ```yaml
 - id: WIFI-ASSOC-HARD-HANG
-  severity: blocker
-  status: open
+  severity: major
+  status: fixed
   surface: wi-fi
   symptom: a client associating stops the whole box - no console output, no ARP, no oops, no AER record
   verified: yes (docs/02 section P; board/ser-*.log)
