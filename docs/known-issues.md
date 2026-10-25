@@ -16,7 +16,7 @@ points at something in the repository or at a measurement.
   surface: wi-fi
   symptom: a client associating stops the whole box - no console output, no ARP, no oops, no AER record
   verified: yes (docs/02 section P; board/ser-*.log)
-  workaround: v1.3 auto-loads the radio after boot; if the box dies the pending marker skips the radio on the next boot, so one power cycle recovers a wired-only router
+  workaround: v1.3 auto-loads the radio after boot; if the box dies the pending marker retries the bring-up on the next boot (after 120 s, since 2026-10-25), so one power cycle recovers the router with Wi-Fi
   next: staged experiment plan in task list - one variable per flash cycle
   note: tigaotg (PR#1) verified dual-band APs, SSID/key change and reboot persistence on this hardware; repeated cold starts and association stress were NOT re-run. The PL310 io-read-lock flag is in the DTS since v1.3 (dmesg confirmed live on tigaotg's build)
 - id: WIFI-COLD-BIND-HANG
@@ -25,7 +25,8 @@ points at something in the repository or at a measurement.
   surface: wi-fi
   symptom: the first firmware download after a power cycle succeeds on roughly one attempt in three
   verified: "yes (three cold boots on this exact image: hung, worked, hung)"
-  workaround: rebind (e2631-wifi-on 0 again) - it is the first attempt that is the risk
+  workaround: since 2026-10-25 e2631-wifi-boot auto-heals - a boot that finds the pending marker clears it and retries the bring-up after 120 s instead of skipping the radio, and a bind that fails cleanly (box alive, radio never ready) gets the one documented rebind (e2631-wifi-on 0 again). A hang still costs one power cycle, but recovery no longer needs a manual reboot; deployed on the live unit as /etc/e2631-wifi-boot-hotfix until a flashed build ships the same logic in /sbin
+  note: 2026-10-25 EP config-space comparison (live unit vs board/backup/vendor-ep0-config.txt) shows identical LnkCap/LnkCtl/LinkStatus - ASPM off, Gen1 x1, MPS128/MRRS512 on both - so the root cause is not EP configuration; it sits RC/PHY/driver-side, which means kernel work and a flash cycle. DevCtl differs only in the standard Linux error-reporting enable bits (ours 0x291f, vendor 0x2910)
 - id: WIFI-OFF-BY-DEFAULT
   severity: minor
   status: fixed

@@ -6,7 +6,9 @@
 #    DMA window, before ssh came up - an unlucky boot was unrecoverable;
 #  - with the load deferred past network/LuCI/ssh, a bad attempt costs one
 #    reboot instead of a locked-out boot, and /sbin/e2631-wifi-boot's pending
-#    marker skips the next boot's attempt entirely after an interrupted one.
+#    marker retries the attempt in the next boot after a grace period instead
+#    of skipping it (2026-10-25; the v1.3 skip-once kept the radio down until
+#    a human rebooted again).
 #
 # Autoload is on by default (v1.3): the first boot provisions a WPA2 AP and
 # prints SSID and key to the console. To keep the radio off, create

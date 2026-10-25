@@ -1,4 +1,15 @@
 #!/bin/sh
+# 2026-10-25: a boot that finds the pending marker no longer skips the radio
+# for the whole boot.  Skip-once turned every interrupted attempt (a hang that
+# took a power cycle, or a power cut inside the init window) into a SECOND
+# dead-WiFi boot that stayed down until a human rebooted again.  The marker is
+# now cleared and the bring-up is retried in this boot after a grace period
+# (RETRY seconds); one attempt per boot, so a bad run still costs at most one
+# power cycle.  A first bind that fails cleanly (radio never ready, box alive)
+# triggers the one rebind known-issues WIFI-COLD-BIND-HANG documents as
+# working.  Same change shipped 2026-10-25 as /etc/e2631-wifi-boot-hotfix on
+# the live unit - delete that file when flashing a build with this logic.
+#
 # Automatic MT7916 bring-up, run as a procd instance from
 # /etc/init.d/e2631-wifi-load (START=95) so the boot-critical path never
 # touches the radio.  The sequencing (defer -> pending marker -> bind ->
@@ -16,11 +27,13 @@
 #     cut during the wait leaves no stale marker behind.
 #
 # The association hard-hang (docs/known-issues.md WIFI-ASSOC-HARD-HANG) is
-# still open: if a client kills the box, the next boot sees the pending
-# marker, skips the radio once, and the router comes back wired-only.
+# believed fixed since v1.3 by the PL310 io-read-lock DTS flag; the cold-bind
+# hang stays open: if the box dies during firmware download, the power cycle
+# leaves the pending marker and the next boot retries (after RETRY s).
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
 
 DEFER=${1:-25}
+RETRY=${RETRY:-120}
 PENDING=/etc/e2631-wifi-boot-pending
 PROVISIONED=/etc/e2631-wifi-provisioned
 
@@ -91,6 +104,7 @@ factory_wireless() {
 }
 
 case "$DEFER" in ''|*[!0-9]*) exit 2 ;; esac
+case "$RETRY" in ''|*[!0-9]*) exit 2 ;; esac
 
 if [ -e /etc/e2631-wifi-noautoload ]; then
 	log "automatic Wi-Fi disabled"
@@ -98,12 +112,13 @@ if [ -e /etc/e2631-wifi-noautoload ]; then
 fi
 
 # A previous attempt never finished - it may be the one that killed the box.
-# Skip this boot, clear the marker, retry on the next one.
+# Clear the marker and make the attempt in this boot after a grace period,
+# instead of skipping the whole boot and waiting for a human to reboot again.
 if [ -e "$PENDING" ]; then
-	log "previous initialization unfinished; skipping once and clearing marker"
+	log "previous initialization unfinished; retrying in ${RETRY}s"
 	rm -f "$PENDING"
 	sync
-	exit 0
+	sleep "$RETRY"
 fi
 
 log "waiting ${DEFER}s"
@@ -112,19 +127,25 @@ sleep "$DEFER"
 touch "$PENDING" || exit 1
 sync
 
+wait_radio() {
+	i=0
+	until radio_ready; do
+		i=$((i + 1))
+		[ "$i" -lt 30 ] || return 1
+		sleep 1
+	done
+}
+
 if ! radio_ready; then
 	/sbin/e2631-wifi-on 0 || exit 1
-fi
-
-i=0
-until radio_ready; do
-	i=$((i + 1))
-	if [ "$i" -ge 30 ]; then
-		log "MT7916 initialization failed"
-		exit 1
+	if ! wait_radio; then
+		# The bind failed without hanging the box - the one case a rebind
+		# is documented to fix (known-issues WIFI-COLD-BIND-HANG).
+		log "radio not ready; rebinding once"
+		/sbin/e2631-wifi-on 0 || exit 1
+		wait_radio || { log "MT7916 initialization failed"; exit 1; }
 	fi
-	sleep 1
-done
+fi
 
 log "MT7916 ready"
 
