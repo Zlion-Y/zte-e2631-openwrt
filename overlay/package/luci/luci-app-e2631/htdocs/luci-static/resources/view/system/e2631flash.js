@@ -401,11 +401,11 @@ return view.extend({
 		const storage_size = findStorageSize(procmtd, procpart);
 		let m, s, o, ss;
 
-		m = new form.JSONMap(mapdata, _('Flash operations'));
+		m = new form.JSONMap(mapdata, _('备份与升级'));
 		m.tabbed = true;
 		m.readonly = isReadonlyView;
 
-		s = m.section(form.NamedSection, 'actions', _('Actions'));
+		s = m.section(form.NamedSection, 'actions', 'actions', '备份');
 
 
 		o = s.option(form.SectionValue, 'actions', form.NamedSection, 'actions', 'actions', _('Backup'), _('Click "Generate archive" to download a tar archive of the current configuration files.'));
@@ -456,6 +456,8 @@ return view.extend({
 		}
 
 
+		s = m.section(form.NamedSection, 'online', 'online', '升级');
+
 		o = s.option(form.SectionValue, 'actions', form.NamedSection, 'actions', 'actions', _('Flash new firmware image'),
 			has_sysupgrade
 				? _('Upload a sysupgrade-compatible image here to replace the running firmware.')
@@ -470,8 +472,6 @@ return view.extend({
 			o.onclick = L.bind(this.handleSysupgrade, this, storage_size, has_rootfs_data);
 		}
 
-
-		s = m.section(form.NamedSection, 'online', 'online', _('在线升级'));
 		s.render = (function(sec, view) {
 			return function() {
 				return form.NamedSection.prototype.render.apply(sec, arguments)
@@ -545,7 +545,7 @@ return view.extend({
 				ui.showModal('在线升级', [
 					E('p', {},
 						'将下载最新版固件、校验后刷入 OpenWrt 所在槽位并重启（原厂系统不受影响）。' + '<br>' +
-						'升级不保留设置：需要保留配置请先在"操作"页生成并下载备份档案，升级后再上传恢复。'),
+						'升级不保留设置：需要保留配置请先在"备份"页生成并下载备份档案，升级后再上传恢复。'),
 					E('div', { 'class': 'right' }, [
 						E('button', { 'class': 'btn', 'click': ui.hideModal }, '取消'),
 						' ',
@@ -661,7 +661,7 @@ return view.extend({
 				else if (d.next == sl.slot)
 					name += ' — 下次启动';
 				var desc = sl.valid
-					? (sl.version || '?') + ' · 序号 ' + (sl.serial >>> 0)
+					? (sl.version || '?') + (sl.build ? ' · 构建 ' + sl.build : '') + ' · 序号 ' + (sl.serial >>> 0)
 					: '无有效版本头';
 				if (sl.damage)
 					desc += ' · 损坏：' + sl.damage;

@@ -50,6 +50,16 @@ const run = arg('--run');
 const TEMPLATE = abs(arg('--template', envv('E2631_TEMPLATE')) || path.join(REPO, 'seed/vendor-verhdr-8b8.bin'));
 const ROOTFS_AT = arg('--rootfs-at', '0x400000');
 const HEADER_AT = arg('--header-at', '0x1400000');
+// Stamp the OpenWrt version into the 32-byte version field of the vendor header
+// (the template carries the vendor's own "V1.0.0.8B8.8000", which is what made
+// both slots read identically in the LuCI slot table). --version / E2631_VERSION
+// override; without one the template string is kept as before. The 16-byte build
+// field always gets a stamp: --build / E2631_BUILD, else today's date, so two
+// packs of the same version can be told apart on the slot page.
+const VERSION = arg('--version', envv('E2631_VERSION'));
+const _now = new Date();
+const BUILD = arg('--build', envv('E2631_BUILD')) ||
+  `${_now.getFullYear()}${String(_now.getMonth() + 1).padStart(2, '0')}${String(_now.getDate()).padStart(2, '0')}`;
 const OUT = abs(arg('--out', 'out/e2631-openwrt-factory.bin'));
 const DTS = path.join(REPO, 'overlay/target/linux/sanechips/dts/zx279128s-zte-zxhn-e2631.dts');
 const LOCAL = arg('--dir') ? abs(arg('--dir')) : '';	// a directory already holding kernel/root
@@ -156,7 +166,8 @@ if (kb.length + 32 > 0x380000)
 
 execFileSync(process.execPath, [path.join(REPO, 'tools/mkfactory.mjs'), 'pack', '--template', TEMPLATE,
   '--kernel', kernel, '--rootfs', rootfs, '--rootfs-at', ROOTFS_AT,
-  '--header-at', HEADER_AT, '--out', OUT], { stdio: 'inherit' });
+  '--header-at', HEADER_AT, '--out', OUT,
+  ...(VERSION ? ['--version', VERSION] : []), '--build', BUILD], { stdio: 'inherit' });
 
 console.log('\n--- independent verification of the package ---');
 try {
