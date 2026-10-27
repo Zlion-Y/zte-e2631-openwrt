@@ -24,6 +24,7 @@
 #include <net/flow_offload.h>
 
 #include "zx279128s-eth.h"
+#include "zx-ffe-ops.h"
 
 /* ---- Hardware flow offload ------------------------------------------ */
 
@@ -301,7 +302,7 @@ static void zx_ppe_mangle_eth(const struct flow_action_entry *act, void *eth)
 	memcpy(dest, src, act->mangle.mask ? 2 : 4);
 }
 
-static int zx_ppe_flow_add(struct zx_eth_adapter *adapter,
+int zx_ppe_flow_add(struct zx_eth_adapter *adapter,
 			   struct flow_cls_offload *f)
 {
 	struct flow_rule *rule = flow_cls_offload_flow_rule(f);
@@ -519,7 +520,7 @@ static void zx_ppe_entry_remove(struct zx_eth_adapter *adapter,
 	adapter->ppe_count--;
 }
 
-static int zx_ppe_flow_del(struct zx_eth_adapter *adapter,
+int zx_ppe_flow_del(struct zx_eth_adapter *adapter,
 			   struct flow_cls_offload *f)
 {
 	struct zx_ppe_entry *e;
@@ -534,7 +535,7 @@ static int zx_ppe_flow_del(struct zx_eth_adapter *adapter,
 }
 
 /* No packet counters: report use from the entry's hit flag */
-static int zx_ppe_flow_stats(struct zx_eth_adapter *adapter,
+int zx_ppe_flow_stats(struct zx_eth_adapter *adapter,
 			     struct flow_cls_offload *f)
 {
 	struct zx_ppe_entry *e;
@@ -738,6 +739,33 @@ static int zx_ppe_block_cb(enum tc_setup_type type, void *type_data, void *cb_pr
 		return -EOPNOTSUPP;
 
 	mutex_lock(&adapter->ppe_lock);
+#ifdef CONFIG_ZX_FFE
+	/* the FFE control plane owns learn/delete/stats when enabled - the
+	 * vendor scheme (re/ffe/NOTES.md); ppe.c stays the hardware layer */
+	if (zx_ffe_active()) {
+		const struct zx_ffe_ops *ops = zx_ffe_active();
+
+		switch (f->command) {
+		case FLOW_CLS_REPLACE:
+			ret = ops->flow_add(adapter, f);
+			break;
+		case FLOW_CLS_DESTROY:
+			ret = ops->flow_del(adapter, f);
+			break;
+		case FLOW_CLS_STATS:
+			ret = ops->flow_stats(adapter, f);
+			break;
+		default:
+			ret = -EOPNOTSUPP;
+		}
+		if (ret == -EOPNOTSUPP)
+			adapter->ppe_add_skip++;
+		else if (ret && ret != -EEXIST && ret != -ENOENT)
+			adapter->ppe_add_fail++;
+		mutex_unlock(&adapter->ppe_lock);
+		return ret;
+	}
+#endif
 	switch (f->command) {
 	case FLOW_CLS_REPLACE:
 		ret = zx_ppe_flow_add(adapter, f);

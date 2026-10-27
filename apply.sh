@@ -263,6 +263,14 @@ fi
 # the kernel-build wiring ships as patch 033 (Kconfig + Makefile obj line);
 # what is pinned here is the symbol choice in the target config.
 ZXSP_MARK="# E2631: slot-aware partition parser (see apply.sh / P0-3)"
+# The FFE control plane (ffe branch): the driver source ships in files/, the
+# kernel-build wiring ships as patch 034; the symbol choice is pinned here.
+if [ -f "$TREE/target/linux/sanechips/patches-6.18/034-zte-add-the-ZX279128S-FFE-control-plane.patch" ]; then
+	FFE_MARK="# E2631: FFE control plane (see apply.sh / ffe branch)"
+	sed -i -e "\|^$FFE_MARK\$|d" -e '/^CONFIG_ZX_FFE=y\$/d' "$CFG"
+	printf '%s\n' "$FFE_MARK" 'CONFIG_ZX_FFE=y' >> "$CFG"
+	echo "kernel config: FFE control plane on"
+fi
 if [ -f "$TREE/target/linux/sanechips/patches-6.18/033-mtd-parsers-add-ZX279128S-slot-partition-parser.patch" ]; then
 	sed -i -e "\|^$ZXSP_MARK\$|d" -e '/^CONFIG_MTD_ZX279128S_SLOTPART=y\$/d' "$CFG"
 	printf '%s\n' "$ZXSP_MARK" 'CONFIG_MTD_ZX279128S_SLOTPART=y' >> "$CFG"
@@ -350,10 +358,13 @@ assert "slot-aware partition parser wired (patch 033 + config)" \
 	bash -c "test -f '$TREE/target/linux/sanechips/patches-6.18/033-mtd-parsers-add-ZX279128S-slot-partition-parser.patch' && grep -q '^CONFIG_MTD_ZX279128S_SLOTPART=y\$' '$CFG'"
 assert "slot parser source present in files/" \
 	test -f "$TREE/target/linux/sanechips/files/drivers/mtd/parsers/zx279128s-slotpart.c"
+assert "FFE control plane wired (patch 034 + config)" \
+	bash -c "test -f '$TREE/target/linux/sanechips/patches-6.18/034-zte-add-the-ZX279128S-FFE-control-plane.patch' && grep -q '^CONFIG_ZX_FFE=y\$' '$CFG'" \
+	test -f "$TREE/target/linux/sanechips/files/drivers/net/ethernet/zte/zx279128s-ffe.c"
 assert "overlay ppe.c carries the IPv6 trap fix" \
 	grep -q 'v6 = READ_ONCE(adapter->ppe_active) || !sw' \
 	"$TREE/target/linux/sanechips/files/drivers/net/ethernet/zte/zx279128s-ppe.c"
-assert_one_line "overlay ppe.c stays a small diff over the base blob" 50 10 \
+assert_one_line "overlay ppe.c stays a small diff (trap fix + FFE seam)" 90 25 \
 	"target/linux/sanechips/files/drivers/net/ethernet/zte/zx279128s-ppe.c"
 
 if [ "$APPLY_FAILED" != 0 ]; then
