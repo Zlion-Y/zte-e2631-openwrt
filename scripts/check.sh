@@ -109,7 +109,25 @@ run "shell syntax (bash -n)" g_shell
 run "javascript (node --check)" g_js
 run "device scripts (busybox ash)" g_ash
 run "slot tool (-Werror, parse, reject)" g_slot_tool
+g_preflight() {
+	local F="$E2631_OUT/fixture/fixture.bin"
+	command -v busybox >/dev/null 2>&1 || { echo "no busybox: the preflight script is not ash-checked"; return 77; }
+	bash -n "$E2631_KIT/scripts/preflight.sh" || return 1
+	command -v gcc >/dev/null 2>&1 || { echo "no gcc: the package checks need e2631-fwslot compiled"; return 77; }
+	[ -x /tmp/e2631-fwslot-native ] || gcc -std=gnu11 -w -o /tmp/e2631-fwslot-native 		"$E2631_KIT/overlay/package/firmware/e2631-fwslot/src/e2631-fwslot.c"
+	E2631_FWSLOT_BIN=/tmp/e2631-fwslot-native
+	[ -f "$F" ] || { echo "no $F - run node tools/make_fixture.mjs $E2631_OUT/fixture"; return 77; }
+	if ! sh "$E2631_KIT/scripts/preflight.sh" "$F" --offline >/dev/null 2>&1; then
+		echo "preflight refused a valid fixture"; return 1
+	fi
+	if sh "$E2631_KIT/scripts/preflight.sh" "$E2631_OUT/fixture/fixture-broken.bin" --offline >/dev/null 2>&1; then
+		echo "preflight accepted a corrupted fixture"; return 1
+	fi
+	echo "valid fixture passes, corrupted fixture refuses"
+}
+
 run "board dts cross-reference" g_dts
+run "first-flash preflight (fixture)" g_preflight
 run "no credential shapes" g_secret
 
 [ $rc -eq 0 ] || { echo; echo "check: FAILED"; exit 1; }
