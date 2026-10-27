@@ -197,6 +197,14 @@ points at something in the repository or at a measurement.
   verified: yes (seed/e2631.config inspection)
   workaround: v1.4 selects CONFIG_PACKAGE_wireless-regdb=y; the shipped etc/config/wireless sets country CN on both radios
   note: on-air acceptance (per-channel power table, DFS CAC behaviour) needs a radio and stays unchecked under the offline-only rule
+- id: WIFI-PROVISION-HT20
+  severity: major
+  status: fixed
+  surface: wi-fi rates
+  symptom: 2.4G negotiated at most ~287 Mbit/s PHY (never the ~500 the vendor runs) and 5G lost 80 MHz rates - provisioning set NO htmode, and netifd falls back to HT20
+  verified: "yes - the v1.4 e2631-wifi-ap provisioned channel/country only; netifd's mac80211 generator defaults to HT20 without an explicit htmode. The vendor's DBDC profile is 2x2 HE40 (574 Mbit/s PHY) for 2.4G"
+  workaround: v1.5 provisions per band - 2.4G HE40 + noscan (the vendor's forced-40MHz behaviour), 5G HE80 - in both e2631-wifi-ap and the shipped /etc/config/wireless; the RF calibration itself was always the vendor's own /wlan/caldata blob (chip id 0x7916) handed over whole
+  note: rate/RSSI A/B against the vendor unit needs a flash cycle and stays unchecked under the offline-only rule; the per-rate SKU tuning inside the vendor's mt7916.dbdc.*.dat profiles is not consumed by mt76 (those files were never pulled from the vendor box - only listed)
 - id: WPAD-BASIC-DEFAULT
   severity: minor
   status: fixed

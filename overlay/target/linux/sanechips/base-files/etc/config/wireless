@@ -24,7 +24,10 @@ config wifi-device 'radio0'
 	option path 'soc/f000000.pcie/pci0000:00/0000:00:00.0/0000:01:00.0'
 	option band '2g'
 	option channel '1'
-	option htmode 'HE20'
+	# HE40 + noscan: the vendor's DBDC profile runs 2x2 HE40 (574 Mbit/s
+	# PHY); HE20 capped negotiation at ~287 and could never reach ~500M.
+	option htmode 'HE40'
+	option noscan '1'
 	option country 'CN'
 	option disabled '1'
 

@@ -103,6 +103,22 @@ if [ -z "$secs" ]; then
 		# band at 20 dBm, which cost 3 dB on 5 GHz vs what the vendor ships
 		# (verified live: 20.00 -> 23.00 dBm on ch36 after the switch, 2026-10-24)
 		uci set "wireless.radio$n.country=CN"
+		# Band profiles - the v1.4 provisioning set NO htmode, and netifd then
+		# falls back to HT20: 2.4G negotiated at most ~287 Mbit/s PHY and never
+		# reached the ~500 the vendor runs (their DBDC profile is 2x2 HE40,
+		# 574 Mbit/s PHY - the "cannot reach 500M" complaint), and 5G lost the
+		# 80 MHz rates too. phy0 (ofs 0) is Band 1 = 2.4G, phy1 (+1) Band 2 =
+		# 5G. HE40 + noscan pins the 2.4G behaviour to the vendor's forced
+		# 40 MHz; 5G runs HE80 (2x2 80 MHz). The RF calibration itself is the
+		# vendor's own (the /wlan/caldata blob, chip id 0x7916, handed to the
+		# driver through the mt7916_eeprom.bin request); what remains
+		# vendor-only is the proprietary per-rate SKU tuning in their
+		# mt7916.dbdc.*.dat profiles, which mt76 does not consume.
+		case "$ofs" in
+		0)	uci set "wireless.radio$n.htmode=HE40"
+			uci set "wireless.radio$n.noscan=1" ;;
+		*)	uci set "wireless.radio$n.htmode=HE80" ;;
+		esac
 		uci set "wireless.radio$n.disabled=0"
 		uci -q delete "wireless.default_radio$n"
 		uci set "wireless.default_radio$n=wifi-iface"
