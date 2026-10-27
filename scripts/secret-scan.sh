@@ -40,14 +40,40 @@ REGEXES=(
 PATHS=(-- 'board' 'host' 'scripts' 'tools' 'wsl' 'docs' 'overlay' 'seed' 'apply.sh' 'Makefile'
 	'README.md' 'BUILD.md' '.env.example' '.gitignore')
 
+# Allowlist (scripts/secret-allowlist.txt): one path glob per line, each with
+# its reason in the file. Path-scoped on purpose - it releases "this file is a
+# legitimate disclosure of the vendor default credential", never a shape.
+ALLOW_PATHS=()
+if [ -f scripts/secret-allowlist.txt ]; then
+	while IFS= read -r line; do
+		case "$line" in ''|\#*) continue ;; esac
+		ALLOW_PATHS+=("$line")
+	done <scripts/secret-allowlist.txt
+fi
+allowed() { # allowed <file>
+	local i
+	for i in "${!ALLOW_PATHS[@]}"; do
+		case "$1" in
+		${ALLOW_PATHS[$i]}) return 0 ;;
+		esac
+	done
+	return 1
+}
+
+
 rc=0
 for i in "${!REGEXES[@]}"; do
 	out=$(git ls-files -z -- "${PATHS[@]}" 2>/dev/null |
 		xargs -0 -r grep -nIH --color=never -E -- "${REGEXES[$i]}" 2>/dev/null | head -20)
 	[ -z "$out" ] && continue
-	echo "HIT  ${LABELS[$i]}"
-	printf '%s\n' "$out" | sed 's/^/     /'
-	rc=1
+	while IFS= read -r hit; do
+		f=${hit%%:*}
+		allowed "$f" && { echo "SKIP (allowlisted)  $hit"; continue; }
+		echo "HIT  ${LABELS[$i]}"
+		printf '%s
+' "$hit" | sed 's/^/     /'
+		rc=1
+	done <<<"$out"
 done
 
 # Then by name: the evidence files that must stay ignored, whatever they contain.

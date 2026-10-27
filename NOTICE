@@ -1,0 +1,31 @@
+NOTICE - files in this repository that are NOT covered by LICENSE (GPL-2.0-only)
+================================================================================
+
+This project's own code (the overlay, the kit scripts, the tools, the board
+scripts and the docs) is GPL-2.0-only, same as OpenWrt. The files below are
+third-party material carried in-tree under their own terms; each entry must
+match a path that exists (scripts/notice-check.sh enforces both directions).
+
+1. overlay/package/network/zte-mesh/zte-mesh-runtime.tar.gz
+   Source: vendored from cnjn/zte-mesh (upstream ships the factory multiapd).
+   Terms: proprietary ZTE binaries, marked nonshared in that package. Carried
+   for interoperation with factory ZTE child routers; same redistribution
+   posture as the vendor-materials release described in README. The service
+   ships disabled and is not built into the image by default flow.
+
+2. seed/vendor-verhdr-8b8.bin
+   Source: a 532-byte version-header slice of one official ZTE E2631 upgrade
+   package. Terms: vendor material; it is the default template the packer
+   rewrites (geometry, CRCs, version string) to produce a flashable package.
+   It carries no executable code. Basis for redistribution: functional data
+   slice required to interoperate with the vendor's own flash format; see the
+   compliance section in README.md.
+
+3. overlay/package/luci/luci-theme-argon/
+   Source: vendored from jerrykuku/luci-theme-argon (default theme since
+   v1.0; vendored in v1.3 so apply.sh clones nothing at build time).
+   Terms: Apache-2.0 OR MIT per that project's PKG_LICENSE - not GPL-2.0;
+   its own license applies. This repository does not modify its files
+   beyond packaging (Makefile + po wiring).
+
+Everything else: GPL-2.0-only, see LICENSE.
