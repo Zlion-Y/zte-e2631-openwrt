@@ -124,12 +124,16 @@ static int zx_slotpart_parse(struct mtd_info *master,
 {
 	struct zx_slotpart_part *parts = NULL;
 	struct mtd_partition *out;
-	struct zx_slotpart_in in = { .have_hdr = { 0, 0 } };
+	/* the 2x512-byte header buffers blow the 1024-byte frame budget: heap */
+	struct zx_slotpart_in *in;
 	struct zx_slotpart_out dec;
 	struct device_node *np, *flash;
 	int nr = 0, i, ret;
 	uint32_t v[2];
 
+	in = kzalloc(sizeof(*in), GFP_KERNEL);
+	if (!in)
+		return -ENOMEM;
 	flash = mtd_get_of_node(master);
 	np = flash ? of_get_child_by_name(flash, "partitions") : NULL;
 	if (np) {
@@ -137,18 +141,20 @@ static int zx_slotpart_parse(struct mtd_info *master,
 		 * zte,slot0/zte,slot1 = <base size> and zte,fs-delta /
 		 * zte,hdr-delta; defaults are this board's geometry.
 		 */
-		in.fs_delta = 0x400000;
-		in.hdr_delta = 0x1400000;
+		in->fs_delta = 0x400000;
+		in->hdr_delta = 0x1400000;
 		if (!of_property_read_u32_array(np, "zte,slot0", v, 2))
-			in.base[0] = v[0];
+			in->base[0] = v[0];
 		if (!of_property_read_u32_array(np, "zte,slot1", v, 2))
-			in.base[1] = v[0];
-		of_property_read_u32(np, "zte,fs-delta", &in.fs_delta);
-		of_property_read_u32(np, "zte,hdr-delta", &in.hdr_delta);
+			in->base[1] = v[0];
+		of_property_read_u32(np, "zte,fs-delta", &in->fs_delta);
+		of_property_read_u32(np, "zte,hdr-delta", &in->hdr_delta);
 		ret = zx_slotpart_of_parts(np, &parts);
 		of_node_put(np);
-		if (ret < 0)
+		if (ret < 0) {
+			kfree(in);
 			return ret;
+		}
 		if (ret > 0)
 			nr = ret;
 	}
@@ -167,6 +173,7 @@ static int zx_slotpart_parse(struct mtd_info *master,
 			out[i].mask_flags = zx_slotpart_fallback[i].mask;
 		}
 		*pparts = out;
+		kfree(in);
 		return nr;
 	}
 
@@ -174,16 +181,16 @@ static int zx_slotpart_parse(struct mtd_info *master,
 	for (i = 0; i < 2; i++) {
 		size_t retlen;
 
-		if (!in.base[i])
+		if (!in->base[i])
 			continue;
-		ret = mtd_read(master, in.base[i], ZX_SP_HDR_SIZE, &retlen,
-			       in.hdr[i]);
-		in.have_hdr[i] = ret == 0 && retlen == ZX_SP_HDR_SIZE;
-		if (!in.have_hdr[i])
+		ret = mtd_read(master, in->base[i], ZX_SP_HDR_SIZE, &retlen,
+			       in->hdr[i]);
+		in->have_hdr[i] = ret == 0 && retlen == ZX_SP_HDR_SIZE;
+		if (!in->have_hdr[i])
 			pr_info("slot %d header at %08x unreadable (%d)\n",
-				i, in.base[i], ret);
+				i, in->base[i], ret);
 	}
-	zx_slotpart_decide(&in, &dec);
+	zx_slotpart_decide(in, &dec);
 	pr_info("%s\n", dec.note);
 
 	if (dec.changed) {
@@ -211,6 +218,7 @@ static int zx_slotpart_parse(struct mtd_info *master,
 		while (nr--)
 			kfree(parts[nr].label);
 		kfree(parts);
+		kfree(in);
 		return -ENOMEM;
 	}
 	for (i = 0; i < nr; i++) {
@@ -220,6 +228,7 @@ static int zx_slotpart_parse(struct mtd_info *master,
 		out[i].mask_flags = parts[i].mask;
 	}
 	kfree(parts);
+	kfree(in);
 	*pparts = out;
 	return nr;
 }
