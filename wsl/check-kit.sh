@@ -19,6 +19,20 @@ FIX="$WS/out/fixture"
 gcc -std=gnu11 -Wall -Wextra -Werror -o "$BIN" "$SRC"
 echo "PASS: e2631-fwslot compiles clean with -Wall -Wextra -Werror ($(wc -c < "$BIN") B)"
 
+# P0-0: the slot decisions (install/upgrade guards, content identity) as a
+# host-side unit test - the whole state matrix, no flash device involved.
+gcc -std=gnu11 -Wall -Wextra -Werror -o /tmp/e2631-slot-decisions 	"$REPO/tests/test-slot-decisions.c"
+/tmp/e2631-slot-decisions || { echo "FAIL: slot-decision unit tests" >&2; exit 1; }
+echo "PASS: slot-decision unit tests (install/upgrade guards, identity)"
+
+# P0-0: the upgrade path in the tool itself must refuse on a host with no
+# E2631 partitions (this is what CI asserts too: upgrade-check fails closed).
+if "$BIN" upgrade-check >/dev/null 2>&1; then
+	echo "FAIL: upgrade-check accepted a host without E2631 MTD partitions" >&2
+	exit 1
+fi
+echo "PASS: upgrade-check refuses a host with no E2631 MTD partitions"
+
 if [ ! -f "$FIX/fixture.bin" ]; then
 	echo "SKIP: no $FIX/fixture.bin - run this first, from the workspace root:"
 	echo "        node build/tools/make_fixture.mjs out/fixture"

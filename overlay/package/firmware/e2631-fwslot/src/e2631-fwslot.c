@@ -22,6 +22,29 @@
  * selects it.  This is the way back to the vendor system without touching a
  * byte of its firmware body.
  *
+ * Slot roles are NOT fixed by the slot number (v1.4, checklist P0-0): cspboot
+ * boots "valid header CRC1 + higher serial, ties to slot 0", so the vendor
+ * system and OpenWrt can sit in either slot and have swapped before
+ * (known-issues ROOTFS-SLOT-ASSUMPTION, 2026-10-24).  Every write path judges
+ * the TARGET SLOT BY ITS CONTENT, read from its version header:
+ *
+ *   - "upgrade <pkg>" rewrites the RUNNING slot in place - the other slot is
+ *     the way back, so it must hold an intact vendor image (or
+ *     --no-fallback-check must accept otherwise);
+ *   - "install <pkg>" writes the OTHER slot - if that slot holds a vendor or
+ *     unidentified image it is refused unless --replace-other-system is
+ *     passed, and then the slot's first MiB is parked on userdata before any
+ *     erase (no backup, no write);
+ *   - "upgrade-check" runs the same two judgments without writing anything;
+ *     sysupgrade calls it before services go down and again from the ramfs.
+ *
+ * The identity comes from the version string the header carries: "OpenWrt"
+ * for this port (mkfactory --version since v1.3-r3), "V1.0.0." for the
+ * vendor scheme.  Anything else is treated as another system - including the
+ * pre-r3 builds of this port, which stamped the template's vendor string;
+ * for those the guard asks for --replace-other-system, which is the
+ * conservative answer.
+ *
  * Reads and writes stay inside the two slot windows.  Where the running system
  * maps a slot as one partition that partition is used; where it does not (the
  * vendor table only exposes the first 3.25 MiB of each slot) the whole-flash
@@ -37,6 +60,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #include <mtd/mtd-user.h>
 
@@ -795,16 +819,185 @@ static int cmd_check(const char *path)
 	return 0;
 }
 
-static int cmd_flash(const char *path, int want_slot, bool allow_slot0)
+/* ---- Slot identity and the two write guards (v1.4, checklist P0-0) ----- */
+
+enum slot_identity {
+	ID_EMPTY,	/* nothing that reads back as a valid header */
+	ID_VENDOR,	/* "V1.0.0.*" - the factory scheme */
+	ID_OURS,	/* "OpenWrt ..." - this port since v1.3-r3 */
+	ID_UNKNOWN,	/* a valid header of some other provenance */
+};
+
+static enum slot_identity header_identity(const uint8_t *hdr)
+{
+	if (memcmp(hdr + H_INNER_MAGIC, inner_magic, 16))
+		return ID_EMPTY;
+	if (crc32(hdr, H_CRC) != rd32(hdr, H_CRC))
+		return ID_EMPTY;
+	if (!strncmp((const char *)hdr + H_VERSION, "OpenWrt", 7))
+		return ID_OURS;
+	if (!strncmp((const char *)hdr + H_VERSION, "V1.0.0.", 7))
+		return ID_VENDOR;
+	return ID_UNKNOWN;
+}
+
+static const char *identity_name(enum slot_identity id)
+{
+	switch (id) {
+	case ID_EMPTY:   return "empty";
+	case ID_VENDOR:  return "vendor image";
+	case ID_OURS:    return "our image";
+	case ID_UNKNOWN: return "unidentified image";
+	}
+	return "unknown";
+}
+
+/* What a slot holds, decided without opening it for writing.  `intact` means
+ * the header verifies the way cspboot checks it AND the body matches the
+ * CRCs the header records.
+ */
+struct slot_state {
+	bool known;		/* a device reaches the slot at all */
+	enum slot_identity identity;
+	bool intact;
+	uint8_t hdr[VER_HDR_SIZE];
+	const char *damage;	/* slot_verify() verdict when not intact */
+};
+
+static void slot_state_read(int s, struct slot_state *st)
+{
+	struct mtd m;
+	long hpos;
+
+	memset(st, 0, sizeof(*st));
+	if (slot_open(&m, s, false) < 0)
+		return;
+	st->known = true;
+	hpos = slot_scan(&m, NULL);
+	if (hpos >= 0) {
+		mtd_read(&m, hpos, st->hdr, sizeof(st->hdr));
+		st->identity = header_identity(st->hdr);
+		st->damage = slot_verify(&m, st->hdr);
+		st->intact = st->identity != ID_EMPTY && !st->damage;
+	}
+	close(m.fd);
+}
+
+/* install writes the OTHER slot.  An empty or own-image target is free game;
+ * a vendor or unidentified one is another system - the only fallback this
+ * board has - and goes only with the explicit replace flag (and a backup,
+ * taken by the caller before the first erase).
+ */
+static const char *install_guard(const struct slot_state *target, bool replace)
+{
+	switch (target->identity) {
+	case ID_EMPTY:
+	case ID_OURS:
+		return NULL;
+	case ID_VENDOR:
+	case ID_UNKNOWN:
+		if (!replace)
+			return "target slot holds another system; pass --replace-other-system "
+			       "to overwrite it (the slot head is backed up first)";
+		return NULL;
+	}
+	return NULL;
+}
+
+/* upgrade rewrites the RUNNING slot in place.  The other slot is the only
+ * way back if this write goes bad, so it must be an intact vendor image -
+ * unless --no-fallback-check accepted otherwise explicitly.
+ */
+static const char *upgrade_guard(const struct slot_state *other, bool no_check)
+{
+	if (no_check)
+		return NULL;
+	if (!other->known)
+		return "the other slot cannot be read at all, and it is the only fallback "
+		       "if this write fails; pass --no-fallback-check to accept that";
+	if (other->identity != ID_VENDOR)
+		return "the other slot does not hold a vendor image, and it is the only "
+		       "fallback if this write fails; pass --no-fallback-check to accept that";
+	if (!other->intact)
+		return "the other slot holds a vendor header but its body does not verify, "
+		       "and it is the only fallback if this write fails; "
+		       "pass --no-fallback-check to accept that";
+	return NULL;
+}
+
+/* Park a slot's first MiB on userdata before replacing another system with
+ * it.  The vendor slot is the only rollback this board has, so a replacement
+ * without a backup does not happen: any failure here is fatal to the write.
+ */
+static void backup_slot_head(struct mtd *m, int slot, uint32_t serial)
+{
+	const char *dir = getenv("E2631_BACKUP_DIR");
+	char path[512], tmp[600], line[512], mp[400];
+	uint32_t bs = m->info.erasesize;
+	uint64_t left = 1024 * 1024;
+	uint8_t *buf;
+	FILE *f;
+	size_t n;
+
+	mp[0] = 0;
+	if (!dir || !*dir) {
+		/* the mountpoint of the userdata volume, from /proc/mounts */
+		f = fopen("/proc/mounts", "r");
+		if (f) {
+			while (fgets(line, sizeof(line), f))
+				if (strstr(line, "userdata") &&
+				    sscanf(line, "%*s %399s", mp) == 1 &&
+				    strcmp(mp, "userdata"))
+					break;
+			fclose(f);
+		}
+		if (!mp[0])
+			die("userdata is not mounted, so the other system cannot be "
+			    "backed up before it is replaced; initialize userdata first "
+			    "(or set E2631_BACKUP_DIR)");
+		snprintf(path, sizeof(path), "%s/e2631-backup", mp);
+		dir = path;
+	}
+	mkdir(dir, 0755);
+	snprintf(tmp, sizeof(tmp), "%s/slot%d-serial%u-head.bin.part", dir, slot, serial);
+	snprintf(path, sizeof(path), "%s/slot%d-serial%u-head.bin", dir, slot, serial);
+	buf = malloc(left);
+	if (!buf)
+		die("out of memory");
+	memset(buf, 0xff, left);
+	for (uint64_t ofs = 0; ofs < left; ofs += bs) {
+		if (!mtd_bad(m, ofs))
+			pread(m->fd, buf + ofs, bs < left - ofs ? bs : left - ofs,
+			      slot_ofs(m, ofs));	/* read errors leave 0xff */
+	}
+	f = fopen(tmp, "wb");
+	if (!f)
+		die(tmp);
+	n = fwrite(buf, 1, left, f);
+	fclose(f);
+	free(buf);
+	if (n != left)
+		die("backup write came up short");
+	if (rename(tmp, path))
+		die("backup rename");
+	fprintf(stderr, "backed up slot %d head (1 MiB) to %s\n", slot, path);
+}
+
+/* The one write path behind install and upgrade.  `inplace` selects the
+ * RUNNING slot (upgrade); otherwise the target is the other slot, with
+ * another-system content going only through `replace` (and a backup).
+ */
+static int cmd_write(const char *path, bool inplace, int want_slot,
+		     bool replace, bool no_fallback_check)
 {
 	struct package p;
-	int target_slot, idx;
+	struct slot_state states[2];
+	int target_slot, other_slot, idx, running;
 	struct mtd m;
 	uint8_t hdr[VER_HDR_SIZE];
 	uint32_t bs, serial;
 	uint64_t ofs, left;
 	const uint8_t *src;
-	int running;
 	uint8_t *blk;
 	long hpos;
 	const char *why;
@@ -812,19 +1005,46 @@ static int cmd_flash(const char *path, int want_slot, bool allow_slot0)
 	package_load(&p, path);
 
 	running = slot_index(running_slot_offset());
+	if (inplace) {
+		if (running < 0)
+			errno = ENODEV, die("upgrade rewrites the running slot, but "
+				"cannot tell which slot is running, from /proc/cmdline or "
+				"from the rootfs partition");
+		target_slot = running;
+		other_slot = running ^ 1;
+	} else {
+		/*
+		 * The slot the running system reports is not always the slot whose bytes
+		 * it booted: after a header had been written into the wrong place, cspboot
+		 * validated slot 0's payload while recording slot 1 as the booted version,
+		 * and the derived "other slot" then pointed at the stock image. --slot
+		 * therefore exists to name the target outright.
+		 */
+		target_slot = want_slot >= 0 ? want_slot : (running < 0 ? -1 : running ^ 1);
+		other_slot = target_slot >= 0 ? target_slot ^ 1 : -1;
+		if (target_slot < 0)
+			errno = ENODEV, die("cannot tell which slot is running, from "
+				"/proc/cmdline or from the rootfs partition");
+	}
+
 	/*
-	 * The slot the running system reports is not always the slot whose bytes
-	 * it booted: after a header had been written into the wrong place, cspboot
-	 * validated slot 0's payload while recording slot 1 as the booted version,
-	 * and the derived "other slot" then pointed at the stock image. --slot
-	 * therefore exists to name the target outright.
+	 * Judge the target (install) or the fallback (upgrade) by CONTENT before
+	 * touching anything - slot roles are not fixed on this board.
 	 */
-	target_slot = want_slot >= 0 ? want_slot : (running < 0 ? -1 : running ^ 1);
-	if (target_slot < 0)
-		errno = ENODEV, die("cannot tell which slot is running, from /proc/cmdline or from the rootfs partition");
-	if (target_slot == 0 && !allow_slot0)
-		die("refusing to overwrite slot 0: this port keeps the stock firmware there, "
-		    "and flash is meant to be run from the vendor system");
+	slot_state_read(target_slot, &states[target_slot]);
+	slot_state_read(other_slot, &states[other_slot]);
+	why = inplace ? upgrade_guard(&states[other_slot], no_fallback_check)
+		      : install_guard(&states[target_slot], replace);
+	if (why) {
+		fprintf(stderr, "e2631-fwslot: slot %d currently holds: %s%s%s\n",
+			inplace ? other_slot : target_slot,
+			states[inplace ? other_slot : target_slot].known
+				? identity_name(states[inplace ? other_slot : target_slot].identity)
+				: "unreachable",
+			states[inplace ? other_slot : target_slot].intact ? " (intact)" : "",
+			states[inplace ? other_slot : target_slot].damage ? " (damaged body)" : "");
+		die(why);
+	}
 
 	idx = slot_open_or_die(&m, target_slot, true);
 	bs = m.info.erasesize;
@@ -848,6 +1068,18 @@ static int cmd_flash(const char *path, int want_slot, bool allow_slot0)
 			return 1;
 		}
 
+	/*
+	 * Replacing another system: park its head on userdata first - after the
+	 * erase below there is nothing left to back up.
+	 */
+	if (!inplace && states[target_slot].identity != ID_EMPTY &&
+	    states[target_slot].identity != ID_OURS) {
+		serial = max_serial() + 1;
+		if (rd32(states[target_slot].hdr, H_SERIAL) > serial)
+			serial = rd32(states[target_slot].hdr, H_SERIAL);
+		backup_slot_head(&m, target_slot, serial);
+	}
+
 	blk = malloc(bs);
 	if (!blk)
 		die("out of memory");
@@ -867,8 +1099,9 @@ static int cmd_flash(const char *path, int want_slot, bool allow_slot0)
 	wr32(hdr, H_NEW, 1);
 	wr32(hdr, H_CRC2, crc32(hdr, H_CRC2));
 
-	fprintf(stderr, "flashing slot %d (mtd%d), serial %u, body %#x\n",
-		target_slot, idx, serial, p.body_len);
+	fprintf(stderr, "flashing slot %d (mtd%d, %s), serial %u, body %#x\n",
+		target_slot, idx, inplace ? "in-place upgrade" : "install",
+		serial, p.body_len);
 
 	erase_slot(&m);
 
@@ -898,8 +1131,8 @@ static int cmd_flash(const char *path, int want_slot, bool allow_slot0)
 	 * Read the slot back the way cspboot will: the header first, then the
 	 * kernel and root filesystem extents it records.  A mismatch means the
 	 * flash does not hold what we wrote, so this slot must not become the
-	 * one the bootloader picks: erase its header and leave slot 0 in
-	 * charge, rather than point the boot at a broken image.
+	 * one the bootloader picks: erase its header and leave the other slot
+	 * in charge, rather than point the boot at a broken image.
 	 */
 	hpos = slot_scan(&m, &serial);
 	why = "no readable version header";
@@ -913,7 +1146,7 @@ static int cmd_flash(const char *path, int want_slot, bool allow_slot0)
 		fprintf(stderr,
 			"e2631-fwslot: slot %d does not read back (%s); its header is "
 			"erased, so the boot stays on slot %d\n",
-			target_slot, why, running);
+			target_slot, why, other_slot);
 		exit(1);
 	}
 
@@ -922,6 +1155,38 @@ static int cmd_flash(const char *path, int want_slot, bool allow_slot0)
 	free(p.data);
 	printf("ok: slot %d now holds serial %u; reboot to run it\n",
 	       target_slot, serial);
+	return 0;
+}
+
+/* Read-only prerequisite for sysupgrade: the running slot must be known, and
+ * the other slot must hold the intact vendor fallback an in-place upgrade
+ * relies on.  Exit code 0 prints the state; anything else refuses before
+ * sysupgrade takes the system apart.
+ */
+static int cmd_upgrade_check(void)
+{
+	struct slot_state states[2];
+	int running;
+	const char *why;
+
+	running = slot_index(running_slot_offset());
+	if (running < 0)
+		die("upgrade-check: cannot tell which slot is running, from "
+		    "/proc/cmdline or from the rootfs partition; refusing to update");
+	slot_state_read(running ^ 1, &states[running ^ 1]);
+	why = upgrade_guard(&states[running ^ 1], false);
+	if (why) {
+		fprintf(stderr, "e2631-fwslot: slot %d currently holds: %s%s%s\n",
+			running ^ 1,
+			states[running ^ 1].known
+				? identity_name(states[running ^ 1].identity)
+				: "unreachable",
+			states[running ^ 1].intact ? " (intact)" : "",
+			states[running ^ 1].damage ? " (damaged body)" : "");
+		die(why);
+	}
+	printf("ok: running slot %d with an intact vendor fallback in slot %d\n",
+	       running, running ^ 1);
 	return 0;
 }
 
@@ -1066,27 +1331,49 @@ int main(int argc, char **argv)
 	crc_init();
 	if (argc == 3 && !strcmp(argv[1], "check"))
 		return cmd_check(argv[2]);
-	if (argc >= 3 && !strcmp(argv[1], "flash")) {
-		/*
-		 * --slot names the target outright, for the case where the running
-		 * slot the system reports is not the slot whose payload it booted;
-		 * writing slot 0 still needs --allow-slot0, because that is the stock
-		 * image this port keeps for going back.
-		 */
-		int want = -1;
-		bool allow0 = false;
+	if (argc == 2 && !strcmp(argv[1], "upgrade-check"))
+		return cmd_upgrade_check();
+	if (argc >= 3 && !strcmp(argv[1], "upgrade")) {
+		/* in-place on the running slot; the other slot must hold the
+		 * intact vendor fallback unless --no-fallback-check says no. */
+		bool nofb = false;
 
 		for (int i = 3; i < argc; i++) {
-			if (!strcmp(argv[i], "--allow-slot0"))
-				allow0 = true;
+			if (!strcmp(argv[i], "--no-fallback-check"))
+				nofb = true;
+			else
+				die("unknown upgrade option; see usage");
+		}
+		return cmd_write(argv[2], true, -1, false, nofb);
+	}
+	if (argc >= 3 && (!strcmp(argv[1], "install") || !strcmp(argv[1], "flash"))) {
+		/*
+		 * install names the OTHER slot by default; --slot names the target
+		 * outright for the case where the running slot the system reports is
+		 * not the slot whose payload it booted. Replacing another system is
+		 * a decision: --replace-other-system, after a head backup. The old
+		 * --allow-slot0 named a slot number; roles are not fixed here.
+		 */
+		int want = -1;
+		bool replace = false;
+
+		for (int i = 3; i < argc; i++) {
+			if (!strcmp(argv[i], "--replace-other-system"))
+				replace = true;
+			else if (!strcmp(argv[i], "--allow-slot0"))
+				die("--allow-slot0 is gone: slot roles are not fixed on this "
+				    "board; pass --replace-other-system to overwrite whatever "
+				    "the target slot holds");
 			else if (!strcmp(argv[i], "--slot") && i + 1 < argc)
 				want = atoi(argv[++i]);
 			else
-				die("unknown flash option; see usage");
+				die("unknown install option; see usage");
 		}
 		if (want < -1 || want > 1)
 			die("--slot takes 0 or 1");
-		return cmd_flash(argv[2], want, allow0);
+		if (!strcmp(argv[1], "flash"))
+			fprintf(stderr, "e2631-fwslot: note: 'flash' is now an alias of 'install'\n");
+		return cmd_write(argv[2], false, want, replace, false);
 	}
 	if (argc == 2 && !strcmp(argv[1], "switch"))
 		return cmd_switch();
@@ -1098,17 +1385,23 @@ int main(int argc, char **argv)
 		return cmd_info(true);
 
 	fprintf(stderr,
-		"usage: e2631-fwslot check <package.bin>  verify a package without writing\n"
-		"       e2631-fwslot flash <package.bin> [--slot <0|1>] [--allow-slot0]\n"
-		"                                        write package to the inactive slot\n"
-		"       e2631-fwslot switch              verify the other slot and make it the next boot\n"
-		"       e2631-fwslot boot <0|1>          same, naming the slot explicitly\n"
-		"       e2631-fwslot info [-j]           show both slots, -j as JSON\n"
+		"usage: e2631-fwslot check <package.bin>    verify a package without writing\n"
+		"       e2631-fwslot upgrade-check         verify the in-place upgrade prerequisites\n"
+		"       e2631-fwslot upgrade <package.bin> [--no-fallback-check]\n"
+		"                                          rewrite the RUNNING slot in place\n"
+		"       e2631-fwslot install <package.bin> [--slot <0|1>] [--replace-other-system]\n"
+		"                                          write the other slot (flash = alias)\n"
+		"       e2631-fwslot switch                verify the other slot and make it the next boot\n"
+		"       e2631-fwslot boot <0|1>            same, naming the slot explicitly\n"
+		"       e2631-fwslot info [-j]             show both slots, -j as JSON\n"
 		"\n"
-		"slot 0 is the vendor system on this board layout; from OpenWrt,\n"
-		"'switch' reboots into it without rewriting a byte of its body.\n"
-		"--slot exists because the booted version a system reports is not\n"
-		"always the slot whose payload it validated; --allow-slot0 exists\n"
-		"because overwriting the stock image is a decision, not an accident.\n");
+		"Slot roles are decided by the version-header serial, not the slot\n"
+		"number: cspboot starts the valid slot with the higher serial and\n"
+		"ties go to slot 0, so either slot can hold the vendor system.\n"
+		"'upgrade' rewrites the running slot in place and demands an intact\n"
+		"vendor image in the other slot as the way back; 'install' writes\n"
+		"the other slot and refuses to destroy a vendor or unidentified\n"
+		"image there without --replace-other-system, which parks the slot\n"
+		"head on userdata before the first erase.\n");
 	return 1;
 }

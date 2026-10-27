@@ -6,12 +6,24 @@
 # a slot write must go through e2631-fwslot's bad-block-checked writer - the
 # layout cspboot selects by CRC depends on fixed offsets inside the slot.
 #
+# v1.4 (checklist P0-0): the update rewrites the RUNNING slot in place.
+# Slot roles are not fixed on this board (cspboot boots "valid header +
+# higher serial"), so "the other slot" may hold the vendor system in either
+# slot 0 or slot 1 - and the vendor image is the only way back if a write
+# goes bad. e2631-fwslot upgrade-check verifies, before anything is written:
+#   - which slot is running (from the rootfs partition's flash offset), and
+#   - that the OTHER slot holds an intact vendor image.
+# A run that cannot prove both refuses here (before services go down) and
+# again from the ramfs.  Replacing the vendor system outright is the explicit
+# "e2631-fwslot install --replace-other-system" path, not sysupgrade.
+#
 # Config preservation is DELIBERATELY download-based (2026-10-24 decision):
-# nothing outside slot 1 is ever written by an update - no parking on the
-# userdata partition, no restore. Users who want their settings back after an
-# upgrade download the archive first (System -> Backup / Flash Firmware) and
-# re-upload it on the new image. When userdata is initialized as extroot,
-# everything on it (packages, configs) survives a slot rewrite untouched.
+# nothing outside the running slot is ever written by an update - no parking
+# on the userdata partition, no restore. Users who want their settings back
+# after an upgrade download the archive first (System -> Backup / Flash
+# Firmware) and re-upload it on the new image. When userdata is initialized
+# as extroot, everything on it (packages, configs) survives a slot rewrite
+# untouched.
 
 . /lib/functions.sh
 
@@ -39,6 +51,13 @@ platform_check_image() {
 			echo "e2631-fwslot check rejected this image"
 			return 1
 		fi
+		# Fail before sysupgrade shuts down network/services: an in-place
+		# update must know its running slot and must see the intact vendor
+		# fallback in the other one.
+		if ! "$E2631_FWSLOT" upgrade-check; then
+			echo "in-place upgrade prerequisites not met (see above)"
+			return 1
+		fi
 		return 0
 		;;
 	*)
@@ -49,10 +68,17 @@ platform_check_image() {
 }
 
 platform_do_upgrade() {
-	# write OUR slot (1) through the guarded writer; slot 0 - the vendor
-	# system - is never a target. A failed write leaves the running image
-	# intact and cspboot CRC-rejects a half-written slot on the next boot.
-	if ! "$E2631_FWSLOT" flash "$1" --slot 1; then
+	# Re-check in ramfs too (covers paths that bypass the initial check),
+	# then rewrite the RUNNING slot through the guarded writer. The other
+	# slot - the vendor system, in whichever slot it lives - is never a
+	# target. A failed write leaves the running image intact and cspboot
+	# CRC-rejects a half-written slot on the next boot, falling back to the
+	# vendor slot.
+	if ! "$E2631_FWSLOT" upgrade-check; then
+		v "upgrade prerequisites not met - nothing was written"
+		exit 1
+	fi
+	if ! "$E2631_FWSLOT" upgrade "$1"; then
 		v "flash failed - the running image is unchanged"
 		exit 1
 	fi

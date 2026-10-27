@@ -1,12 +1,15 @@
 #!/bin/sh
 # Online updater for the E2631 port: check the GitHub releases of
 # Zlion-Y/zte-e2631-openwrt, download the factory package, verify it, and run
-# sysupgrade against it. The vendor system (slot 0) is never written by any
-# of this; see lib/upgrade/platform.sh and docs/updates.md.
+# sysupgrade against it. The update rewrites the RUNNING slot in place and
+# the vendor system - in whichever slot it lives - is never written; see
+# lib/upgrade/platform.sh and docs/updates.md. (Upgrade hardening adopted
+# from the zwthys-cyber fork: pinned repository, mandatory SHA256SUMS parsed
+# strictly, HTTPS-only mirrors.)
 #
 #   e2631-upgrade check [file.bin]   newest release vs /etc/e2631-version
 #                                     (with a file argument: verify that file)
-#   e2631-upgrade run                download + flash slot 1 + reboot
+#   e2631-upgrade run                download + rewrite the running slot + reboot
 #   e2631-upgrade apply [file.bin]   flash an already-downloaded package
 #
 # Mirror: GitHub can be slow to reach directly; set a prefix proxy with
@@ -20,7 +23,18 @@
 # config archive first (System -> Backup) if you want it after the upgrade.
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
 
-API=https://api.github.com/repos/Zlion-Y/zte-e2631-openwrt/releases/latest
+# Keep the tested upstream channel unless the user explicitly selects a fork
+# (uci set e2631.upd.repository='owner/repo'; zwthys-cyber's hardening).
+REPOSITORY=$(uci -q get e2631.upd.repository || echo Zlion-Y/zte-e2631-openwrt)
+case "$REPOSITORY" in
+*/?*) ;;
+*) echo "e2631-upgrade: invalid release repository" >&2; exit 1 ;;
+esac
+case "$REPOSITORY" in
+*[!A-Za-z0-9_./-]*|*..*|/*|*/|*/*/*)
+	echo "e2631-upgrade: invalid release repository" >&2; exit 1 ;;
+esac
+API=https://api.github.com/repos/$REPOSITORY/releases/latest
 DLDIR=/tmp/e2631-upgrade
 
 log() { echo "e2631-upgrade: $*"; }
@@ -34,7 +48,8 @@ mirror() { # print the configured accelerator prefix, may be empty
 	local m
 	m=$(uci -q get e2631.upd.mirror || echo "")
 	case "$m" in
-	""|http://*|https://*) printf '%s' "$m" ;;
+	""|https://*) printf '%s' "$m" ;;
+	http://*) die "mirror must use HTTPS" ;;
 	*) printf 'https://%s/' "$(printf '%s' "$m" | sed 's:/*$::')" ;;
 	esac
 }
@@ -47,7 +62,7 @@ deref() { # deref <url>: apply the mirror to github URLs only
 }
 
 fetch() { # fetch <url> <outfile>
-	local u; u=$(deref "$1")
+	local u; u=$(deref "$1") || return 1
 	if command -v uclient-fetch >/dev/null 2>&1; then
 		uclient-fetch -q -O "$2" "$u" || return 1
 	elif command -v wget >/dev/null 2>&1; then
@@ -96,11 +111,16 @@ do_download() {
 	tag=$1; url=$2; bin=$DLDIR/$(basename "$url")
 	log "downloading $(deref "$url")"
 	fetch "$url" "$bin" || die "download failed"
-	want=""
-	if fetch "${url%/*}/SHA256SUMS" "$DLDIR/SHA256SUMS" && [ -s "$DLDIR/SHA256SUMS" ]; then
-		want=$(grep -F "$(basename "$url")" "$DLDIR/SHA256SUMS" | awk '{print $1}')
-	fi
-	[ -n "$want" ] || log "WARN: SHA256SUMS not available, proceeding on fwslot validation alone"
+	fetch "${url%/*}/SHA256SUMS" "$DLDIR/SHA256SUMS" || die "cannot download SHA256SUMS; refusing update"
+	# Accept exactly one entry for this asset (sha256sum text or binary mode).
+	# Substring matches, duplicate entries and malformed hashes fail closed
+	# (zwthys-cyber's hardening).
+	want=$(awk -v name="$(basename "$url")" '
+		NF == 2 && ($2 == name || $2 == "*" name) { count++; hash = $1 }
+		END {
+			if (count != 1 || length(hash) != 64 || hash ~ /[^0-9a-fA-F]/) exit 1
+			print tolower(hash)
+		}' "$DLDIR/SHA256SUMS") || die "missing, duplicate or invalid SHA256 entry; refusing update"
 	verify "$bin" "$want"
 	echo "$tag" > /etc/.e2631-pending-version
 }

@@ -92,6 +92,14 @@ g_dts() {
 		"$E2631_KIT/overlay/target/linux/sanechips/patches-6.18"
 }
 
+g_upgrade() {
+	command -v python3 >/dev/null 2>&1 && command -v busybox >/dev/null 2>&1 || {
+		echo "install python3 and busybox for upgrade regression tests"; return 77; }
+	python3 "$E2631_KIT/tests/test_upgrade.py" >/dev/null || {
+		echo "test_upgrade.py failed"; return 1; }
+}
+
+run "upgrade failure paths (python)" g_upgrade
 run "shell syntax (bash -n)" g_shell
 run "javascript (node --check)" g_js
 run "device scripts (busybox ash)" g_ash
