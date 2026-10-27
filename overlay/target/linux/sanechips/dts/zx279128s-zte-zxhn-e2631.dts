@@ -333,9 +333,31 @@
 
 		/* HYF1GQ4UTACAE: 128 MiB, 2 KiB pages, 128 KiB erase blocks */
 		partitions {
-			compatible = "fixed-partitions";
+			/*
+			 * zx279128s-slotpart (v1.4): this table is the SLOT-1
+			 * layout, and cspboot picks the boot slot by version
+			 * header serial - the two systems swap in place. The
+			 * parser reads both slot headers at parse time and, on
+			 * a slot-0 boot, moves rootfs and slot1-header into
+			 * slot 0 (same row count, same labels, so root=
+			 * keeps pointing at the same mtdblock). Every failure
+			 * keeps this table. See
+			 * files/drivers/mtd/parsers/zx279128s-slotpart.c.
+			 */
+			compatible = "zte,zx279128s-slotpart";
 			#address-cells = <1>;
 			#size-cells = <1>;
+
+			/* slot geometry the parser re-derives the boot slot
+			 * from; bases are the two whole-system windows, the
+			 * deltas are inside-slot: rootfs at +0x400000 (forced
+			 * by cspboot's ceil(kSize/erasesize) lookup), the
+			 * version header at +0x1400000.
+			 */
+			zte,slot0 = <0x00700000 0x01c00000>;
+			zte,slot1 = <0x02300000 0x01c00000>;
+			zte,fs-delta = <0x00400000>;
+			zte,hdr-delta = <0x01400000>;
 
 			partition@0 {
 				label = "bootloader";

@@ -2,3 +2,9 @@
 # apply.sh 是「拷贝」不是「同步」：overlay 里删掉的文件，在旧构建树里还在，
 # 于是继续被打进镜像。每行一个相对树根的路径；apply.sh 每次运行时从树里
 # 删除，本来就没有就跳过。# 开头是注释。
+# P0-3: slotfix v1 replaced by the zx279128s-slotpart MTD parser. The fixup
+# read cspboot's bootpara block at 0x40007000, which the zImage decompressor
+# uses as page tables (dumped on hardware) - it never found its signature on
+# a real boot and always fell back to the built-in slot-1 layout.
+target/linux/sanechips/files/arch/arm/mach-zte/zx279128s-slotfix.c
+target/linux/sanechips/patches-6.18/032-ARM-zte-Add-the-ZX279128S-slot-fixup-to-the-mach-objects.patch

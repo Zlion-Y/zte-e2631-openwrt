@@ -25,6 +25,12 @@ gcc -std=gnu11 -Wall -Wextra -Werror -o /tmp/e2631-slot-decisions 	"$REPO/tests/
 /tmp/e2631-slot-decisions || { echo "FAIL: slot-decision unit tests" >&2; exit 1; }
 echo "PASS: slot-decision unit tests (install/upgrade guards, identity)"
 
+# P0-3: the slotpart parser's decision core - the cspboot-equivalent choice
+# between two slot headers, 11 cases, every failure keeping the built-in layout.
+gcc -std=gnu11 -Wall -Wextra -Werror -o /tmp/e2631-slotpart-decisions 	"$REPO/tests/test-slotpart-decisions.c"
+/tmp/e2631-slotpart-decisions || { echo "FAIL: slotpart decision tests" >&2; exit 1; }
+echo "PASS: slotpart decision tests (slot choice from flash headers)"
+
 # P0-0: the upgrade path in the tool itself must refuse on a host with no
 # E2631 partitions (this is what CI asserts too: upgrade-check fails closed).
 if "$BIN" upgrade-check >/dev/null 2>&1; then
