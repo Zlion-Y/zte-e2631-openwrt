@@ -1,10 +1,11 @@
 ### connected 192.168.5.3:23
 E2631
-Login: 
+
+Login: 
 === [send @600ms] "root\r\n"
 root
 Password: 
-=== [send @1000ms] "abc123!@#\r\n"
+=== [send @1000ms] "<redacted:vendor telnet password>\r\n"
 
 
 BusyBox v1.17.2 (2025-09-25 21:57:20 CST) built-in shell (ash)
@@ -12,17 +13,20 @@ Enter 'help' for a list of built-in commands.
 
 / # 
 === [send @1600ms] "curl -f -sS -T /var/tmp/mt7916.dbdc.b0.dat http://192.168.5.16:8001/b0.dat; echo rc_b0=$?\r\n"
-curl -f -sS -T /var/tmp/mt7916.dbdc.b0.dat http://192.168.5.16:8001/b0.dat; 
+curl -f -sS -T /var/tmp/mt7916.dbdc.b0.dat http://192.168.5.16:8001/b0.dat; 
+
 echo rc_b0=$?
 okrc_b0=0
 / # 
 === [send @3400ms] "curl -f -sS -T /var/tmp/mt7916.dbdc.b1.dat http://192.168.5.16:8001/b1.dat; echo rc_b1=$?\r\n"
-curl -f -sS -T /var/tmp/mt7916.dbdc.b1.dat http://192.168.5.16:8001/b1.dat; 
+curl -f -sS -T /var/tmp/mt7916.dbdc.b1.dat http://192.168.5.16:8001/b1.dat; 
+
 echo rc_b1=$?
 okrc_b1=0
 / # 
 === [send @5200ms] "curl -f -sS -T /var/tmp/l1profile.dat.dbdc http://192.168.5.16:8001/l1.dat; echo rc_l1=$?\r\n"
-curl -f -sS -T /var/tmp/l1profile.dat.dbdc http://192.168.5.16:8001/l1.dat; 
+curl -f -sS -T /var/tmp/l1profile.dat.dbdc http://192.168.5.16:8001/l1.dat; 
+
 echo rc_l1=$?
 okrc_l1=0
 / # 

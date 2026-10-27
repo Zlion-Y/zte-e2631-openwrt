@@ -1,10 +1,11 @@
 ### connected 192.168.5.3:23
 E2631
-Login: 
+
+Login: 
 === [send @800ms] "root\r\n"
 root
 Password: 
-=== [send @1200ms] "abc123!@#\r\n"
+=== [send @1200ms] "<redacted:vendor telnet password>\r\n"
 
 
 BusyBox v1.17.2 (2025-09-25 21:57:20 CST) built-in shell (ash)
@@ -22,7 +23,8 @@ T2
 /bin/sh: head: not found
 / # 
 === [send @5600ms] "echo T3; ls /proc/ 2>/dev/null | grep -iE \"ffe|csp|tm|spa|adm|npu|onux|pon\" | tr \"\\n\" \" \"; echo\r\n"
-echo T3; ls /proc/ 2>/dev/null | grep -iE "ffe|csp|tm|spa|adm|npu|onux|pon" 
+echo T3; ls /proc/ 2>/dev/null | grep -iE "ffe|csp|tm|spa|adm|npu|onux|pon" 
+
 | tr "\n" " "; echo
 T3
 tm 
@@ -924,13 +926,15 @@ INDEX0_single_sku_path=/etc/wireless/mt7916-sku.dat
 INDEX0_bf_sku_path=/etc/wireless/mt7916-sku-bf.dat
 / # 
 === [send @12600ms] "echo T7; cat /proc/interrupts 2>&1 | grep -E \"eth|sw|tm|idm|npu|wlan|mt79|CPU\" | head -14\r\n"
-echo T7; cat /proc/interrupts 2>&1 | grep -E "eth|sw|tm|idm|npu|wlan|mt79|CP
+echo T7; cat /proc/interrupts 2>&1 | grep -E "eth|sw|tm|idm|npu|wlan|mt79|CP
+
 U" | head -14
 T7
 /bin/sh: head: not found
 / # 
 === [send @14000ms] "echo T8; for q in /sys/class/net/*/queues/rx-*/rps_cpus; do echo \"$q=$(cat $q 2>/dev/null)\"; done 2>&1\r\n"
-echo T8; for q in /sys/class/net/*/queues/rx-*/rps_cpus; do echo "$q=$(cat $
+echo T8; for q in /sys/class/net/*/queues/rx-*/rps_cpus; do echo "$q=$(cat $
+
 q 2>/dev/null)"; done 2>&1
 T8
 /sys/class/net/apcli0/queues/rx-0/rps_cpus=0
@@ -960,14 +964,17 @@ T8
 /sys/class/net/wlan5g3/queues/rx-0/rps_cpus=0
 / # 
 === [send @15400ms] "echo T9; ip -o link 2>/dev/null | awk -F: '{print $2}' | tr -d \" \" | tr \"\\n\" \" \"; echo\r\n"
-echo T9; ip -o link 2>/dev/null | awk -F: '{print $2}' | tr -d " " | tr "\n"
+echo T9; ip -o link 2>/dev/null | awk -F: '{print $2}' | tr -d " " | tr "\n"
+
  " "; echo
 T9
 lo ifb0 ifb1 sit0@NONE ip6tnl0@NONE sw pon idm1 idm0 eth0 eth1 eth2 eth3 wlan0 br0 wlan1 wlan2 wlan3 wlan5g0 wlan5g1 wlan5g2 wlan5g3 apcli0 apcli5g0 nbif0 
 / # 
 === [send @16400ms] "echo T10; cat /proc/sys/net/ipv4/tcp_congestion_control /proc/sys/net/core/rmem_default /proc/sys/net/core/wmem_default /proc/sys/net/core/netdev_max_backlog 2>&1\r\n"
-echo T10; cat /proc/sys/net/ipv4/tcp_congestion_control /proc/sys/net/core/r
-mem_default /proc/sys/net/core/wmem_default /proc/sys/net/core/netdev_max_backlo
+echo T10; cat /proc/sys/net/ipv4/tcp_congestion_control /proc/sys/net/core/r
+
+mem_default /proc/sys/net/core/wmem_default /proc/sys/net/core/netdev_max_backlo
+
 g 2>&1
 T10
 cubic
@@ -1016,14 +1023,16 @@ Total:       225324       133056        92268
 /bin/sh: uptime: not found
 / # 
 === [send @19800ms] "echo T13; cat /proc/capability/boardtype /proc/capability/portinfo 2>/dev/null | head -6; ls /proc/capability 2>/dev/null\r\n"
-echo T13; cat /proc/capability/boardtype /proc/capability/portinfo 2>/dev/nu
+echo T13; cat /proc/capability/boardtype /proc/capability/portinfo 2>/dev/nu
+
 ll | head -6; ls /proc/capability 2>/dev/null
 T13
 /bin/sh: head: not found
 boardtype    ethernetmac  portinfo     slicinfo
 / # 
 === [send @21000ms] "echo T14; md5sum /etc/wireless/mt7916/mt7916.dbdc.b0.dat /etc/wireless/mt7916/mt7916.dbdc.b1.dat /etc/wireless/mt7916/l1profile.dat.dbdc 2>&1\r\n"
-echo T14; md5sum /etc/wireless/mt7916/mt7916.dbdc.b0.dat /etc/wireless/mt791
+echo T14; md5sum /etc/wireless/mt7916/mt7916.dbdc.b0.dat /etc/wireless/mt791
+
 6/mt7916.dbdc.b1.dat /etc/wireless/mt7916/l1profile.dat.dbdc 2>&1
 T14
 e25109fe6a19ff4e7bacd96890b8aa2e  /etc/wireless/mt7916/mt7916.dbdc.b0.dat
@@ -1031,8 +1040,10 @@ f39cd61b2b5b400e1b1f1b168c643a94  /etc/wireless/mt7916/mt7916.dbdc.b1.dat
 90181b26282cc1940fedd89a066c9d9d  /etc/wireless/mt7916/l1profile.dat.dbdc
 / # 
 === [send @22200ms] "echo T15; cp -f /etc/wireless/mt7916/mt7916.dbdc.b0.dat /etc/wireless/mt7916/mt7916.dbdc.b1.dat /etc/wireless/mt7916/l1profile.dat.dbdc /var/tmp/ 2>&1; ls -l /var/tmp/*.dat\r\n"
-echo T15; cp -f /etc/wireless/mt7916/mt7916.dbdc.b0.dat /etc/wireless/mt7916
-/mt7916.dbdc.b1.dat /etc/wireless/mt7916/l1profile.dat.dbdc /var/tmp/ 2>&1; ls -
+echo T15; cp -f /etc/wireless/mt7916/mt7916.dbdc.b0.dat /etc/wireless/mt7916
+
+/mt7916.dbdc.b1.dat /etc/wireless/mt7916/l1profile.dat.dbdc /var/tmp/ 2>&1; ls -
+
 l /var/tmp/*.dat
 T15
 ----------    1 Z500_w9b root          8587 Oct 26 04:04 /var/tmp/DBDC_card0.dat
@@ -1040,13 +1051,15 @@ T15
 -rwxr-xr-x    1 Z500_w9b root          7382 Oct 27 19:14 /var/tmp/mt7916.dbdc.b1.dat
 / # 
 === [send @23800ms] "curl -f -sS -T /var/tmp/mt7916.dbdc.b0.dat http://192.168.5.16:8001/b0.dat; echo rc_b0=$?\r\n"
-curl -f -sS -T /var/tmp/mt7916.dbdc.b0.dat http://192.168.5.16:8001/b0.dat; 
+curl -f -sS -T /var/tmp/mt7916.dbdc.b0.dat http://192.168.5.16:8001/b0.dat; 
+
 echo rc_b0=$?
 curl: (56) Recv failure: Connection reset by peer
 rc_b0=56
 / # 
 === [send @25200ms] "curl -f -sS -T /var/tmp/mt7916.dbdc.b1.dat http://192.168.5.16:8001/b1.dat; echo rc_b1=$?\r\n"
-curl -f -sS -T /var/tmp/mt7916.dbdc.b1.dat http://192.168.5.16:8001/b1.dat; 
+curl -f -sS -T /var/tmp/mt7916.dbdc.b1.dat http://192.168.5.16:8001/b1.dat; 
+
 echo rc_b1=$?
 
 === [send @26600ms] "curl -f -sS -T /var/tmp/l1profile.dat.dbdc http://192.168.5.16:8001/l1.dat; echo rc_l1=$?\r\n"

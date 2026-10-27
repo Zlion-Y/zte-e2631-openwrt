@@ -1,10 +1,11 @@
 ### connected 192.168.5.3:23
 E2631
-Login: 
+
+Login: 
 === [send @700ms] "root\r\n"
 root
 Password: 
-=== [send @1100ms] "abc123!@#\r\n"
+=== [send @1100ms] "<redacted:vendor telnet password>\r\n"
 
 
 BusyBox v1.17.2 (2025-09-25 21:57:20 CST) built-in shell (ash)
@@ -52,7 +53,8 @@ hash       ipv4_tcp   ipv6_raw   learnlist  sharedata
 qos
 / # 
 === [send @5600ms] "echo U3; for f in /proc/zte/sys/qos/*; do echo \"== $f\"; cat \"$f\"; done 2>&1 | sed -n \"1,40p\"\r\n"
-echo U3; for f in /proc/zte/sys/qos/*; do echo "== $f"; cat "$f"; done 2>&1 
+echo U3; for f in /proc/zte/sys/qos/*; do echo "== $f"; cat "$f"; done 2>&1 
+
 | sed -n "1,40p"
 U3
 == /proc/zte/sys/qos/qos
@@ -74,21 +76,24 @@ shell
  29:     954177          0       GIC  68 Level     pon_tm
 / # 
 === [send @10600ms] "echo U5; for f in /proc/tm/*; do echo \"== $f\"; sed -n \"1,6p\" \"$f\"; done 2>&1 | sed -n \"1,40p\"\r\n"
-echo U5; for f in /proc/tm/*; do echo "== $f"; sed -n "1,6p" "$f"; done 2>&1
+echo U5; for f in /proc/tm/*; do echo "== $f"; sed -n "1,6p" "$f"; done 2>&1
+
  | sed -n "1,40p"
 U5
 == /proc/tm/shell
 NULL
 / # 
 === [send @13400ms] "echo U6; cat /proc/sys/net/core/netdev_max_backlog /proc/sys/net/ipv4/tcp_congestion_control 2>&1\r\n"
-echo U6; cat /proc/sys/net/core/netdev_max_backlog /proc/sys/net/ipv4/tcp_co
+echo U6; cat /proc/sys/net/core/netdev_max_backlog /proc/sys/net/ipv4/tcp_co
+
 ngestion_control 2>&1
 U6
 1000
 cubic
 / # 
 === [send @14400ms] "echo U7; cat /proc/capability/boardtype 2>&1; cat /proc/net/dev 2>&1 | sed -n \"1,12p\"\r\n"
-echo U7; cat /proc/capability/boardtype 2>&1; cat /proc/net/dev 2>&1 | sed -
+echo U7; cat /proc/capability/boardtype 2>&1; cat /proc/net/dev 2>&1 | sed -
+
 n "1,12p"
 U7
 type       : E1630

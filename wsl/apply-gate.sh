@@ -9,6 +9,12 @@ REPO="$(cd "$(dirname "$0")/.." && pwd)"
 . "$REPO/scripts/env.sh"
 REAL=${E2631_TREE:?E2631_TREE must point at the base tree}
 OUT=${E2631_OUT:?E2631_OUT must be set}
+# A Windows-side make check has no base tree (it lives in WSL): the other
+# gates SKIP with a stated reason, so does this one.
+if [ ! -d "$REAL/target/linux/sanechips" ]; then
+	echo "SKIP apply.sh gate: no base tree at $REAL (run it in WSL, where E2631_TREE points at the checkout)"
+	exit 77
+fi
 
 bash "$REPO/apply.sh" "$REAL" >/dev/null 2>&1 || { echo "FAIL: apply.sh refuses the real tree" >&2; exit 1; }
 r1=$(cat "$OUT/apply-report.txt")
