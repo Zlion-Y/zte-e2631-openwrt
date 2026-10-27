@@ -50,11 +50,12 @@ points at something in the repository or at a measurement.
   next: build/wsl/build-regprobe.sh produces the module that reads the same register
 - id: DEVMEM-DROPPED
   severity: major
-  status: open
+  status: fixed
   surface: kernel config
   symptom: CONFIG_DEVMEM=y is requested in both generic and the target fragment, and the built .config comes out "not set"
-  verified: yes (out/gen1/config-6.18:2314 vs generic/config-6.18:1494 and sanechips/config-6.18:147)
-  note: why the request is dropped is still unexplained - do not re-add a fragment edit on the assumption it will work
+  verified: "yes - root cause identified 2026-10-28: include/kernel-defaults.mk:119 appends every CONFIG_KERNEL_* line of the TOP-LEVEL .config to the merged kernel config with the prefix stripped, and the kconfig.pl merge is last-wins. config/Config-kernel.in:1551 declares KERNEL_DEVMEM (default n), so the top-level .config carried '# CONFIG_KERNEL_DEVMEM is not set', which the passthrough turned into '# CONFIG_DEVMEM is not set' AFTER the merged =y lines (visible in build_dir as .config.target:1599 =y vs :8873 =n). Neither fragment was wrong and no kernel patch touched the Kconfig - the package-level option won. The passthrough is generic: ANY '# CONFIG_KERNEL_X is not set' in the top-level .config silently forces kernel symbol X to n; cross-checked against every =y request in generic+target, DEVMEM was the only victim"
+  fix: ask for the symbol where it is actually decided - CONFIG_KERNEL_DEVMEM=y in seed/e2631.config (the upstream-sanctioned passthrough), not another fragment edit. After the v1.4 build the out config must read CONFIG_DEVMEM=y with STRICT_DEVMEM/IO_STRICT_DEVMEM explicitly not set and GENERIC_LIB_DEVMEM_IS_ALLOWED=y
+  note: on-device acceptance (fwstate reading MT_TOP_MISC through /dev/mem) still needs a flash cycle and stays unchecked under the offline-only rule; FWSTATE-NEEDS-DEVMEM therefore remains open
 - id: WIFI-2G4-UNVERIFIED
   severity: minor
   status: fixed
