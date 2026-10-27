@@ -1,0 +1,31 @@
+# WAN 口选择（把任意有线口当 WAN），手动版。
+#
+# 这块板子的四个物理口是四个独立 netdev（lan1 lan2 lan3 wan），谁当 WAN 只需要
+# 把 wan 接口绑到哪个 netdev 上，不涉及交换芯片。默认布局就是镜像自带的原厂布局：
+#
+#   wan             = WAN 口（唯一上联）
+#   lan1 lan2 lan3  = br-lan（局域网交换机）
+#
+# 想换口只有一条路——显式指定，没有任何自动探测/自动切换：
+#
+#   uci set e2631_ports.global.manual_port='lan1'
+#   e2631-wanport apply lan1
+#
+# 或者用 LuCI 的「网络 → WAN 口」页面点一下。改完写进 uci，重启后保持。
+#
+# 为什么不自动：v1.4 第一版做过「候选口各发一次 DHCP DISCOVER，谁应答谁当 WAN」，
+# 真机上已经拔掉了。一是 PPPoE/静态上行/对端不开 DHCP 的场景根本探不到；二是自动
+# 切换本身能把管理侧关在门外（2026-10-27 实测：管理网线所在口被切成 WAN，WAN 区
+# input=REJECT，SSH/HTTP 全断，只能到现场换线）。详见
+# docs/wanlan-adaptive-逆向记录-2026-10-27.md 第 7 节。
+
+config ports 'global'
+	# 0 = 允许的口里禁止改动（apply 直接拒绝），1 = 允许手动改
+	option enabled '1'
+
+	# 当前 WAN 口：lan1 / lan2 / lan3 / wan 之一，默认原厂布局的 wan
+	option manual_port 'wan'
+
+	# WAN 侧 MAC 固化值。第一次 apply 时写入，之后换口一直沿用：上游的 DHCP
+	# 租约、MAC 绑定、IPv6 DUID 都认这个地址。留空表示"用 wan 口自己的地址"。
+	option wan_mac ''

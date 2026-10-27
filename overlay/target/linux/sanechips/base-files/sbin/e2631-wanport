@@ -1,0 +1,277 @@
+#!/bin/sh
+# WAN 口选择：把「任意有线口当 WAN」做成一个**手动**动作。
+#
+# 背景（完整逆向见 docs/wanlan-adaptive-逆向记录-2026-10-27.md）：原厂在 cspd 的
+# NetAdapt 模块里干这件事——探测哪个口有上行（NetAdaptStartEthProbe /
+# NetAdaptUpLinkProbeOK），再用 ioctl 把该口设成 WAN 角色（SetWanLanMode），最后
+# 调 br0 的允许端口。原厂的端口角色是交换芯片端口属性，所以非 ioctl 不可。
+#
+# 这块板子不需要那套：gmac 驱动按 DTS label 把 4 个物理口各建成一个 netdev
+# （lan1 lan2 lan3 wan，见 dts 的 gmac_port0..3），谁当 WAN 只取决于 wan 接口绑在
+# 哪个 netdev、以及哪个 netdev 在 br-lan 里。所以落地动作只有三步：
+#   wan(wan6) 改绑到目标口 → 目标口从 br-lan 摘掉 → 其余候选口回 br-lan
+#
+# v1.4 头一版还带「自动探测」（候选口各发一次 DHCP DISCOVER，谁应答谁当 WAN），
+# 真机上已经拔掉了，理由有两条，都是实测：
+#
+# 1. 探测不可能覆盖真实上行。PPPoE、静态地址、对端不开 DHCP 的上行都探测不到，
+#    「自动」在这种场景下只会让人以为它坏了；
+# 2. **自动切换本身能把自己关在门外**。2026-10-27 真机上就发生了：脚本把管理侧
+#    网线所在的口切成了 WAN，而 WAN 区 input 是 REJECT，于是 SSH/HTTP 全断，
+#    只剩 ping，必须到现场换网线才回来（详见文档 7.6）。
+#
+# 现在的语义：开机什么都不做，布局就是镜像自带的原厂布局（wan 口 = WAN，
+# lan1/lan2/lan3 = br-lan）；谁想换口就显式改一次，改完写进 uci，重启后保持。
+#
+# 用法：
+#   e2631-wanport status          当前绑定 / 网桥成员 / 各口链路与 MAC
+#   e2631-wanport apply <port>    把 WAN 绑到指定口（lan1|lan2|lan3|wan）
+#   e2631-wanport selftest        不碰网络的自检（配置与命名解析）
+#   DRY_RUN=1 e2631-wanport apply <port>   只打印要执行的 uci 命令
+#
+# 约定：日志进 syslog（logger -t e2631-wanport），标准错误另打一份，便于 ssh 里看。
+set -u
+
+PROG=e2631-wanport
+CFG=e2631_ports
+# 路径留了环境变量口子，只为一件事：在 PC 上跑 scripts/selftest-wanport.sh，
+# 设备上不设就是默认值。
+SYSFS=${E2631_SYSFS:-/sys}
+
+# 这块板子只有这四个 GbE 口，顺序固定，不读配置：避免配置文件写错一个字符串
+# 就让整套动作作用在不存在/别的口上。
+PORTS="lan1 lan2 lan3 wan"
+
+log() {
+	logger -t "$PROG" "$*" 2>/dev/null
+	echo "$PROG: $*" >&2
+}
+
+cfg() { uci -q get "$CFG.global.$1" 2>/dev/null; }
+
+# ---- 事实查询 -------------------------------------------------------------
+
+# 这个口现在挂在哪个网桥上（没有就空）
+# 注意必须先判存在：readlink -f 对不存在的路径也会回显解析后的路径字面量，
+# 不判的话没上网桥的口会显示成 "master"（真机上踩过）。
+master_of() {
+	local f="$SYSFS/class/net/$1/master"
+	[ -e "$f" ] || { echo ""; return 0; }
+	readlink -f "$f" 2>/dev/null | sed 's|.*/||'
+}
+
+# 口的出厂（DTS 分配）地址。sysfs 里没有 permaddr，只有 ip 通过 netlink 拿得到。
+# 这个值不受 ip link set 影响，所以是"这块板子给 wan 口的固定地址"的正确来源。
+#
+# 注意 ip 的脾气（2026-10-27 在真机上核对过）：**只有当前地址和出厂地址不同时**，
+# `ip -o link show` 才会打出 permaddr 字段；两者相等时那一行里根本没有它。所以调用
+# 方必须接受"取不到"这个结果——取不到恰恰说明活动地址就等于出厂地址，回退到活动
+# 地址拿到的还是同一个值，两种情况下答案都正确。
+perm_addr() {
+	ip -o link show dev "$1" 2>/dev/null \
+		| sed -n 's/.*permaddr \([0-9a-fA-F:]\{17\}\).*/\1/p' | head -n 1
+}
+
+# netifd 眼里 WAN 是否已经起来（拿到地址/拨号成功）
+wan_up() {
+	ubus call network.interface.wan status 2>/dev/null \
+		| grep -q '"up"[[:space:]]*:[[:space:]]*true'
+}
+
+# wan 接口当前绑在哪个 netdev 上（uci 为准，缺省 wan = 原厂布局）
+cur_wan_dev() {
+	local d
+	d=$(uci -q get network.wan.device 2>/dev/null)
+	[ -n "$d" ] || d=wan
+	echo "$d"
+}
+
+# WAN 侧用的 MAC。DTS 给 wan 口分的是 tag+0x1f，LAN 口都是 tag+0x1e；换口时保持
+# 这个地址不变：上游的 DHCP 租约、MAC 绑定、IPv6 DUID 都依赖它。
+#
+# 三个来源依次是：uci 固化值 → **wan 口的 permaddr**（DTS 出厂地址，不受 ip link
+# set 影响）→ wan 口当前活动地址。不能直接读当前活动地址：WAN 换到别的口之后，
+# 没人上联的 wan 口地址早就不是出厂值了（真机上就是读到 LAN 基址，于是把 WAN MAC
+# 记成了 LAN MAC）。
+wan_mac() {
+	local m
+	m=$(cfg wan_mac)
+	[ -n "$m" ] && { echo "$m"; return 0; }
+	m=$(perm_addr wan)
+	[ -n "$m" ] || m=$(cat "$SYSFS/class/net/wan/address" 2>/dev/null)
+	echo "$m"
+}
+
+# br-lan 的 device 段在 uci 里是匿名段，按 name 找出来
+bridge_section() {
+	local n=0 name
+	while :; do
+		name=$(uci -q get "network.@device[$n].name" 2>/dev/null)
+		[ -n "$name" ] || { echo ""; return 0; }
+		if [ "$name" = "br-lan" ]; then
+			echo "network.@device[$n]"
+			return 0
+		fi
+		n=$((n + 1))
+	done
+}
+
+# ---- 落地 -----------------------------------------------------------------
+
+# apply_port <port>
+# 幂等：目标口已经是 WAN 时只把 MAC/网桥校正一遍，不做无意义的 reload。
+apply_port() {
+	local port=$1 cur bp p mac w6
+	[ -n "$port" ] || { log "用法：$PROG apply <lan1|lan2|lan3|wan>"; return 1; }
+	case " $PORTS " in
+	*" $port "*) ;;
+	*) log "没有 $port 这个口（可选：$PORTS）"; return 1 ;;
+	esac
+	[ -d "$SYSFS/class/net/$port" ] || { log "sysfs 里没有 $port"; return 1; }
+	[ "$(cfg enabled)" = "0" ] && { log "已在 $CFG 里禁用（enabled=0）"; return 1; }
+	cur=$(cur_wan_dev)
+	bp=$(bridge_section)
+	[ -n "$bp" ] || { log "uci 里找不到 br-lan 的 device 段，放弃"; return 1; }
+	mac=$(wan_mac)
+	# wan6 只有在「显式绑了某个设备」时才需要跟着改。绑的是 @wan 别名时它自己
+	# 就跟着 wan 走，再写成设备名等于把别名换掉——下次谁改了 wan.device，
+	# wan6 就落到一个不存在的 netdev 上（IPv6 整个哑掉，而且不报错）。
+	w6=$(uci -q get network.wan6.device 2>/dev/null)
+	case "$w6" in
+	''|@*) w6="" ;;
+	esac
+
+	if [ "${DRY_RUN:-0}" = "1" ]; then
+		echo "uci set network.wan.device=$port"
+		[ -n "$mac" ] && echo "uci set network.wan.macaddr=$mac"
+		[ -n "$w6" ] && echo "uci set network.wan6.device=$port"
+		echo "uci -q delete $bp.ports"
+		for p in $PORTS; do
+			[ "$p" = "$port" ] || echo "uci add_list $bp.ports=$p"
+		done
+		echo "uci commit network"
+		[ -n "$mac" ] && echo "ip link set dev $port address $mac"
+		[ "$cur" != "$port" ] && echo "ip link set dev $cur address <br-lan 的地址>（原来当 WAN 的口还原）"
+		return 0
+	fi
+
+	uci set network.wan.device="$port"
+	[ -n "$mac" ] && uci set network.wan.macaddr="$mac"
+	[ -n "$w6" ] && uci set network.wan6.device="$port"
+	# MAC 只在第一次算出来时固化，之后一直用它
+	[ -n "$mac" ] && [ -z "$(cfg wan_mac)" ] && uci set "$CFG.global.wan_mac"="$mac"
+	[ -n "$mac" ] && [ "$(cfg manual_port)" != "$port" ] && uci set "$CFG.global.manual_port"="$port"
+
+	uci -q delete "$bp.ports"
+	for p in $PORTS; do
+		[ "$p" = "$port" ] || uci add_list "$bp.ports=$p"
+	done
+	uci commit network
+	uci commit "$CFG" 2>/dev/null
+
+	log "WAN 口 -> $port（原来 $cur）"
+	[ -x /etc/init.d/network ] && /etc/init.d/network reload >/dev/null 2>&1
+	ensure_port_mac "$port"
+	[ "$cur" != "$port" ] && restore_port_mac "$cur"
+	return 0
+}
+
+# netifd 把 network.wan.macaddr 写到了「当前 WAN 口」这个 netdev 上，但反过来
+# 它不会把 MAC 还回去：一个口当过 WAN 再回到 br-lan，会留着 WAN 的 MAC（真机上
+# 复现过：切回 wan 之后 lan2 还是 ...f0，而 br-lan/其他 LAN 口是 ...ef）。
+# 这不影响转发（网桥用自己的地址），但会让 status/页面里的 MAC 列容易看错，
+# 下次换口时也容易误判。
+#
+# 只还原「刚刚不当 WAN 的那一个口」，不是遍历所有口。遍历的版本在真机上出过事：
+# WAN 换到 lan2 时，闲着没上联的 wan 口地址已经是 LAN 基址，而固化值是 ...f0，
+# 两个值不相等，于是它把 wan 口的出厂地址覆盖成了 LAN 基址——等于把这块板子唯一
+# 的 WAN MAC 弄丢了。
+restore_port_mac() {
+	local p=$1 lanm wm m
+	[ -n "$p" ] || return 0
+	lanm=$(cat "$SYSFS/class/net/br-lan/address" 2>/dev/null)
+	wm=$(wan_mac)
+	[ -n "$lanm" ] && [ -n "$wm" ] || return 0
+	[ "$lanm" = "$wm" ] && return 0
+	m=$(cat "$SYSFS/class/net/$p/address" 2>/dev/null)
+	[ "$m" = "$wm" ] || return 0
+	ip link set dev "$p" address "$lanm" 2>/dev/null
+	return 0
+}
+
+# 目标口手上应该是 WAN 的地址。netifd 只在口 up 的时候才写 macaddr，没插网线
+# 就一直留着老地址，status/页面看到的 MAC 就和配置对不上。这里直接写一遍，
+# 有载没载都不用猜。
+ensure_port_mac() {
+	local p=$1 mac m
+	mac=$(wan_mac)
+	[ -n "$mac" ] || return 0
+	m=$(cat "$SYSFS/class/net/$p/address" 2>/dev/null)
+	[ "$m" = "$mac" ] && return 0
+	ip link set dev "$p" address "$mac" 2>/dev/null
+	return 0
+}
+
+# ---- 展示 / 自检 ----------------------------------------------------------
+
+do_status() {
+	local bp p
+	bp=$(bridge_section)
+	echo "enabled         : $(cfg enabled)"
+	echo "wan device      : $(cur_wan_dev)"
+	if wan_up; then echo "wan up (netifd) : yes"; else echo "wan up (netifd) : no"; fi
+	echo "manual_port     : $(cfg manual_port)"
+	echo "wan mac         : $(wan_mac)  (固化值: $(cfg wan_mac))"
+	echo "br-lan section  : ${bp:-<找不到>}"
+	[ -n "$bp" ] && echo "br-lan ports    : $(uci -q get "$bp.ports" 2>/dev/null | tr '\n' ' ')"
+	echo "ports:"
+	for p in $PORTS; do
+		printf '  %-5s state=%-7s carrier=%s speed=%-5s master=%-7s mac=%s\n' \
+			"$p" \
+			"$(cat "$SYSFS/class/net/$p/operstate" 2>/dev/null || echo -)" \
+			"$(cat "$SYSFS/class/net/$p/carrier" 2>/dev/null || echo 0)" \
+			"$(cat "$SYSFS/class/net/$p/speed" 2>/dev/null || echo -)" \
+			"$(master_of "$p")" \
+			"$(cat "$SYSFS/class/net/$p/address" 2>/dev/null || echo -)"
+	done
+}
+
+# 不碰网络的自检：只验证配置解析与命名
+do_selftest() {
+	local p bp ok=0
+	bp=$(bridge_section)
+	echo "ports      : $PORTS"
+	echo "bridge     : ${bp:-<none>}"
+	echo "cur wan    : $(cur_wan_dev)"
+	echo "wan mac    : $(wan_mac)"
+	for p in $PORTS; do
+		if [ -d "$SYSFS/class/net/$p" ]; then
+			echo "  $p ok"
+		else
+			echo "  $p MISSING"
+			ok=1
+		fi
+	done
+	[ -n "$bp" ] || { echo "br-lan 段缺失"; ok=1; }
+	command -v ubus >/dev/null 2>&1 || { echo "ubus 缺失"; ok=1; }
+	[ "$ok" = "0" ] && echo "selftest OK"
+	return $ok
+}
+
+main() {
+	local action=${1:-}
+	case "$action" in
+	apply)
+		shift
+		apply_port "${1:-}"
+		;;
+	status) do_status ;;
+	selftest) do_selftest ;;
+	*)
+		sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'
+		exit 2
+		;;
+	esac
+}
+
+main "$@"

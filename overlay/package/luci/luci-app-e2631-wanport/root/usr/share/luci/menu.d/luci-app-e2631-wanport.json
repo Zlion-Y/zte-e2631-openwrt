@@ -1,0 +1,14 @@
+{
+	"admin/network/e2631-wanport": {
+		"title": "WAN port",
+		"order": 11,
+		"action": {
+			"type": "view",
+			"path": "network/e2631-wanport"
+		},
+		"depends": {
+			"acl": [ "luci-app-e2631-wanport" ],
+			"uci": { "e2631_ports": true }
+		}
+	}
+}

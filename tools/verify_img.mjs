@@ -459,6 +459,9 @@ warn('cpu enable-method matches the string the compiled platsmp registers',
       ['luci-app-zte-mesh', 'the LuCI page for the mesh controller'],
       // v1.3: the board page (slots / online update / switch back to stock)
       ['luci-app-e2631', 'the E2631 board page in LuCI'],
+      // v1.4: the WAN port page; /sbin/e2631-wanport itself comes from
+      // base-files, so only the front end is a package.
+      ['luci-app-e2631-wanport', 'the WAN port selection page in LuCI'],
       ['kmod-veth', 'the veth pair the mesh sandbox attaches with'],
       // v1.3: https for the online updater; the mtd tool parks/restores the
       // config backup on userdata; without it an update drops settings.

@@ -123,6 +123,32 @@ musl.libc.org 在 12 秒探测窗口内一个字节都不给）。三件事让�
 历史包（v1.0 首个能刷能启、v1.1 加 `e2631-wifi-ap` 并改手动武装回退、v1.2 修 wifi-ap 三个真机问题）
 的注记随 release 保留；v1.3 起手动开射频的旧流程退居后备（`e2631-wifi-on 0` + `e2631-wifi-ap` 仍可用）。
 
+### v1.4：WAN 口可选（任意有线口当 WAN，手动指定；采纳 zwzzrl fork 的真机验证版）
+
+原厂叫「WAN/LAN 自适应」/ 盲插，在 cspd 的 NetAdapt 里探测上行再用 ioctl 设交换芯片
+端口角色（逆向记录见 [docs/wanlan-adaptive-逆向记录-2026-10-27.md](docs/wanlan-adaptive-逆向记录-2026-10-27.md)）。
+这里的实现完全不碰芯片：四个口本来就是四个独立 netdev，"谁当 WAN"只等于
+**wan 接口绑在哪个 netdev、那个 netdev 不在 br-lan 里**。
+
+- **默认就是原厂布局**：`wan` 口当 WAN，`lan1/lan2/lan3` 在 `br-lan`。开机不做任何
+  动作，没有开机服务、没有热插拔钩子。
+- **只允许手动指定**：`e2631-wanport apply <lan1|lan2|lan3|wan>`，或者用
+  `网络 → WAN 口` 页面点某一行的「设为 WAN 口」。改完写进 uci，重启后保持。
+- **WAN MAC 固定**在 `e2631_ports.global.wan_mac`：换物理口时上游看到的 MAC 不变，
+  租约、DUID、上游的 MAC 绑定都还能续。
+- **逻辑层自检在 PC 上跑**：`sh scripts/selftest-wanport.sh`。
+
+**为什么不自动**（zwzzrl 2026-10-27 真机结论，见逆向记录 7.6）：第一版做过「候选口各发
+一次 DHCP DISCOVER，谁应答谁当 WAN」，两处硬伤都在真机上撞到了——一是 PPPoE/静态
+地址/对端不开 DHCP 的上行根本探不到；二是自动切换能把管理侧关在门外（管理网线所在口
+被切成 WAN，WAN 区 input=REJECT，SSH/HTTP 全断，只能到现场换线）。所以自动那套代码、
+开机服务、热插拔钩子全部删除，`apply` 是唯一入口。
+
+**真机验证声明**：本节功能由 **zwzzrl fork 在真机上验证**（v4 经原厂页写 slot1、v5 在
+OpenWrt 里 `sysupgrade -n` 刷写，手动切口、网桥重排、MAC 固化与还原、LuCI 页面均验过）；
+本仓库 v1.4 构建只做了离线校验，未刷机。
+
+
 ### 旧状态表（v1.2 口径，留作对照）
 
 | | |
