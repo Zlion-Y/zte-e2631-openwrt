@@ -128,7 +128,12 @@ g_preflight() {
 
 run "board dts cross-reference" g_dts
 run "first-flash preflight (fixture)" g_preflight
+g_notice() {
+	bash "$E2631_KIT/scripts/notice-check.sh"
+}
+
 run "no credential shapes" g_secret
+run "NOTICE vs tree (both directions)" g_notice
 
 [ $rc -eq 0 ] || { echo; echo "check: FAILED"; exit 1; }
 echo
