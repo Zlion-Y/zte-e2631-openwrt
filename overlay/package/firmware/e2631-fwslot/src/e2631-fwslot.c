@@ -157,7 +157,11 @@ static void wr32(uint8_t *p, size_t ofs, uint32_t v)
 	p[ofs + 2] = v >> 16; p[ofs + 3] = v >> 24;
 }
 
-static void die(const char *msg)
+/* noreturn is load-bearing for the compiler, not just documentation: the
+ * bounded-path checks in backup_slot_head rely on the compiler seeing that
+ * the over-length branch terminates, so every snprintf fit after it is
+ * provable (-Werror=format-truncation is on in the target build). */
+static void __attribute__((__noreturn__)) die(const char *msg)
 {
 	fprintf(stderr, "e2631-fwslot: %s: %s\n", msg, strerror(errno));
 	exit(1);
