@@ -1,0 +1,23 @@
+--- a/drivers/mtd/parsers/Kconfig
++++ b/drivers/mtd/parsers/Kconfig
+@@ -240,3 +240,13 @@
+ 	 flash, some of which are fixed and some of which are located at
+ 	 variable offsets. This parser handles both cases via properly
+ 	 formatted DTS.
++
++config MTD_ZX279128S_SLOTPART
++	bool "ZTE ZX279128S slot-aware partition parser"
++	depends on MTD && OF
++	help
++	  Picks the boot slot the way cspboot does (valid version-header CRC1,
++	  higher serial, ties to slot 0) and moves the rootfs / other-header
++	  partitions into the slot that is actually booting. Any failure keeps
++	  the built-in layout. Used by the ZTE ZXHN E2631 port, whose two
++	  whole-system firmware slots swap in place.
+--- a/drivers/mtd/parsers/Makefile
++++ b/drivers/mtd/parsers/Makefile
+@@ -17,3 +17,4 @@
+ obj-$(CONFIG_MTD_REDBOOT_PARTS)		+= redboot.o
+ obj-$(CONFIG_MTD_QCOMSMEM_PARTS)	+= qcomsmempart.o
+ obj-$(CONFIG_MTD_ROUTERBOOT_PARTS)		+= routerbootpart.o
++obj-$(CONFIG_MTD_ZX279128S_SLOTPART)		+= zx279128s-slotpart.o

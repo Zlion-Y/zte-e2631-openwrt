@@ -115,7 +115,7 @@ g_preflight() {
 	bash -n "$E2631_KIT/scripts/preflight.sh" || return 1
 	command -v gcc >/dev/null 2>&1 || { echo "no gcc: the package checks need e2631-fwslot compiled"; return 77; }
 	[ -x /tmp/e2631-fwslot-native ] || gcc -std=gnu11 -w -o /tmp/e2631-fwslot-native 		"$E2631_KIT/overlay/package/firmware/e2631-fwslot/src/e2631-fwslot.c"
-	E2631_FWSLOT_BIN=/tmp/e2631-fwslot-native
+	export E2631_FWSLOT_BIN=/tmp/e2631-fwslot-native
 	[ -f "$F" ] || { echo "no $F - run node tools/make_fixture.mjs $E2631_OUT/fixture"; return 77; }
 	if ! sh "$E2631_KIT/scripts/preflight.sh" "$F" --offline >/dev/null 2>&1; then
 		echo "preflight refused a valid fixture"; return 1

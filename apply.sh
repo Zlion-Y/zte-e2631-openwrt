@@ -259,35 +259,12 @@ if [ -f "$GEN" ]; then
 		echo "generic config: could not turn the soft lockup detector on" >&2; exit 1; }
 	echo "generic config: soft lockup + hung task detectors on"
 fi
-# The slot-aware partition parser (P0-3): the files/ copy carries the driver,
-# but the kernel's mtd parser Kconfig/Makefile need the wiring, and the target
-# config needs the symbol on. Idempotent, marker-guarded, asserted at the end.
-PARSER_CFG="$TREE/drivers/mtd/parsers/Kconfig"
-PARSER_MK="$TREE/drivers/mtd/parsers/Makefile"
+# The slot-aware partition parser (P0-3): the driver source ships in files/,
+# the kernel-build wiring ships as patch 033 (Kconfig + Makefile obj line);
+# what is pinned here is the symbol choice in the target config.
 ZXSP_MARK="# E2631: slot-aware partition parser (see apply.sh / P0-3)"
-if [ -f "$PARSER_CFG" ] && [ -f "$PARSER_MK" ]; then
-	if ! grep -q '^config MTD_ZX279128S_SLOTPART$' "$PARSER_CFG"; then
-		cat >> "$PARSER_CFG" <<'ZXSPK'
-config MTD_ZX279128S_SLOTPART
-	bool "ZTE ZX279128S slot-aware partition parser"
-	depends on MTD && OF
-	default y
-	help
-	  Picks the boot slot the way cspboot does (valid version-header CRC1,
-	  higher serial, ties to slot 0) and moves the rootfs / other-header
-	  partitions into the slot that is actually booting. Any failure keeps
-	  the built-in layout.
-
-ZXSPK
-	fi
-	grep -q '^config MTD_ZX279128S_SLOTPART$' "$PARSER_CFG" || {
-		echo "apply.sh: could not add MTD_ZX279128S_SLOTPART to $PARSER_CFG" >&2; exit 1; }
-	if ! grep -q '^obj-\$(CONFIG_MTD_ZX279128S_SLOTPART)' "$PARSER_MK"; then
-		printf 'obj-$(CONFIG_MTD_ZX279128S_SLOTPART)\t+= zx279128s-slotpart.o\n' >> "$PARSER_MK"
-	fi
-	grep -q '^obj-\$(CONFIG_MTD_ZX279128S_SLOTPART)' "$PARSER_MK" || {
-		echo "apply.sh: could not add zx279128s-slotpart.o to $PARSER_MK" >&2; exit 1; }
-	sed -i -e "/^$ZXSP_MARK\$/d" -e '/^CONFIG_MTD_ZX279128S_SLOTPART=y\$/d' "$CFG"
+if [ -f "$TREE/target/linux/sanechips/patches-6.18/033-mtd-parsers-add-ZX279128S-slot-partition-parser.patch" ]; then
+	sed -i -e "\|^$ZXSP_MARK\$|d" -e '/^CONFIG_MTD_ZX279128S_SLOTPART=y\$/d' "$CFG"
 	printf '%s\n' "$ZXSP_MARK" 'CONFIG_MTD_ZX279128S_SLOTPART=y' >> "$CFG"
 	echo "kernel config: slot-aware partition parser on"
 fi
@@ -369,8 +346,8 @@ assert "mt7915e autoload removed from the mt76 package" \
 assert "VFP/NEON/Thumbee disabled in the target config" \
 	bash -c "! grep -qiE '^CONFIG_(VFP|VFPv3|NEON|KERNEL_MODE_NEON|ARM_THUMBEE)=y\$' '$CFG'"
 assert "lockup detectors flipped in the generic config" grep -q '^CONFIG_SOFTLOCKUP_DETECTOR=y' "$GEN"
-assert "slot-aware partition parser wired into the kernel build" \
-	bash -c "grep -q '^config MTD_ZX279128S_SLOTPART\$' '$TREE/drivers/mtd/parsers/Kconfig' && grep -q '^obj-\$(CONFIG_MTD_ZX279128S_SLOTPART)' '$TREE/drivers/mtd/parsers/Makefile' && grep -q '^CONFIG_MTD_ZX279128S_SLOTPART=y\$' '$CFG'"
+assert "slot-aware partition parser wired (patch 033 + config)" \
+	bash -c "test -f '$TREE/target/linux/sanechips/patches-6.18/033-mtd-parsers-add-ZX279128S-slot-partition-parser.patch' && grep -q '^CONFIG_MTD_ZX279128S_SLOTPART=y\$' '$CFG'"
 assert "slot parser source present in files/" \
 	test -f "$TREE/target/linux/sanechips/files/drivers/mtd/parsers/zx279128s-slotpart.c"
 assert "overlay ppe.c carries the IPv6 trap fix" \
