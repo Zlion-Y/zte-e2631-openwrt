@@ -144,6 +144,8 @@ musl.libc.org 在 12 秒探测窗口内一个字节都不给）。三件事让�
 - **WAN MAC 固定**在 `e2631_ports.global.wan_mac`：换物理口时上游看到的 MAC 不变，
   租约、DUID、上游的 MAC 绑定都还能续。
 - **逻辑层自检在 PC 上跑**：`sh scripts/selftest-wanport.sh`。
+- 本轮全量清单见 [docs/v1.4-progress.md](docs/v1.4-progress.md)（含与清单结论
+  的偏差表：P2-1 fork 真机状态、P0-3 bootpara 前提不成立、P0-2 KERNEL_ 透传机制）。
 
 **为什么不自动**（zwzzrl 2026-10-27 真机结论，见逆向记录 7.6）：第一版做过「候选口各发
 一次 DHCP DISCOVER，谁应答谁当 WAN」，两处硬伤都在真机上撞到了——一是 PPPoE/静态
