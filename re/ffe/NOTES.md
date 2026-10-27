@@ -33,3 +33,16 @@
 - 未还原（后续迭代）：128B 槽内 proto_state 布局、npu cap 各 front/backend
   的寄存器序列、idm 栈与 NPP 环的确切耦合（需要 tm.ko 反汇编深入 +
   真机 trace）。
+
+## ffe-0.1 固件（本分支产物，2026-10-28）
+
+- `out/e2631-openwrt-ffe-0.1.bin`（版本格式区别于主线 1.3/1.5），20,972,052 B，
+  sha256 `16695c4e3c99e0b765c2abe99e88b006388f7192e920067d9b4ea7bb7512327c`，
+  verify_pkg+verify_img **BOOT-READY: no static blocker**
+- 静态实证：`CONFIG_ZX_FFE=y` 内建；System.map 含 `zx_ffe_*` / `zx_idm_skb_stack_*`
+  全部符号；rootfs `/etc/e2631-version` = `OpenWrt ffe-0.1`
+- 构建期修正三处：034 补丁 Kconfig hunk 丢失（重生成双 hunk）、
+  `zx_ffe_ops_ptr` 定义缺失（补一行）、apply.sh 断言上限放宽到 +90/-25
+  （trap 修复+接缝两个 hunk 的合法增量）
+- 真机行为未验证（离线约束）：FFE 学习路径的上机表现、`/proc/zx-ffe/cmd`
+  联动、与 fw4 flowtable 的实际交接，全部待刷机迭代
