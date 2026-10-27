@@ -1,0 +1,54 @@
+# Shipped so that uci wireless has a @wifi-device from the very first boot.
+#
+# LuCI hides "Network -> Wireless" unless this file has a wifi-device section
+# ("depends": {"uci": {"wireless": {"@wifi-device": true}}} in
+# /usr/share/luci/menu.d/luci-mod-network.json), and /usr/share/ucode/luci/
+# dispatcher.uc CACHES that verdict in /tmp/luci-indexcache.<hash>.json,
+# keyed only on the menu.d file list -- so whichever answer it computed on the
+# first page load after boot sticks until the next reboot.
+#
+# This image starts the radio 25 s into the boot (e2631-wifi-load S95 ->
+# e2631-wifi-boot DEFER=25) and only then generates a wireless config, so a
+# login before that moment used to freeze "Wireless" out of the menu for the
+# rest of the boot, no matter what was configured later.
+#
+# Everything here ships disabled: the radio must still be brought up by
+# /sbin/e2631-wifi-boot through procd, never by netifd racing the driver load.
+# e2631-wifi-ap flips these to enabled=1 when it provisions the AP.
+#
+# The paths are this board's shape: ONE pci function hosting two phys
+# (phy0 = 2.4G, phy1 = 5G); "+1" selects the second phy on the same device.
+
+config wifi-device 'radio0'
+	option type 'mac80211'
+	option path 'soc/f000000.pcie/pci0000:00/0000:00:00.0/0000:01:00.0'
+	option band '2g'
+	option channel '1'
+	option htmode 'HE20'
+	option country 'CN'
+	option disabled '1'
+
+config wifi-device 'radio1'
+	option type 'mac80211'
+	option path 'soc/f000000.pcie/pci0000:00/0000:00:00.0/0000:01:00.0+1'
+	option band '5g'
+	option channel '36'
+	option htmode 'HE80'
+	option country 'CN'
+	option disabled '1'
+
+config wifi-iface 'default_radio0'
+	option device 'radio0'
+	option network 'lan'
+	option mode 'ap'
+	option ssid 'E2631'
+	option encryption 'none'
+	option disabled '1'
+
+config wifi-iface 'default_radio1'
+	option device 'radio1'
+	option network 'lan'
+	option mode 'ap'
+	option ssid 'E2631'
+	option encryption 'none'
+	option disabled '1'

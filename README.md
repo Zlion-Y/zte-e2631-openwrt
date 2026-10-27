@@ -99,6 +99,13 @@ musl.libc.org 在 12 秒探测窗口内一个字节都不给）。三件事让�
    v1.3 补齐 `kmod-nft-offload` + `flow_offloading=1`（含 hw），并默认启用 RPS/XPS、
    IRQ 亲中和 PAUSE 帧通告关闭（后者的依据是同族 ZX279133 端口的实测，恩山 thread-8486503）。
    已知边界：PPPoE 可能不走硬件路径；PPE 表 384 条，溢出自动回落软件路径。
+   **v1.4 附带 IPv6 修复**：zwzzrl fork 真机实测发现硬件卸载会打断 IPv6 TCP（握手 1 ms
+   成功、载荷 0 字节；根因是 PPE 激活时 IPv6 ethertype trap 被清掉、MAC 又移出 trap-DMAC
+   表，IPv6 发往路由器的帧无路可达 CPU）。v1.4 修驱动而非砍功能（`zx279128s-ppe.c`
+   overlay 副本：PPE 激活时 IPv6 trap 恒开，IPv6 走软件路径、IPv4 照走硬件路径）——
+   该修复按 fork 的实测机制推证，**未真机验证**；万一 IPv6 再挂，在 LuCI
+   `网络 → 防火墙` 关掉「硬件流量卸载」即可回到已知良好状态。详见 known-issues
+   `PPE-IPV6-TCP`。
 2. **Wi-Fi 开机自启（默认开启）**：时序与恢复机制来自 tigaotg 的交接 PR#1（真机验证过双频自动
    广播、改 SSID/密码重启保留）。首次开机配 WPA2-PSK（密码由本机 MAC 派生并打印在 console），
    绝不广播开放网络；上次启动未完成则跳过本次自启。不想要：`touch /etc/e2631-wifi-noautoload`。

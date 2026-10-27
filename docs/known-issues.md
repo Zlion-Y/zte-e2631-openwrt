@@ -33,7 +33,7 @@ points at something in the repository or at a measurement.
   surface: wi-fi
   symptom: no radio until you run two commands
   verified: yes (v1.2); v1.3 replaces the two gates with START=95 deferred autoboot
-  note: v1.3 default is AUTO-LOAD ON (tigaotg's verified sequencing); opt back out with /etc/e2631-wifi-noautoload. First boot provisions WPA2-PSK (key derived from the unit MAC, printed on the console) and sets the root password - never an open AP
+  note: v1.3 default is AUTO-LOAD ON (tigaotg's verified sequencing); opt back out with /etc/e2631-wifi-noautoload. Current first-boot code provisions an OPEN setup AP and does not preset a root password; isolate the setup network and set both passwords immediately (older security-default notes did not match the implementation - wording from zwthys-cyber's fork). Since v1.4 the shipped /etc/config/wireless carries disabled radio sections so the LuCI Wireless page exists from the very first boot (dispatcher caches its menu verdict; zwzzrl's device finding)
 - id: HB-CONSOLE-NOISE
   severity: minor
   status: fixed
@@ -70,6 +70,14 @@ points at something in the repository or at a measurement.
   cause: v1.2 shipped no flow offload (missing kmod-nft-offload + the firewall flag) although the gmac driver has had the full PPE hardware path (zx279128s-ppe.c, TC_SETUP_FT) all along; WiFi-originated flows are architecturally rejected by the PPE (ingress must be a switch port) and stay on the CPU software path (~200M) - the vendor reaches gigabit over WiFi only via its private IDM/NPP engines on the 4.1 kernel
   workaround: none needed for wired; do NOT use /proc/net/dev WAN counters to measure PPE traffic (hardware-forwarded packets are invisible there) - read ppe_flows in /sys/kernel/debug/92000000.ethernet/dma_state instead
   next: find an unthrottled server to probe the true PPE ceiling (395M was still climbing when stopped); PPPoE uplinks may not take the hardware path (sibling ZX279133 hit exactly that)
+- id: PPE-IPV6-TCP
+  severity: major
+  status: mitigated
+  surface: ethernet + ipv6
+  symptom: "with flow_offloading_hw=1, a LAN client -> router IPv6 TCP connection completes the handshake in ~1 ms and then no payload ever arrives (0 bytes, timeout); IPv4 over the same port and ICMPv6 are fine, so it reads as a random hang. Also stalls IPv6 TCP through the router."
+  verified: "yes on hardware by the zwzzrl fork (2026-10-27, freshly flashed image with the v1.3 default 1/1): 1/1 -> connect ok, 0 bytes, 6 s timeout; 1/0 and 0/0 -> HTTP/1.0 200 OK in 1 ms. Reproduced on ports 80/22/53 with both ULA and fe80 destinations, flipped every time by fw4 stop/start. The mechanism is read off the driver source: zx_update_traps() cleared the IPv6 ethertype trap whenever sw_members != 0 (br-lan always has members) while zx_update_mac_tables() had moved our MACs from the trap-DMAC table into the ONU routed table, and the classifier holds IPv4 rules only (zx_ppe_v4_index/zx_ppe_v4_rule) - so an IPv6 frame addressed to the router had no path to the CPU left"
+  workaround: "v1.4 fixes the driver instead of dropping the feature (owner decision: wired acceleration stays on by default): the overlay copy of zx279128s-ppe.c keeps the IPv6 ethertype trap on whenever the PPE is active, so IPv6 always reaches the CPU (the trap fires before the flow lookup) and rides the software path - correct, LAN-to-LAN included - while IPv4 keeps the PPE. [实测 for the bug + mechanism; 推断 for the fix: the change is source-verified against the fork's measurements but has NOT been device-verified on this build - if IPv6 TCP stalls again, switch off 硬件流量卸载 in LuCI (Network -> Firewall), which is the fork's measured-good state, and report it]"
+  next: "device-verify the trap fix on an IPv6-capable uplink (the fork's exact repro: connect + fetch over ULA and fe80 with 1/1). The vendor's own answer is a full IPv6 classifier (per-class NPU caps npu_ipv6_l3tcp{up,down}_cap, IPv6 SNAT/DNAT RAM, NPTv6, local-IPv6 register files - stock vmlinux never uses nf_flow_table/TC_SETUP_FT at all); replicating it is the large-change option and stays out of scope. Cost of the current fix: IPv6 LAN-to-LAN bridges over the CPU while offload is on"
 - id: USERDATA-EXTROOT
   severity: minor
   status: mitigated

@@ -17,9 +17,10 @@
 # board: dual-band APs broadcast ~60 s after power-on and a changed SSID/
 # key survives reboot.  What this version changes on top:
 #
-#   - the first boot provisions WPA2-PSK, never an open network, and it
-#     also sets the root password (an open AP plus a passwordless LuCI is
-#     a root shell for whoever walks past);
+#   - first boot creates an OPEN setup AP and does not preset the root
+#     password. Configure both immediately on an isolated network; the
+#     first-boot setup below is authoritative, not older release notes
+#     (wording aligned with zwthys-cyber's fork);
 #   - the first-boot SSID is this unit's FACTORY name, read from the vendor
 #     "tag" partition (the pair S / S+"-5G" is unmistakable in there);
 #     "E2631" is only the fallback when no tag pair is readable;
@@ -149,7 +150,21 @@ fi
 
 log "MT7916 ready"
 
-if [ ! -e "$PROVISIONED" ] && factory_wireless; then
+have_radios() {
+	uci -q show wireless 2>/dev/null |
+		sed -n 's/^\(wireless\.[^=]*\)=wifi-device$/\1/p' | grep -q .
+}
+
+# 2026-10-26: the marker alone was not enough.  /etc lives on the overlay and a
+# firmware write does not always clear it, so a box could carry
+# /etc/e2631-wifi-provisioned from an older install while /etc/config/wireless
+# was gone.  The else-branch then only ran "wifi up", which cannot create a
+# radio section -- and LuCI hides Network -> Wireless entirely unless uci
+# wireless has a @wifi-device ("depends": {"uci": {"wireless": ...}} in
+# menu.d/luci-mod-network.json).  The result looked like "this image has no
+# wireless page".  Now a missing radio section provisions again; factory_wireless
+# still guarantees a user's own SSID/key/state is never rewritten.
+if { [ ! -e "$PROVISIONED" ] || ! have_radios; } && factory_wireless; then
 	SSID=$(factory_ssid) || SSID=E2631
 	# First boot provisions an OPEN network on purpose (2026-10-24 decision):
 	# no Wi-Fi key and no root/admin password are preset - the user sets both.
