@@ -99,7 +99,12 @@ g_upgrade() {
 		echo "test_upgrade.py failed"; return 1; }
 }
 
+g_apply() {
+	bash "$E2631_KIT/wsl/apply-gate.sh"
+}
+
 run "upgrade failure paths (python)" g_upgrade
+run "apply.sh fail-fast + structural assertions" g_apply
 run "shell syntax (bash -n)" g_shell
 run "javascript (node --check)" g_js
 run "device scripts (busybox ash)" g_ash

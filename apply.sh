@@ -11,7 +11,16 @@ set -eu
 . "$(dirname "$0")/scripts/env.sh"
 
 BASE_SHA=${E2631_BASE_SHA:-db8b8d4130457dbe46558a7cea872dd2dae539e6}
-TREE=${1:-openwrt}
+TREE=
+ALLOW_OTHER_BASE=0
+for arg in "$@"; do
+	case "$arg" in
+	--allow-other-base) ALLOW_OTHER_BASE=1 ;;
+	*) [ -z "$TREE" ] || { echo "apply.sh: unexpected argument: $arg" >&2; exit 2; }
+	   TREE=$arg ;;
+	esac
+done
+TREE=${TREE:-openwrt}
 HERE=$(cd "$(dirname "$0")" && pwd)
 
 [ -d "$TREE/target/linux/sanechips" ] || {
@@ -21,14 +30,44 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 	echo "        $E2631_BASE_REPO#$E2631_BASE_SHA." >&2
 	exit 1; }
 
-# Say which commit the tree is actually at. Everything below edits files by
-# pattern, so a tree at another commit can apply cleanly and still be wrong.
+# Say which commit the tree is actually at, and refuse a mismatch: everything
+# below edits files by pattern, so a tree at another commit can apply cleanly
+# and still be wrong (P1-1: the old NOTE printed and carried on).
 if command -v git >/dev/null 2>&1 && [ -d "$TREE/.git" ]; then
 	at=$(git -C "$TREE" rev-parse HEAD 2>/dev/null || echo unknown)
-	[ "$at" = "$BASE_SHA" ] || echo "apply.sh: NOTE $TREE is at $at, not the pinned $BASE_SHA"
+	if [ "$at" != "$BASE_SHA" ]; then
+		if [ "$ALLOW_OTHER_BASE" = 1 ]; then
+			echo "apply.sh: WARNING $TREE is at $at, not the pinned $BASE_SHA (accepted via --allow-other-base)"
+		else
+			echo "apply.sh: REFUSING: $TREE is at $at, not the pinned $BASE_SHA" >&2
+			echo "        the overlay edits this tree by pattern; on another commit those" >&2
+			echo "        edits can apply cleanly and still be wrong. Check out the pinned" >&2
+			echo "        base, or re-run with --allow-other-base to accept the mismatch." >&2
+			exit 1
+		fi
+	fi
 fi
 
 cp -r "$HERE/overlay/." "$TREE/"
+
+# cp -r only adds. A file deleted from overlay/ stays in a tree that was
+# applied before, so it still gets built into the image (that is exactly how
+# two abandoned Dosilicon SPI-NAND patches survived, and how zwzzrl's fork
+# shipped deleted wanport files in v1.4). overlay-removed.txt lists the paths
+# apply.sh must delete from the tree on every run.
+if [ -f "$HERE/overlay-removed.txt" ]; then
+	gone=0
+	while IFS= read -r f; do
+		case "$f" in ''|\#*) continue ;; esac
+		[ -e "$TREE/$f" ] || continue
+		rm -f "$TREE/$f"
+		gone=$((gone + 1))
+		echo "removed from tree: $f"
+		rmdir "$TREE/$(dirname "$f")" 2>/dev/null || true
+	done <"$HERE/overlay-removed.txt"
+	[ "$gone" = 0 ] || echo "apply.sh: $gone file(s) from overlay-removed.txt deleted from the tree"
+fi
+
 mkdir -p "$TREE/tools"
 cp "$HERE/tools/mkfactory.mjs" "$TREE/tools/e2631-mkfactory.mjs"
 # The overlay is authored on a filesystem without exec bits; these have to be
@@ -37,6 +76,7 @@ cp "$HERE/tools/mkfactory.mjs" "$TREE/tools/e2631-mkfactory.mjs"
 for f in sbin/e2631-probe sbin/e2631-trial sbin/e2631-commit sbin/e2631-leds sbin/e2631-hb \
 	 sbin/e2631-linkspeed sbin/e2631-wifi-on sbin/e2631-wifi-ap sbin/e2631-fwstate \
 	 sbin/e2631-wifi-boot sbin/e2631-upgrade sbin/e2631-netune-apply \
+	 sbin/e2631-wanport \
 	 sbin/e2631-userdata-status sbin/e2631-userdata-firstboot sbin/e2631-userdata-init \
 	 etc/init.d/e2631-trial etc/init.d/e2631-wifi-eeprom etc/init.d/e2631-wifi-load \
 	 etc/init.d/e2631-leds etc/init.d/e2631-hb etc/init.d/e2631-userdata \
@@ -44,6 +84,23 @@ for f in sbin/e2631-probe sbin/e2631-trial sbin/e2631-commit sbin/e2631-leds sbi
 	 lib/upgrade/platform.sh \
 	 etc/hotplug.d/firmware/11-mt76-caldata; do
 	chmod +x "$TREE/target/linux/sanechips/base-files/$f"
+done
+
+# Same problem, one level deeper: rpcd execs the files in /usr/libexec/rpcd,
+# so a 0644 plugin is a page that shows an empty result and an rpcd log line
+# nobody reads (zwzzrl's v3 image was built exactly like that). Walk the
+# freshly copied package trees and set the bit; package/feeds/* are symlinks
+# into feeds/, and find does not follow them, so feeds stay untouched.
+plugins=$(find "$TREE/package" -type f -path '*/root/usr/libexec/rpcd/*' 2>/dev/null || true)
+if [ -n "$plugins" ]; then
+	echo "$plugins" | while read -r f; do chmod 0755 "$f"; done
+	echo "rpcd plugins made executable: $(echo "$plugins" | wc -l)"
+fi
+
+# /etc/config/* is 0644 in the image; an editor writing 0600 into the repo
+# would ship a config only root can read.
+for f in "$TREE/target/linux/sanechips/base-files/etc/config/"*; do
+	[ -f "$f" ] && chmod 0644 "$f"
 done
 
 # rc.d enablement deliberately ships NO "S95..." files: a Windows checkout of
@@ -78,6 +135,10 @@ if [ -n "${E2631_GNU_MIRROR:-}" ] && [ -f "$TREE/scripts/projectsmirrors.json" ]
 	# fails, so a stalled head entry costs the whole timeout chain per package.
 	# Move the chosen mirror to the front instead of appending a duplicate.
 	# Plain sed with a | delimiter - this file is /bin/sh, so no ${var//x/y}.
+	grep -q '"@GNU": \[' "$TREE/scripts/projectsmirrors.json" || {
+		echo "apply.sh: projectsmirrors.json has no '@GNU': [ to edit" >&2; exit 1; }
+	grep -q "$E2631_GNU_MIRROR" "$TREE/scripts/projectsmirrors.json" || {
+		echo "apply.sh: E2631_GNU_MIRROR=$E2631_GNU_MIRROR is not listed in projectsmirrors.json" >&2; exit 1; }
 	sed -i "\|$E2631_GNU_MIRROR|d" "$TREE/scripts/projectsmirrors.json"
 	sed -i "0,/\"@GNU\": \[/s||\"@GNU\": [\n\t\t\"$E2631_GNU_MIRROR\",|" "$TREE/scripts/projectsmirrors.json"
 	sed -n '/"@GNU": \[/,+2p' "$TREE/scripts/projectsmirrors.json"
@@ -234,4 +295,56 @@ if [ -d "$PD" ] && [ -d "$TREE/.git" ]; then
 	fi
 fi
 
-echo "overlay applied to $TREE (base $BASE_SHA)"
+# ---- structural assertions (P1-1): what this script promises, checked ----
+# Every promise the blocks above make is verified against the tree, and the
+# verdict lands in out/apply-report.txt. A silent wrong-tree apply is what
+# this whole script exists to prevent.
+REPORT=${E2631_APPLY_REPORT:-${E2631_OUT:-$TREE}/apply-report.txt}
+: > "$REPORT" 2>/dev/null || REPORT=/dev/null
+APPLY_FAILED=0
+assert() {	# assert <label> <command...>
+	local label=$1; shift
+	if "$@" >/dev/null 2>&1; then
+		echo "ok: $label" | tee -a "$REPORT"
+	else
+		echo "FAIL: $label" | tee -a "$REPORT" >&2
+		APPLY_FAILED=1
+	fi
+}
+assert_one_line() {	# assert_one_line <label> <added-max> <deleted-max> <path>
+	local label=$1 amax=$2 dmax=$3 path=$4 a d ns
+	command -v git >/dev/null 2>&1 && [ -d "$TREE/.git" ] || return 0
+	ns=$(git -C "$TREE" diff --numstat -- "$path")
+	[ -n "$ns" ] || { echo "FAIL: $label (no diff against the base blob - overlay change missing?)" | tee -a "$REPORT" >&2; APPLY_FAILED=1; return; }
+	a=${ns%%$'\t'*}; d=${ns#*$'\t'}; d=${d%%$'\t'*}
+	if [ "$a" -le "$amax" ] && [ "$d" -le "$dmax" ]; then
+		echo "ok: $label (+$a/-$d)" | tee -a "$REPORT"
+	else
+		echo "FAIL: $label (+$a/-$d exceeds the expected size - a base update is being shadowed)" | tee -a "$REPORT" >&2
+		APPLY_FAILED=1
+	fi
+}
+
+assert "image/Makefile includes Makefile.e2631" grep -q 'Makefile.e2631' "$IMG"
+assert "board dts present" test -f "$DTS"
+assert "base patch creating zte/zx279128s.dtsi present" \
+	bash -c "ls '$TREE'/target/linux/sanechips/patches-6.18/026-* >/dev/null 2>&1"
+assert "CONFIG_CMDLINE_FORCE written into the target config" grep -q '^CONFIG_CMDLINE_FORCE=y' "$CFG"
+assert "forced command line names a root device" grep -q '^CONFIG_CMDLINE=.*root=/dev/mtdblock' "$CFG"
+assert "mt7915e autoload removed from the mt76 package" \
+	bash -c "test -f '$MT76' && ! grep -q 'AutoProbe,mt7915e' '$MT76'"
+assert "VFP/NEON/Thumbee disabled in the target config" \
+	bash -c "! grep -qiE '^CONFIG_(VFP|VFPv3|NEON|KERNEL_MODE_NEON|ARM_THUMBEE)=y\$' '$CFG'"
+assert "lockup detectors flipped in the generic config" grep -q '^CONFIG_SOFTLOCKUP_DETECTOR=y' "$GEN"
+assert "overlay ppe.c carries the IPv6 trap fix" \
+	grep -q 'v6 = READ_ONCE(adapter->ppe_active) || !sw' \
+	"$TREE/target/linux/sanechips/files/drivers/net/ethernet/zte/zx279128s-ppe.c"
+assert_one_line "overlay ppe.c stays a small diff over the base blob" 50 10 \
+	"target/linux/sanechips/files/drivers/net/ethernet/zte/zx279128s-ppe.c"
+
+if [ "$APPLY_FAILED" != 0 ]; then
+	echo "apply.sh: $REPORT records structural failures; the tree is NOT in the state this script promises" >&2
+	exit 1
+fi
+
+echo "overlay applied to $TREE (base $BASE_SHA); assertions recorded in $REPORT"
