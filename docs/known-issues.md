@@ -184,10 +184,11 @@ points at something in the repository or at a measurement.
   workaround: pass --pc with the address of the interface that has the router on it
 - id: NO-CI
   severity: minor
-  status: wontfix
+  status: fixed
   surface: contributing
   symptom: nothing runs on a push; the build happens on someone's machine
-  note: deliberate (the owner publishes releases by hand). make check is the entry point that replaced the workflow's gates
+  verified: yes - .github/workflows/check.yml (make check on push/PR + the upgrade-check refusal assertion) and firmware.yml (on-demand build + prerelease with SHA256SUMS), adopted from the zwthys-cyber fork and adapted; note the workflows are local-only until the owner pushes
+  note: the old 'deliberate' note protected a one-machine build; the gates were already CI-shaped (make check), the fork proved it
 - id: REGDB-NOT-SHIPPED
   severity: minor
   status: fixed

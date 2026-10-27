@@ -1,7 +1,7 @@
 #!/bin/bash
-# One command for every gate this kit has. There is deliberately no CI: the build
-# runs locally, so the checks that used to live in a workflow have to be runnable
-# by hand, and this is the entry point that runs all of them.
+# One command for every gate this kit has. The same set runs in CI
+# (.github/workflows/check.yml) and by hand; this is the entry point that
+# runs all of them locally.
 #
 #   bash scripts/check.sh            # or: make check
 #
