@@ -932,7 +932,7 @@ static const char *upgrade_guard(const struct slot_state *other, bool no_check)
 static void backup_slot_head(struct mtd *m, int slot, uint32_t serial)
 {
 	const char *dir = getenv("E2631_BACKUP_DIR");
-	char path[512], tmp[600], line[512], mp[400];
+	char path[512], tmp[512], line[512], mp[400];
 	uint32_t bs = m->info.erasesize;
 	uint64_t left = 1024 * 1024;
 	uint8_t *buf;
@@ -946,7 +946,7 @@ static void backup_slot_head(struct mtd *m, int slot, uint32_t serial)
 		if (f) {
 			while (fgets(line, sizeof(line), f))
 				if (strstr(line, "userdata") &&
-				    sscanf(line, "%*s %399s", mp) == 1 &&
+				    sscanf(line, "%*s %299s", mp) == 1 &&
 				    strcmp(mp, "userdata"))
 					break;
 			fclose(f);
@@ -955,12 +955,33 @@ static void backup_slot_head(struct mtd *m, int slot, uint32_t serial)
 			die("userdata is not mounted, so the other system cannot be "
 			    "backed up before it is replaced; initialize userdata first "
 			    "(or set E2631_BACKUP_DIR)");
-		snprintf(path, sizeof(path), "%s/e2631-backup", mp);
-		dir = path;
+		dir = mp;
 	}
-	mkdir(dir, 0755);
-	snprintf(tmp, sizeof(tmp), "%s/slot%d-serial%u-head.bin.part", dir, slot, serial);
-	snprintf(path, sizeof(path), "%s/slot%d-serial%u-head.bin", dir, slot, serial);
+	/* A bounded copy with PROVABLE fits for -Werror=format-truncation:
+	 * mountpoints are capped at 299 bytes when scanned from /proc/mounts,
+	 * an E2631_BACKUP_DIR at 300, so dirbuf (400) holds dir plus the 13
+	 * bytes of "/e2631-backup" with room; tmp/path (512) hold dirbuf plus
+	 * the "/slot%d-serial%u-head.bin" shape (~41 bytes worst case) - every
+	 * size relation below is one gcc can see.
+	 */
+	{
+		char dirbuf[400];
+		size_t dl;
+
+		dl = strlen(dir);
+		if (dl > 300)
+			die("backup directory path too long");
+		memcpy(dirbuf, dir, dl + 1);
+		if (dir == mp) {
+			memcpy(dirbuf + dl, "/e2631-backup", 14);
+			dl += 13;
+		}
+		mkdir(dirbuf, 0755);
+		snprintf(tmp, sizeof(tmp), "%s/slot%d-serial%u-head.bin.part",
+			 dirbuf, slot, serial);
+		snprintf(path, sizeof(path), "%s/slot%d-serial%u-head.bin",
+			 dirbuf, slot, serial);
+	}
 	buf = malloc(left);
 	if (!buf)
 		die("out of memory");
