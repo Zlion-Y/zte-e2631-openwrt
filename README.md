@@ -36,19 +36,18 @@ Windows 侧工具（`host/`），以及带证据注记的两份中文工作文�
 flash/squashfs/jffs2 驱动是内建的、强制命令行生效、USB 与看门狗保持关闭、soft-float，
 以及根文件系统的包清单。
 
-与 H3600 那份板级文件**有意不同**的地方：
+## 这块板的硬件事实（构建者必须知道）
 
 * 一个 WAN + 三个 LAN，四个口全在集成 GbE PHY 上 —— 没有外置 PHY
-* 256 MiB 内存，不是 512
-* **整镜像 A/B 槽**（`0x700000` / `0x2300000`，各 28 MiB），而不是 4 MiB kernel 分区 + UBI
+* 256 MiB 内存，128 MiB SPI-NAND（HYF1GQ4UTACAE，2 KiB 页 / 128 KiB 块）
+* **整镜像 A/B 槽**（`0x700000` / `0x2300000`，各 28 MiB），槽角色由版本头
+  serial 决定、不固定（cspboot 规则：CRC1 有效 + serial 大者，平手选槽 0）
 * 没有 USB：原厂内核里根本没有 USB；在没焊控制器的板子上探测它会重启整颗 SoC
 * 用户态 soft-float：这颗 SoC 不实现 VFP，所以 `CONFIG_VFP` 必须保持关闭
 * JFFS2 clean marker 放在**数据区**而不是 OOB（补丁 029、030）：带 on-die ECC 的 SPI-NAND 每次编程都会
   重算页 ECC，于是同一页写两次读回来就是不可纠。缺了这条，overlay 重挂失败，机器卡在只读根上
-* 内核命令行是编译进去的，并且开了 `CONFIG_CMDLINE_FORCE`：原厂 U-Boot 传的是
-  `root=/dev/mtdblock8 rootfstype=jffs2 init=/bin/sh`，那说的是原厂布局，而且会把 PID 1 换成一个 shell
-
-上面两处配置改动是 per-target 的，所以一棵在这里 overlay 过的树构建出来的是 E2631，不是 H3600。
+* 内核命令行是编译进去的，并且开了 `CONFIG_CMDLINE_FORCE`：bootloader 传的
+  `root=/dev/mtdblock8 rootfstype=jffs2 init=/bin/sh` 说的是原厂布局，且会把 PID 1 换成一个 shell
 
 ## 在 WSL 里构建
 
@@ -89,9 +88,10 @@ musl.libc.org 在 12 秒探测窗口内一个字节都不给）。三件事让�
 于是它报的是上一轮留在那儿的东西 —— 现在它先解包。任何"根文件系统里到底有什么"的回答，
 只要来自一个你本次没有刚解出来的目录，那就是个过期答案。
 
-## 真机上的状态（2026-10-24，v1.3；v1.2 及更早见 git 历史）
+## 真机上的状态（最新构建 v1.6；v1.3–v1.5 与更早见 git 历史与各 progress 文档）
 
-当前包：Release **`v1.3`** —— 主题"从能刷到能用"。相对 v1.2 的四件事，每件的证据链在
+当前构建：**`v1.6`**（本轮离线验证，未发布到 GitHub——发布节奏由 owner 决定）。
+历史 Release：`v1.3`（"从能刷到能用"）及 v1.4/v1.5 的迭代说明见各 progress 文档与
 [docs/known-issues.md](docs/known-issues.md)：
 
 1. **流卸载默认开启（硬件加速）**：v1.2 的 305/190 Mbit/s 封顶不是缺引擎——gmac 驱动一直带着
@@ -123,6 +123,9 @@ musl.libc.org 在 12 秒探测窗口内一个字节都不给）。三件事让�
 | 通过原厂 `supgrade.html` 页面刷入 | **可用** —— 页面原样收下这个包，写入槽 1，serial 自己从 33 走到 34，然后重启进我们的 OpenWrt |
 | 从 OpenWrt 切回原厂系统 | **可用** —— `e2631-fwslot switch` + `reboot`，failsafe 里也够得着；LuCI 板卡页也有按钮 |
 | 在线更新（GitHub Release） | **可用** —— `e2631-upgrade run`（或 LuCI 备份/升级页"在线升级"标签）；ghproxy 加速可配 |
+| WAN 口调试 SSH | **可用**（v1.6）—— 挂在主路由下时上游 LAN 可直接 ssh 到 WAN 地址（防火墙放行私网段）；**首启请先设 root 密码** |
+| WAN 口选择（手动） | **可用**（v1.6，zwzzrl fork 真机验证版）—— `网络 → WAN 口`，任意有线口当 WAN，WAN MAC 固化 |
+| 2.4G/5G 速率档 | 2.4G = HE40+noscan（超原厂实测的 20MHz，2x2 上限 574M PHY）、5G = HE80；RF 校准即原厂 caldata 全量透传 |
 | LuCI（Argon 主题、全中文）、`reboot`、LED 状态灯 | **可用** —— 启动红慢闪→联网绿常亮/未联网红常亮→联网自动切换 |
 | 有线（PPE 硬件流卸载） | **≥395 Mbps 实测、CPU 7%** —— OPPO CDN 32 线程；WAN 软件计数器不动（硬件直转铁证） |
 | Wi-Fi（MT7916） | **双频自动加载、开放 AP 首启（用户自设密码）**；5G 23dBm；关联硬死机/冷启 1/3 仍 open（有 pending 自恢复） |

@@ -46,12 +46,12 @@ partition order the dtb really creates, built-in flash/squashfs/jffs2
 drivers, the forced command line, USB and watchdog staying disabled,
 soft-float, and the root filesystem's package list.
 
-What is deliberately different from the H3600 board file:
+## Board facts a builder must know
 
 * one WAN + three LAN, all four on the integrated GbE PHYs - no external PHY
-* 256 MiB RAM, not 512
-* whole-image A/B slots (0x700000 / 0x2300000, 28 MiB each) instead of a
-  4 MiB kernel partition plus UBI
+* 256 MiB RAM, 128 MiB SPI-NAND (HYF1GQ4UTACAE, 2 KiB pages / 128 KiB blocks)
+* whole-image A/B slots (0x700000 / 0x2300000, 28 MiB each); slot roles are
+  NOT fixed - cspboot boots "valid header CRC1 + higher serial", ties to slot 0
 * no USB: the vendor kernel has no USB at all, and probing the controller on
   boards where it is not populated reboots the SoC
 * soft-float userspace: this SoC implements no VFP, so CONFIG_VFP must stay off
@@ -60,11 +60,8 @@ What is deliberately different from the H3600 board file:
   written twice comes back uncorrectable. Without this the overlay fails to
   remount and the box is stuck on a read-only root.
 * the kernel command line is compiled in and CONFIG_CMDLINE_FORCE is on: the
-  vendor U-Boot passes `root=/dev/mtdblock8 rootfstype=jffs2 init=/bin/sh`,
+  bootloader passes `root=/dev/mtdblock8 rootfstype=jffs2 init=/bin/sh`,
   which names the vendor layout and would replace PID 1 with a shell.
-
-The two config edits above are per-target, so a tree that has been overlaid here
-builds the E2631, not the H3600.
 
 ## Building it inside WSL
 
