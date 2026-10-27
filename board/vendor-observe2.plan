@@ -1,0 +1,11 @@
+700|root
+1100|${ZTE_TELNET_PW}
+1800|echo U1; cat /proc/zte/sys/ffe/cmd 2>&1
+4200|echo U2; ls /proc/zte/sys/ffe /proc/zte/sys/qos 2>&1
+5600|echo U3; for f in /proc/zte/sys/qos/*; do echo "== $f"; cat "$f"; done 2>&1 | sed -n "1,40p"
+8200|echo U4; ls /proc/tm 2>&1; sed -n "1,10p" /proc/interrupts 2>&1
+10600|echo U5; for f in /proc/tm/*; do echo "== $f"; sed -n "1,6p" "$f"; done 2>&1 | sed -n "1,40p"
+13400|echo U6; cat /proc/sys/net/core/netdev_max_backlog /proc/sys/net/ipv4/tcp_congestion_control 2>&1
+14400|echo U7; cat /proc/capability/boardtype 2>&1; cat /proc/net/dev 2>&1 | sed -n "1,12p"
+16200|echo U8; cat /proc/zte/sys/ffe/* 2>&1 | sed -n "1,30p"
+18000|echo ZDONE

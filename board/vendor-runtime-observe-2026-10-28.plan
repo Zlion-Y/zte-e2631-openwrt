@@ -1,0 +1,21 @@
+800|root
+1200|${ZTE_TELNET_PW}
+2000|echo T1; ls /proc/zte/sys/ 2>&1
+3200|echo T2; cat /proc/zte/sys/ffe/cmd 2>&1 | head -60
+5600|echo T3; ls /proc/ 2>/dev/null | grep -iE "ffe|csp|tm|spa|adm|npu|onux|pon" | tr "\n" " "; echo
+6800|echo T4; cat /etc/wireless/mt7916/mt7916.dbdc.b0.dat 2>&1
+9200|echo T5; cat /etc/wireless/mt7916/mt7916.dbdc.b1.dat 2>&1
+11600|echo T6; cat /etc/wireless/mt7916/l1profile.dat.dbdc 2>&1
+12600|echo T7; cat /proc/interrupts 2>&1 | grep -E "eth|sw|tm|idm|npu|wlan|mt79|CPU" | head -14
+14000|echo T8; for q in /sys/class/net/*/queues/rx-*/rps_cpus; do echo "$q=$(cat $q 2>/dev/null)"; done 2>&1
+15400|echo T9; ip -o link 2>/dev/null | awk -F: '{print $2}' | tr -d " " | tr "\n" " "; echo
+16400|echo T10; cat /proc/sys/net/ipv4/tcp_congestion_control /proc/sys/net/core/rmem_default /proc/sys/net/core/wmem_default /proc/sys/net/core/netdev_max_backlog 2>&1
+17600|echo T11; cat /proc/net/dev 2>&1
+18800|echo T12; free; uptime
+19800|echo T13; cat /proc/capability/boardtype /proc/capability/portinfo 2>/dev/null | head -6; ls /proc/capability 2>/dev/null
+21000|echo T14; md5sum /etc/wireless/mt7916/mt7916.dbdc.b0.dat /etc/wireless/mt7916/mt7916.dbdc.b1.dat /etc/wireless/mt7916/l1profile.dat.dbdc 2>&1
+22200|echo T15; cp -f /etc/wireless/mt7916/mt7916.dbdc.b0.dat /etc/wireless/mt7916/mt7916.dbdc.b1.dat /etc/wireless/mt7916/l1profile.dat.dbdc /var/tmp/ 2>&1; ls -l /var/tmp/*.dat
+23800|curl -f -sS -T /var/tmp/mt7916.dbdc.b0.dat http://192.168.5.16:8001/b0.dat; echo rc_b0=$?
+25200|curl -f -sS -T /var/tmp/mt7916.dbdc.b1.dat http://192.168.5.16:8001/b1.dat; echo rc_b1=$?
+26600|curl -f -sS -T /var/tmp/l1profile.dat.dbdc http://192.168.5.16:8001/l1.dat; echo rc_l1=$?
+28000|echo ZDONE

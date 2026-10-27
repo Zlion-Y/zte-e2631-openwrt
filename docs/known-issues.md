@@ -189,6 +189,22 @@ points at something in the repository or at a measurement.
   symptom: nothing runs on a push; the build happens on someone's machine
   verified: yes - .github/workflows/check.yml (make check on push/PR + the upgrade-check refusal assertion) and firmware.yml (on-demand build + prerelease with SHA256SUMS), adopted from the zwthys-cyber fork and adapted; note the workflows are local-only until the owner pushes
   note: the old 'deliberate' note protected a one-machine build; the gates were already CI-shaped (make check), the fork proved it
+- id: WAN-SSH-UNREACHABLE
+  severity: major
+  status: fixed
+  surface: debugging
+  symptom: with the router hung BELOW the main router (PC on the upstream LAN, this box's WAN port DHCP'd from it), SSH to the WAN address was refused by the wan-zone input rule - the box was undebuggable from exactly the direction it sits in
+  verified: "yes (owner setup, 2026-10-28); dropbear already listens on every interface, only the firewall blocked it"
+  workaround: v1.6 ships firewall traffic rules accepting tcp/22 on the wan zone from 192.168.0.0/16 and 10.0.0.0/8 (etc/uci-defaults/63_e2631_wan_ssh). Stated plainly: first boot has no root password and dropbear accepts empty passwords until one is set - with this rule anyone on the upstream LAN can root the box until you set a password. Set it first, or delete the rule in LuCI
+  note: the vendor box exposes telnet on its LAN-facing side with a factory password - the equivalent posture, minus the WAN-zone scoping
+- id: WIRELESS-PROFILE-VENDOR-FACTS
+  severity: minor
+  status: fixed
+  surface: wi-fi alignment
+  symptom: the vendor wireless profile was assumed to run 2.4G at 40 MHz; the pulled profiles say otherwise, and our defaults were set on that assumption
+  verified: "yes [实测 2026-10-28, telnet read-only]: vendor DBDC profiles (board/backup/wireless-dat/) show 2.4G = WirelessMode 16 (11ax) with HT_BW=0 (20 MHz), channel 6 fixed, TxPower 100% ; 5G = WirelessMode 17, HT_BW=1, channel 36 (HE80 block), CN. FFE runtime (/proc/zte/sys/ffe/cmd, version 3.6.6) exposes per-protocol 0/1/2 switches (FFE software fast-path vs NPU hardware offload), acc_thresh, rps_cpu_map/rps_tx_queue_max (the FFE owns RPS - every vendor netdev shows rps_cpus=0), and the idm IRQ is pinned to CPU1 (4.1M hits) with pon_tm on CPU0; idm1 carried 2.6 GB of real WiFi traffic (idm0 zero) - the accel handoff channel confirmed live"
+  workaround: our 2.4G stays HE40+noscan - it EXCEEDS the vendor's own 20 MHz and is the only way a 2.4G link can negotiate >=500M (2x2 HE40=574M PHY; the vendor's 20 MHz tops at 287M on both stacks). One-line revert to vendor parity: uci set wireless.radio0.htmode=HE20; uci delete wireless.radio0.noscan
+  note: l1profile references single-SKU tables (mt7916-sku.dat / -bf.dat) that do NOT exist on this unit - per-rate TX power comes from the EEPROM, which we already pass through whole
 - id: REGDB-NOT-SHIPPED
   severity: minor
   status: fixed

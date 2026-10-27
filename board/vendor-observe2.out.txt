@@ -1,0 +1,155 @@
+### connected 192.168.5.3:23
+E2631
+Login: 
+=== [send @700ms] "root\r\n"
+root
+Password: 
+=== [send @1100ms] "abc123!@#\r\n"
+
+
+BusyBox v1.17.2 (2025-09-25 21:57:20 CST) built-in shell (ash)
+Enter 'help' for a list of built-in commands.
+
+/ # 
+=== [send @1800ms] "echo U1; cat /proc/zte/sys/ffe/cmd 2>&1\r\n"
+echo U1; cat /proc/zte/sys/ffe/cmd 2>&1
+U1
+version:3.6.6
+npu------npu 0/1 (off/on npu)
+npudd------npudd 0/1 (off/on npu drv debug info)
+npuretry------npuretry xxx (set npu max retry cnt)
+pps------pps cap_index layer type pps
+ipv6_tcp------proto 0/1/2 (0=all disable, 1=only enable ffe, 2=enable ffe and npu)
+ipv6_udp------proto 0/1/2 (0=all disable, 1=only enable ffe, 2=enable ffe and npu)
+ipv4_tcp------proto 0/1/2 (0=all disable, 1=only enable ffe, 2=enable ffe and npu)
+ipv4_udp------proto 0/1/2 (0=all disable, 1=only enable ffe, 2=enable ffe and npu)
+ipv6_mc------proto 0/1/2 (0=all disable, 1=only enable ffe, 2=enable ffe and npu)
+ipv4_mc------proto 0/1/2 (0=all disable, 1=only enable ffe, 2=enable ffe and npu)
+ipv6_raw------proto 0/1/2 (0=all disable, 1=only enable ffe, 2=enable ffe and npu)
+ipv4_raw------proto 0/1/2 (0=all disable, 1=only enable ffe, 2=enable ffe and npu)
+mcastdebug------show multicast rtp flow errors
+layer_enable------layer enable 0 1 2 3
+acc_thresh------acc_thresh 0 n
+icmp_acc------icmp_acc 0 1
+no_delete------no_delete 0 1
+timer------timer interval cpuid
+flowcnt------flowcnt xxxx
+ffe------ffe 0/1 (off/on ffe)
+del------del flows
+show------show typemap/devinfo
+rps_tx_queue_max------rps_tx_queue_max xxxx (set rps max queue length)
+rps_cpu_map------rps_cpu_map xxxx (set rps cpu-mask, 0 mean disable rps)
+/ # 
+=== [send @4200ms] "echo U2; ls /proc/zte/sys/ffe /proc/zte/sys/qos 2>&1\r\n"
+echo U2; ls /proc/zte/sys/ffe /proc/zte/sys/qos 2>&1
+U2
+/proc/zte/sys/ffe:
+cmd        ipv4_mc    ipv4_udp   ipv6_tcp   npu
+ffeinfo    ipv4_raw   ipv6_mc    ipv6_udp   scripts
+hash       ipv4_tcp   ipv6_raw   learnlist  sharedata
+
+/proc/zte/sys/qos:
+qos
+/ # 
+=== [send @5600ms] "echo U3; for f in /proc/zte/sys/qos/*; do echo \"== $f\"; cat \"$f\"; done 2>&1 | sed -n \"1,40p\"\r\n"
+echo U3; for f in /proc/zte/sys/qos/*; do echo "== $f"; cat "$f"; done 2>&1 
+| sed -n "1,40p"
+U3
+== /proc/zte/sys/qos/qos
+cat: read error: Input/output error
+/ # 
+=== [send @8200ms] "echo U4; ls /proc/tm 2>&1; sed -n \"1,10p\" /proc/interrupts 2>&1\r\n"
+echo U4; ls /proc/tm 2>&1; sed -n "1,10p" /proc/interrupts 2>&1
+U4
+shell
+           CPU0       CPU1       
+ 16:   20910473   20910463       GIC  27 Edge      gt
+ 19:      45514          0       GIC  43 Level     uart-pl011
+ 23:          0          0       GIC  83 Level     zx-tempersensor
+ 24:          0          0       GIC 122 Level     zx-tempersensor
+ 25:          0          0       GIC 123 Level     zx-tempersensor
+ 26:          0          0       GIC  66 Level     pon
+ 27:          0          0       GIC  67 Level     pon_npp
+ 28:          0    4117100       GIC  70 Level     idm
+ 29:     954177          0       GIC  68 Level     pon_tm
+/ # 
+=== [send @10600ms] "echo U5; for f in /proc/tm/*; do echo \"== $f\"; sed -n \"1,6p\" \"$f\"; done 2>&1 | sed -n \"1,40p\"\r\n"
+echo U5; for f in /proc/tm/*; do echo "== $f"; sed -n "1,6p" "$f"; done 2>&1
+ | sed -n "1,40p"
+U5
+== /proc/tm/shell
+NULL
+/ # 
+=== [send @13400ms] "echo U6; cat /proc/sys/net/core/netdev_max_backlog /proc/sys/net/ipv4/tcp_congestion_control 2>&1\r\n"
+echo U6; cat /proc/sys/net/core/netdev_max_backlog /proc/sys/net/ipv4/tcp_co
+ngestion_control 2>&1
+U6
+1000
+cubic
+/ # 
+=== [send @14400ms] "echo U7; cat /proc/capability/boardtype 2>&1; cat /proc/net/dev 2>&1 | sed -n \"1,12p\"\r\n"
+echo U7; cat /proc/capability/boardtype 2>&1; cat /proc/net/dev 2>&1 | sed -
+n "1,12p"
+U7
+type       : E1630
+flag       : 1
+vid        : 63
+cpuname    : ZX279128R
+cpumanu    : ZTE
+cpuprocess : 2
+cpufrequen : 1000MHZ
+totalram   : 256M
+rammanu    : Winbond
+flashsize  : 128M
+Inter-|   Receive                                                |  Transmit
+ face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed
+   br0: 105509678  487422    0    0    0     0          0         0  9498187   66850    0    0    0     0       0          0
+   pon: 239373509  870307    0    0    0     0          0         0 114522069  767305    0    0    0     0       0          0
+  idm0:       0       0    0    0    0     0          0         0        0       0    0    0    0     0       0          0
+apcli0:       0       0    0    0    0     0          0         0        0       0    0    0    0     0       0          0
+  idm1: 2611131052 9152131    0    0    0     0          0         0 3464475290 5794043    0    0    0     0       0          0
+ wlan3:       0       0    0    0    0     0          0         0        0       0    0    0    0     0       0          0
+ wlan0: 1473877587 1818080 95902    0    0     0          0       296 1505443195 1507641    0    0    0     0       0          0
+  sit0:       0       0    0    0    0     0          0         0        0       0    0    0    0     0       0          0
+apcli5g0:       0       0    0    0    0     0          0         0        0       0    0    0    0     0       0          0
+wlan5g3:       0       0    0    0    0     0          0         0        0       0    0    0    0     0       0          0
+/ # 
+=== [send @16200ms] "echo U8; cat /proc/zte/sys/ffe/* 2>&1 | sed -n \"1,30p\"\r\n"
+echo U8; cat /proc/zte/sys/ffe/* 2>&1 | sed -n "1,30p"
+U8
+version:3.6.6
+npu------npu 0/1 (off/on npu)
+npudd------npudd 0/1 (off/on npu drv debug info)
+npuretry------npuretry xxx (set npu max retry cnt)
+pps------pps cap_index layer type pps
+ipv6_tcp------proto 0/1/2 (0=all disable, 1=only enable ffe, 2=enable ffe and npu)
+ipv6_udp------proto 0/1/2 (0=all disable, 1=only enable ffe, 2=enable ffe and npu)
+ipv4_tcp------proto 0/1/2 (0=all disable, 1=only enable ffe, 2=enable ffe and npu)
+ipv4_udp------proto 0/1/2 (0=all disable, 1=only enable ffe, 2=enable ffe and npu)
+ipv6_mc------proto 0/1/2 (0=all disable, 1=only enable ffe, 2=enable ffe and npu)
+ipv4_mc------proto 0/1/2 (0=all disable, 1=only enable ffe, 2=enable ffe and npu)
+ipv6_raw------proto 0/1/2 (0=all disable, 1=only enable ffe, 2=enable ffe and npu)
+ipv4_raw------proto 0/1/2 (0=all disable, 1=only enable ffe, 2=enable ffe and npu)
+mcastdebug------show multicast rtp flow errors
+layer_enable------layer enable 0 1 2 3
+acc_thresh------acc_thresh 0 n
+icmp_acc------icmp_acc 0 1
+no_delete------no_delete 0 1
+timer------timer interval cpuid
+flowcnt------flowcnt xxxx
+ffe------ffe 0/1 (off/on ffe)
+del------del flows
+show------show typemap/devinfo
+rps_tx_queue_max------rps_tx_queue_max xxxx (set rps max queue length)
+rps_cpu_map------rps_cpu_map xxxx (set rps cpu-mask, 0 mean disable rps)
+version:3.6.6
+enable:1
+max flow:28136
+curr:9
+high_wm:26377
+/ # 
+=== [send @18000ms] "echo ZDONE\r\n"
+echo ZDONE
+ZDONE
+/ # 
+### --stop-on matched, ending early

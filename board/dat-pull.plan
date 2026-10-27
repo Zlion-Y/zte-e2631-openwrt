@@ -1,0 +1,6 @@
+600|root
+1000|${ZTE_TELNET_PW}
+1600|curl -f -sS -T /var/tmp/mt7916.dbdc.b0.dat http://192.168.5.16:8001/b0.dat; echo rc_b0=$?
+3400|curl -f -sS -T /var/tmp/mt7916.dbdc.b1.dat http://192.168.5.16:8001/b1.dat; echo rc_b1=$?
+5200|curl -f -sS -T /var/tmp/l1profile.dat.dbdc http://192.168.5.16:8001/l1.dat; echo rc_l1=$?
+6600|echo ZDONE
