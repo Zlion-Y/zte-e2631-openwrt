@@ -188,6 +188,22 @@ points at something in the repository or at a measurement.
   surface: contributing
   symptom: nothing runs on a push; the build happens on someone's machine
   note: deliberate (the owner publishes releases by hand). make check is the entry point that replaced the workflow's gates
+- id: REGDB-NOT-SHIPPED
+  severity: minor
+  status: fixed
+  surface: wi-fi regulatory
+  symptom: "# CONFIG_PACKAGE_wireless-regdb=y was commented out in the seed, so the image leaned on the driver's built-in regdomain and `iw reg get` reported the default instead of a database-backed CN view"
+  verified: yes (seed/e2631.config inspection)
+  workaround: v1.4 selects CONFIG_PACKAGE_wireless-regdb=y; the shipped etc/config/wireless sets country CN on both radios
+  note: on-air acceptance (per-channel power table, DFS CAC behaviour) needs a radio and stays unchecked under the offline-only rule
+- id: WPAD-BASIC-DEFAULT
+  severity: minor
+  status: fixed
+  surface: wi-fi features
+  symptom: the image shipped wpad-basic-mbedtls (the DEFAULT variant), which has no 802.11r/k/v, no mesh, and no WPA3-SAE - P2-3's baseline was unreachable no matter the uci config
+  verified: yes (no wpad line in the seed or DEVICE_PACKAGES; OpenWrt picks the default variant)
+  workaround: v1.4 selects CONFIG_PACKAGE_wpad-mbedtls=y (selecting a variant suppresses the default); ieee80211k/v/r + SAE + mesh config is left to the user's own wireless setup
+  note: roaming/mesh acceptance needs a second radio or client and stays unchecked under the offline-only rule
 ```
 
 ## WIFI-ASSOC-HARD-HANG
