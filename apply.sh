@@ -259,17 +259,15 @@ if [ -f "$GEN" ]; then
 		echo "generic config: could not turn the soft lockup detector on" >&2; exit 1; }
 	echo "generic config: soft lockup + hung task detectors on"
 fi
-# The slot-aware partition parser (P0-3): the driver source ships in files/,
-# the kernel-build wiring ships as patch 033 (Kconfig + Makefile obj line);
-# what is pinned here is the symbol choice in the target config.
-ZXSP_MARK="# E2631: slot-aware partition parser (see apply.sh / P0-3)"
 # OPT-IN (default off): the FFE control plane is the vendor-scheme rebuild.
 # v1.6 shipped it by accident of branch state, and its own init aborted (the
 # proc name had a slash), so the proven ppe path did the work; switching it on
 # by default would put an unverified learn path under a test build.
 # Enable with E2631_FFE=1 when you want to test it on hardware.
 FFE_MARK="# E2631: FFE control plane (see apply.sh / ffe branch)"
-sed -i -e "\|^$FFE_MARK\$|d" -e '/^CONFIG_ZX_FFE=y\$/d' "$CFG"
+# awk, not sed: the marker carries regex characters, and a sed address built
+# from it silently deleted nothing (seven apply runs stacked seven copies).
+awk -v m="$FFE_MARK" '$0 != m && $0 != "CONFIG_ZX_FFE=y"' "$CFG" > "$CFG.tmp" && mv "$CFG.tmp" "$CFG"
 if [ "${E2631_FFE:-0}" = 1 ] && [ -f "$TREE/target/linux/sanechips/patches-6.18/034-zte-add-the-ZX279128S-FFE-control-plane.patch" ]; then
 	printf '%s\n' "$FFE_MARK" 'CONFIG_ZX_FFE=y' >> "$CFG"
 	echo "kernel config: FFE control plane ON (opt-in)"
@@ -281,16 +279,8 @@ fi
 # the kernel-build wiring ships as patch 033 (Kconfig + Makefile obj line);
 # what is pinned here is the symbol choice in the target config.
 ZXSP_MARK="# E2631: slot-aware partition parser (see apply.sh / P0-3)"
-# The FFE control plane (ffe branch): the driver source ships in files/, the
-# kernel-build wiring ships as patch 034; the symbol choice is pinned here.
-if [ -f "$TREE/target/linux/sanechips/patches-6.18/034-zte-add-the-ZX279128S-FFE-control-plane.patch" ]; then
-	FFE_MARK="# E2631: FFE control plane (see apply.sh / ffe branch)"
-	sed -i -e "\|^$FFE_MARK\$|d" -e '/^CONFIG_ZX_FFE=y\$/d' "$CFG"
-	printf '%s\n' "$FFE_MARK" 'CONFIG_ZX_FFE=y' >> "$CFG"
-	echo "kernel config: FFE control plane on"
-fi
 if [ -f "$TREE/target/linux/sanechips/patches-6.18/033-mtd-parsers-add-ZX279128S-slot-partition-parser.patch" ]; then
-	sed -i -e "\|^$ZXSP_MARK\$|d" -e '/^CONFIG_MTD_ZX279128S_SLOTPART=y\$/d' "$CFG"
+	awk -v m="$ZXSP_MARK" '$0 != m && $0 != "CONFIG_MTD_ZX279128S_SLOTPART=y"' "$CFG" > "$CFG.tmp" && mv "$CFG.tmp" "$CFG"
 	printf '%s\n' "$ZXSP_MARK" 'CONFIG_MTD_ZX279128S_SLOTPART=y' >> "$CFG"
 	echo "kernel config: slot-aware partition parser on"
 fi
