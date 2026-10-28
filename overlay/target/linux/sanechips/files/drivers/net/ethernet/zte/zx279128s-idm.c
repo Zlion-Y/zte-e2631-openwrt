@@ -701,6 +701,6 @@ void zx_idm_debug(struct seq_file *m)
 		   zx_idm.rx_ch[0], zx_idm.rx_ch[1], zx_idm.rx_ch[2], zx_idm.rx_ch[3],
 		   zx_idm.rx_ch[4], zx_idm.rx_ch[5], zx_idm.rx_ch[6], zx_idm.rx_ch[7],
 		   zx_idm.inject_ok, zx_idm.inject_full, zx_idm.tx_kicks,
-		   zx_idm.tx_queued, zx_idm.hook_fired, zx_idm.wifi_count,
+		   zx_idm.tx_queued, zx_idm_hook_fired, zx_idm.wifi_count,
 		   zx_wifi_egress_low);
 }
