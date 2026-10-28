@@ -47,6 +47,19 @@ if [ "${E2631_SEGMENTED:-0}" = 1 ]; then
 	say "segmented downloads on ($MAKEVAR)"
 fi
 
+# The version stamped into the image must be decided BEFORE the build, not
+# patched in afterwards - every after-the-fact bump cost a rebuild cycle.
+# Single source of truth: E2631_VERSION (.env / release.mjs --version).
+VF="$E2631_TREE/target/linux/sanechips/base-files/etc/e2631-version"
+VNOW="$(cat "$VF" 2>/dev/null || true)"
+VER="${E2631_VERSION:-}"
+if [ -n "$VER" ] && [ "$VNOW" != "$VER" ]; then
+	say "version: stamping $VER into the rootfs (was: ${VNOW:-unset})"
+	printf '%s
+' "$VER" > "$VF"
+	( cd "$E2631_TREE" && make package/base-files/clean >/dev/null 2>&1 || true )
+fi
+
 say "make world  (log: $LOG)"
 set +e
 ( cd "$E2631_TREE" && make -j"$(nproc)" world V=s $MAKEVAR ) >"$LOG" 2>&1
@@ -62,6 +75,13 @@ say "make world done"
 
 # ---- collect, then pack ----------------------------------------------------
 bash "$E2631_KIT/wsl/collect.sh" "$BUILDDIR"
+if [ -n "$VER" ] && [ -f "$E2631_TREE/build_dir/target-arm_cortex-a9_musl_eabi/root-sanechips/etc/e2631-version" ]; then
+	GOT="$(cat "$E2631_TREE/build_dir/target-arm_cortex-a9_musl_eabi/root-sanechips/etc/e2631-version")"
+	if [ "$GOT" != "$VER" ]; then
+		die "the built rootfs says '$GOT' but the release is $VER - the version did not reach the image"
+	fi
+	say "version gate ok: $GOT"
+fi
 say "images collected into $BUILDDIR"
 
 [ -f "$BUILDDIR/payload/sysupgrade-zte_zxhn-e2631/kernel" ] ||

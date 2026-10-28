@@ -1,0 +1,20 @@
+#!/bin/sh
+# The upstream in this deployment (a vendor router) does not delegate a
+# prefix, so server mode on lan only hands out ULA addresses.  Put IPv6
+# into relay mode: LAN hosts join the upstream /64 through NDP proxy, and
+# wan6 loses its source filter so relayed hosts have a usable default
+# route.  Ships in the firmware so reflashes carry it automatically.
+uci -q set dhcp.lan.dhcpv6='relay'
+uci -q set dhcp.lan.ra='relay'
+uci -q set dhcp.lan.ndp='relay'
+uci -q delete dhcp.wan6
+uci -q set dhcp.wan6='dhcp'
+uci -q set dhcp.wan6.interface='wan6'
+uci -q set dhcp.wan6.master='1'
+uci -q set dhcp.wan6.dhcpv6='relay'
+uci -q set dhcp.wan6.ra='relay'
+uci -q set dhcp.wan6.ndp='relay'
+uci -q set network.wan6.sourcefilter='0'
+uci commit dhcp
+uci commit network
+exit 0

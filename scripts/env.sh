@@ -73,7 +73,7 @@ E2631_TEMPLATE=${E2631_TEMPLATE:-$E2631_KIT/seed/vendor-verhdr-8b8.bin}
 # Scripts that drop a log under out/ should not have to create it, and a fresh clone has
 # no out/ yet. Failing to create it is not fatal: the read-only tools need no scratch dir.
 [ -d "$E2631_OUT" ] || mkdir -p "$E2631_OUT" 2>/dev/null || true
-export E2631_KIT E2631_WORK E2631_OUT E2631_TREE E2631_BASE_REPO E2631_BASE_BRANCH E2631_BASE_SHA E2631_TEMPLATE
+export E2631_KIT E2631_WORK E2631_OUT E2631_TREE E2631_BASE_REPO E2631_BASE_BRANCH E2631_BASE_SHA E2631_TEMPLATE E2631_VERSION
 
 e2631_need_cmd() {	# e2631_need_cmd <command> <what it is needed for>
 	command -v "$1" >/dev/null 2>&1 && return 0

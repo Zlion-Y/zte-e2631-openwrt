@@ -101,8 +101,6 @@
 #define ZX_IDM_TX_OFF		0x4000
 #define ZX_IDM_BUF_SIZE		2048
 #define ZX_IDM_BUF_HEAD		16		/* engine metadata before the frame */
-#define ZX_IDM_SKB_RESERVE	32		/* vendor skb_reserve() */
-#define ZX_IDM_BUFS		(ZX_IDM_RX_DESCS + 256)
 
 /*
  * One registered wireless netdev: fabric port 0x18 + n (2.4G VAPs 0x18-0x1b,
@@ -129,13 +127,9 @@ struct zx_idm {
 	} __packed		*rx;		/* = ring */
 	struct zx_idm_desc	*tx;		/* = ring + 0x4000 */
 
-	void			*bufs;		/* frame buffers, coherent */
+	void			*bufs;		/* RX frame buffers, coherent */
 	dma_addr_t		bufs_dma;
-	u16			buf_free[ZX_IDM_BUFS];
-	u32			buf_free_count;
 
-	struct sk_buff		*rx_skb[ZX_IDM_RX_DESCS];
-	u32			rx_buf[ZX_IDM_RX_DESCS];	/* pool index per slot */
 	struct sk_buff		*tx_skb[ZX_IDM_TX_DESCS];
 	u32			tx_cursor;	/* oldest tx descriptor not completed */
 	u32			tx_queued;	/* filled, not yet kicked */
@@ -169,27 +163,15 @@ struct zx_eth_adapter *zx_idm_adapter(void)
 
 /* ---- Buffer pool ------------------------------------------------------- */
 
-static u32 zx_idm_buf_alloc(struct zx_idm *idm)
+static dma_addr_t zx_idm_buf_dma(struct zx_idm *idm, u32 pos)
 {
-	if (!idm->buf_free_count)
-		return ZX_IDM_BUFS;
-	return idm->buf_free[--idm->buf_free_count];
+	/* slot pos owns the buffer at pos for its whole life */
+	return idm->bufs_dma + pos * ZX_IDM_BUF_SIZE;
 }
 
-static void zx_idm_buf_free(struct zx_idm *idm, u32 idx)
+static void *zx_idm_buf_ptr(struct zx_idm *idm, u32 pos)
 {
-	if (idx < ZX_IDM_BUFS && idm->buf_free_count < ZX_IDM_BUFS)
-		idm->buf_free[idm->buf_free_count++] = idx;
-}
-
-static dma_addr_t zx_idm_buf_dma(struct zx_idm *idm, u32 idx)
-{
-	return idm->bufs_dma + idx * ZX_IDM_BUF_SIZE;
-}
-
-static void *zx_idm_buf_ptr(struct zx_idm *idm, u32 idx)
-{
-	return idm->bufs + idx * ZX_IDM_BUF_SIZE;
+	return idm->bufs + pos * ZX_IDM_BUF_SIZE;
 }
 
 /* Submit one filled buffer to the engine: descriptor word 0 in the shared
@@ -298,8 +280,6 @@ static int zx_idm_rx_ring(struct zx_idm *idm, int budget)
 			return work;	/* hardware has not filled it yet */
 
 		idm->rx_pos++;
-		skb = idm->rx_skb[pos];
-		idm->rx_skb[pos] = NULL;
 
 		for (i = 0; i < idm->wifi_count; i++)
 			if (idm->wifi[i].idm_off == chan && idm->wifi[i].dev) {
@@ -309,42 +289,34 @@ static int zx_idm_rx_ring(struct zx_idm *idm, int budget)
 
 		if (!w) {
 			idm->rx_novap++;
-		} else if (!skb || len < ETH_HLEN ||
+		} else if (len < ETH_HLEN ||
 			   len > ZX_IDM_BUF_SIZE - ZX_IDM_BUF_HEAD) {
 			idm->rx_dropped++;
 		} else {
-			skb_put(skb, len);
-			skb->dev = w->dev;
-			skb->pkt_type = PACKET_HOST;
-			/* the frame is already routed (the packet modifier
-			 * rewrote the headers); hand it straight to the
-			 * VAP's transmit path, past netfilter
-			 */
-			dev_queue_xmit(skb);
-			idm->rx_frames++;
-			work++;
-		}
-
-		/* the consumed skb went into the stack: bind a fresh pool
-		 * buffer + skb to this slot and submit it again
-		 */
-		bus = 0;
-		if (skb && idm->buf_free_count) {
-			u32 idx = zx_idm_buf_alloc(idm);
-
-			skb = __alloc_skb(ZX_IDM_BUF_SIZE, GFP_ATOMIC, 0,
-					  NUMA_NO_NODE);
-			if (skb) {
-				skb_reserve(skb, ZX_IDM_SKB_RESERVE);
-				idm->rx_skb[pos] = skb;
-				idm->rx_buf[pos] = idx;
-				bus = zx_idm_buf_dma(idm, idx) + ZX_IDM_BUF_HEAD;
+			/* copy the frame out of the coherent arena: the
+			 * buffer is hardware-owned and stays submitted */
+			skb = napi_alloc_skb(&idm->adapter->napi, len);
+			if (!skb) {
+				idm->rx_dropped++;
 			} else {
-				zx_idm_buf_free(idm, idx);
+				skb_put_data(skb,
+					     zx_idm_buf_ptr(idm, pos) + ZX_IDM_BUF_HEAD,
+					     len);
+				skb->dev = w->dev;
+				skb->pkt_type = PACKET_HOST;
+				/* the frame is already routed (the packet
+				 * modifier rewrote the headers); hand it
+				 * straight to the VAP's transmit path,
+				 * past netfilter
+				 */
+				dev_queue_xmit(skb);
+				idm->rx_frames++;
+				work++;
 			}
 		}
-		if (bus)
-			zx_idm_rx_submit(idm, pos, bus);
+
+		/* resubmit the slot's own buffer */
+		zx_idm_rx_submit(idm, pos, zx_idm_buf_dma(idm, pos));
 	}
 	return work;
 }
@@ -613,7 +585,7 @@ int zx_idm_init(struct zx_eth_adapter *adapter)
 	idm->ring = dmam_alloc_coherent(adapter->dev, ZX_IDM_RING_SIZE,
 					&idm->ring_dma, GFP_KERNEL);
 	idm->bufs = dmam_alloc_coherent(adapter->dev,
-					ZX_IDM_BUFS * ZX_IDM_BUF_SIZE,
+					ZX_IDM_RX_DESCS * ZX_IDM_BUF_SIZE,
 					&idm->bufs_dma, GFP_KERNEL);
 	if (!idm->ring || !idm->bufs)
 		return -ENOMEM;
@@ -621,46 +593,22 @@ int zx_idm_init(struct zx_eth_adapter *adapter)
 	idm->rx = idm->ring;
 	idm->tx = idm->ring + ZX_IDM_TX_OFF;
 
-	for (i = 0; i < ZX_IDM_BUFS; i++)
-		idm->buf_free[i] = ZX_IDM_BUFS - 1 - i;
-	idm->buf_free_count = ZX_IDM_BUFS;
-
 	zx_idm_fabric_init(adapter);
 
 	writel(idm->ring_dma + ZX_IDM_TX_OFF, idm->base + ZX_IDM_TX_BASE);
 	writel(idm->ring_dma, idm->base + ZX_IDM_RX_BASE);
 
-	/* submit one buffer per RX descriptor through IDM+0x48; each slot's
-	 * coherent buffer is bound to a long-lived skb reused on refill
+	/* submit one buffer per RX descriptor through IDM+0x48; the slot
+	 * keeps its buffer for the driver's lifetime
 	 */
-	for (i = 0; i < ZX_IDM_RX_DESCS; i++) {
-		struct sk_buff *skb;
-		dma_addr_t bus = 0;
-
-		if (idm->buf_free_count) {
-			u32 idx = zx_idm_buf_alloc(idm);
-
-			bus = zx_idm_buf_dma(idm, idx) + ZX_IDM_BUF_HEAD;
-			skb = __alloc_skb(ZX_IDM_BUF_SIZE, GFP_KERNEL, 0,
-					  NUMA_NO_NODE);
-			if (skb) {
-				skb_reserve(skb, ZX_IDM_SKB_RESERVE);
-				idm->rx_skb[i] = skb;
-				idm->rx_buf[i] = idx;
-			} else {
-				zx_idm_buf_free(idm, idx);
-				bus = 0;
-			}
-		}
-		if (bus)
-			zx_idm_rx_submit(idm, i, bus);
-	}
+	for (i = 0; i < ZX_IDM_RX_DESCS; i++)
+		zx_idm_rx_submit(idm, i, zx_idm_buf_dma(idm, i) + ZX_IDM_BUF_HEAD);
 	writel(ZX_IDM_RX_DESCS | 0x04000000, idm->base + ZX_IDM_DEPTH);
 
 	idm->ready = true;
 	pr_info("%s: IDM ready, RX %d x 8B + TX %d x 8B descriptors, %d KiB buffers\n",
 		DRV_NAME, ZX_IDM_RX_DESCS, ZX_IDM_TX_DESCS,
-		(ZX_IDM_BUFS * ZX_IDM_BUF_SIZE) / 1024);
+		(ZX_IDM_RX_DESCS * ZX_IDM_BUF_SIZE) / 1024);
 	return 0;
 }
 
@@ -676,8 +624,6 @@ void zx_idm_exit(struct zx_eth_adapter *adapter)
 		if (idm->wifi[i].dev)
 			dev_put(idm->wifi[i].dev);
 	idm->wifi_count = 0;
-	for (i = 0; i < ZX_IDM_RX_DESCS; i++)
-		kfree_skb(idm->rx_skb[i]);
 	for (i = 0; i < ZX_IDM_TX_DESCS; i++)
 		consume_skb(idm->tx_skb[i]);
 	zx_idm.adapter = NULL;
