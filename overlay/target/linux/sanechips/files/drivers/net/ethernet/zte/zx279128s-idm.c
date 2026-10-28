@@ -140,8 +140,6 @@ struct zx_idm {
 	u32			rx_novap;
 	u32			rx_unicast;
 	u32			rx_ch[8];
-	u32			rx_unicast;
-	u32			rx_ch[8];
 	u32			inject_ok;
 	u32			inject_full;
 	u32			tx_kicks;
