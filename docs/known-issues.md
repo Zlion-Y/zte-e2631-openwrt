@@ -222,6 +222,14 @@ points at something in the repository or at a measurement.
   verified: yes (seed/e2631.config inspection)
   workaround: v1.4 selects CONFIG_PACKAGE_wireless-regdb=y; the shipped etc/config/wireless sets country CN on both radios
   note: on-air acceptance (per-channel power table, DFS CAC behaviour) needs a radio and stays unchecked under the offline-only rule
+- id: VERSION-NUMBERING
+  severity: minor
+  status: fixed
+  surface: release
+  symptom: release/version strings were two-part (v1.3, v1.7), which made "is this newer" ambiguous and invites tag/version drift
+  verified: yes (owner decision 2026-10-29)
+  workaround: from v1.8.0 on, /etc/e2631-version and E2631_VERSION use three parts (vMAJOR.MINOR.PATCH); the updater's numeric compare already handles any component count (1.8.0 > 1.7, 1.10.0 > 1.9.9)
+  note: keep release tags and /etc/e2631-version in the same three-part shape from now on
 - id: UPGRADE-VERSION-COMPARE
   severity: major
   status: fixed
