@@ -378,7 +378,8 @@ assert "slot parser source present in files/" \
 assert "slotpart carries the partition of_node (nvmem cell -> gmac MACs)" 	grep -q 'out\[i\]\.of_node = parts\[i\]\.np;' 	"$TREE/target/linux/sanechips/files/drivers/mtd/parsers/zx279128s-slotpart.c"
 	test -f "$TREE/target/linux/sanechips/files/drivers/mtd/parsers/zx279128s-slotpart.c"
 assert "FFE control plane source + wiring patch present" \
-	bash -c "test -f '$TREE/target/linux/sanechips/patches-6.18/034-zte-add-the-ZX279128S-FFE-control-plane.patch' && test -f '$TREE/target/linux/sanechips/files/drivers/net/ethernet/zte/zx279128s-ffe.c'"assert "overlay ppe.c carries the IPv6 trap fix" \
+	bash -c "test -f '$TREE/target/linux/sanechips/patches-6.18/034-zte-add-the-ZX279128S-FFE-control-plane.patch' && test -f '$TREE/target/linux/sanechips/files/drivers/net/ethernet/zte/zx279128s-ffe.c'"
+assert "overlay ppe.c carries the IPv6 trap fix" \
 	grep -q 'v6 = READ_ONCE(adapter->ppe_active) || !sw' \
 	"$TREE/target/linux/sanechips/files/drivers/net/ethernet/zte/zx279128s-ppe.c"
 assert_one_line "overlay ppe.c stays a small diff (trap fix + FFE seam)" 90 25 \
