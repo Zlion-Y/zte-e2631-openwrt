@@ -189,6 +189,15 @@ points at something in the repository or at a measurement.
   symptom: nothing runs on a push; the build happens on someone's machine
   verified: yes - .github/workflows/check.yml (make check on push/PR + the upgrade-check refusal assertion) and firmware.yml (on-demand build + prerelease with SHA256SUMS), adopted from the zwthys-cyber fork and adapted; note the workflows are local-only until the owner pushes
   note: the old 'deliberate' note protected a one-machine build; the gates were already CI-shaped (make check), the fork proved it
+- id: SLOTPART-DROPS-OF-NODE
+  severity: blocker
+  status: fixed
+  surface: ethernet
+  symptom: "v1.6 shipped with NO wired netdevs at all (only br-lan/lo/wifi): dmesg showed 'platform 92000000.ethernet: deferred probe pending' and /sys/class/net had no lan1/lan2/lan3/wan, so there was no WAN uplink (WiFi worked, no internet)"
+  verified: "yes, on the box (2026-10-28, v1.6 flashed): devices_deferred listed 92000000.ethernet with no driver bound; mdio bus and PHYs 10-13 were fine"
+  cause: "the zx279128s-slotpart parser returned mtd_partition entries without of_node. The gmac driver gets its MAC addresses through of_get_mac_address() from the nvmem cell macaddr_tag_1e on the tag partition; with no of_node the nvmem-layout never registers and of_get_mac_address() returns -EPROBE_DEFER for ever -> probe deferred forever. The fixed-partitions parser it replaced had set of_node, so v1.5 was fine"
+  workaround: fixed in v1.7 - the parser now carries the borrowed DT node (out[i].of_node = parts[i].np), guarded by an apply.sh assertion that would have caught it; a WARN from zx_ffe_init's proc_create (name contained a slash) was fixed in the same pass
+  note: this is exactly the failure class a static gate cannot see - the image was BOOT-READY and every CRC passed; only the deferred-probe list on a live box showed it
 - id: WAN-SSH-UNREACHABLE
   severity: major
   status: fixed

@@ -128,6 +128,17 @@ apply_port() {
 	*) log "没有 $port 这个口（可选：$PORTS）"; return 1 ;;
 	esac
 	[ -d "$SYSFS/class/net/$port" ] || { log "sysfs 里没有 $port"; return 1; }
+	# 目标口当前有链路（且不是现在的 WAN 口）时先拒绝：真机上最可能的情况
+	# 就是这根网线正是你此刻的管理连接，切过去既断自己，又因为 wan 区
+	# input=REJECT 而只剩 ping（zwzzrl 2026-10-27 真机踩过）。--force 绕过。
+	if [ "$port" != "$(cur_wan_dev)" ] && [ "${FORCE:-0}" != "1" ]; then
+		carrier=$(cat "$SYSFS/class/net/$port/carrier" 2>/dev/null)
+		if [ "$carrier" = "1" ]; then
+			log "$port 现在有链路（多半是你的管理网线）：切过去会立刻失去管理通道"
+			log "确认要把管理口改成 WAN 时加：--force"
+			return 1
+		fi
+	fi
 	[ "$(cfg enabled)" = "0" ] && { log "已在 $CFG 里禁用（enabled=0）"; return 1; }
 	cur=$(cur_wan_dev)
 	bp=$(bridge_section)
@@ -170,9 +181,18 @@ apply_port() {
 	uci commit "$CFG" 2>/dev/null
 
 	log "WAN 口 -> $port（原来 $cur）"
-	[ -x /etc/init.d/network ] && /etc/init.d/network reload >/dev/null 2>&1
+	# MAC 立即落地（上联的租约/DUID 第一次就认这个地址）；
+	# 网络拓扑本身**不 reload**：这颗 SoC 的 gmac/bridge 扛不住
+	# network reload/restart，会半挂死（ICMP 部分应答、TCP 全死，
+	# 见 known-issues 的 gmac 条目与 device-quirks 记录）。配置已
+	# 写入 uci，重启后生效。
 	ensure_port_mac "$port"
 	[ "$cur" != "$port" ] && restore_port_mac "$cur"
+	echo
+	echo "配置已写入。本板 network reload 会让 gmac 半挂死，所以这里不动运行态："
+	echo "  reboot    # 整机重启后 $port 才真正成为 WAN 口"
+	echo "提醒：如果管理网线就插在 $port 上，重启后这个口是 WAN（input=REJECT），"
+	echo "      请把管理网线换到其余 LAN 口，或确认已启用 WAN 侧 SSH 规则。"
 	return 0
 }
 
@@ -263,7 +283,15 @@ main() {
 	case "$action" in
 	apply)
 		shift
-		apply_port "${1:-}"
+		# --force：允许把当前有链路的口（多半是管理口）改成 WAN
+		for a in "$@"; do
+			case "$a" in
+			--force) FORCE=1 ;;
+			-*) echo "$PROG: unknown option $a" >&2; exit 2 ;;
+			*) PORT=${PORT:-$a} ;;
+			esac
+		done
+		apply_port "${PORT:-}"
 		;;
 	status) do_status ;;
 	selftest) do_selftest ;;

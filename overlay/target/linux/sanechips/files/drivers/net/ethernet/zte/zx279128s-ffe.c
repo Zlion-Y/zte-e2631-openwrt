@@ -74,6 +74,7 @@ static const struct rhashtable_params zx_ffe_ht_params = {
 /* ---- engine state ------------------------------------------------------- */
 
 static bool zx_ffe_on = true;		/* mirrors the vendor's default-on */
+static struct proc_dir_entry *zx_ffe_proc_dir;
 static bool zx_ffe_registered;
 const struct zx_ffe_ops *zx_ffe_ops_ptr;	/* the seam pointer (zx-ffe-ops.h) */
 static const struct zx_ffe_ops __rcu *zx_ffe_ops;
@@ -370,13 +371,14 @@ static int __init zx_ffe_init(void)
 		return ret;
 	for (i = 0; i < ZX_IDM_STACKS; i++)
 		spin_lock_init(&zx_idm_stacks[i].lock);
-	if (!proc_create("zx-ffe/cmd", 0644, NULL, &zx_ffe_cmd_pops)) {
-		rhashtable_destroy(&zx_ffe_flows);
-		return -ENOMEM;
-	}
+	zx_ffe_proc_dir = proc_mkdir("zx-ffe", NULL);
+	/* a name with a slash is not creatable under /proc root - the
+	 * directory has to exist first (v1.6 built the file name with the
+	 * slash and the WARN at 0.155 s was this call failing) */
+	if (!zx_ffe_proc_dir || !proc_create("cmd", 0644, zx_ffe_proc_dir, &zx_ffe_cmd_pops))
+		pr_warn("no /proc/zx-ffe/cmd (procfs unavailable?)\n");
 	ret = zx_ffe_ops_register(&zx_ffe_ops_impl);
 	if (ret) {
-		remove_proc_entry("zx-ffe/cmd", NULL);
 		rhashtable_destroy(&zx_ffe_flows);
 		return ret;
 	}
@@ -387,7 +389,8 @@ static int __init zx_ffe_init(void)
 static void __exit zx_ffe_exit(void)
 {
 	zx_ffe_ops_unregister();
-	remove_proc_entry("zx-ffe/cmd", NULL);
+	remove_proc_entry("cmd", zx_ffe_proc_dir);
+	proc_remove(zx_ffe_proc_dir);
 	rhashtable_free_and_destroy(&zx_ffe_flows, NULL, NULL);
 }
 

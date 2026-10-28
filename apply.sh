@@ -357,6 +357,7 @@ assert "lockup detectors flipped in the generic config" grep -q '^CONFIG_SOFTLOC
 assert "slot-aware partition parser wired (patch 033 + config)" \
 	bash -c "test -f '$TREE/target/linux/sanechips/patches-6.18/033-mtd-parsers-add-ZX279128S-slot-partition-parser.patch' && grep -q '^CONFIG_MTD_ZX279128S_SLOTPART=y\$' '$CFG'"
 assert "slot parser source present in files/" \
+assert "slotpart carries the partition of_node (nvmem cell -> gmac MACs)" 	grep -q 'out\[i\]\.of_node = parts\[i\]\.np;' 	"$TREE/target/linux/sanechips/files/drivers/mtd/parsers/zx279128s-slotpart.c"
 	test -f "$TREE/target/linux/sanechips/files/drivers/mtd/parsers/zx279128s-slotpart.c"
 assert "FFE control plane wired (patch 034 + config)" \
 	bash -c "test -f '$TREE/target/linux/sanechips/patches-6.18/034-zte-add-the-ZX279128S-FFE-control-plane.patch' && grep -q '^CONFIG_ZX_FFE=y\$' '$CFG'" \

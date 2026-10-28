@@ -56,6 +56,7 @@ struct zx_slotpart_part {
 	char *label;
 	uint64_t ofs, size;
 	uint32_t mask;
+	struct device_node *np;	/* borrowed: the DT node of the partition */
 };
 
 /* Names are kstrdup'ed into the returned array and only freed by .cleanup,
@@ -98,6 +99,7 @@ static int zx_slotpart_of_parts(struct device_node *np,
 			continue;
 		if (of_property_read_u32_array(child, "reg", reg, 2))
 			continue;
+		p->np = child;	/* borrowed, like the ofpart parser does */
 		p->ofs = reg[0];
 		p->size = reg[1];
 		p->mask = of_property_read_bool(child, "read-only") ?
@@ -226,6 +228,10 @@ static int zx_slotpart_parse(struct mtd_info *master,
 		out[i].offset = parts[i].ofs;
 		out[i].size = parts[i].size;
 		out[i].mask_flags = parts[i].mask;
+		/* Without this the mtd device has no OF node, the
+		 * nvmem-layout under "tag" never registers, and the
+		 * gmac driver's of_get_mac_address() defers for ever. */
+		out[i].of_node = parts[i].np;
 	}
 	kfree(parts);
 	kfree(in);
