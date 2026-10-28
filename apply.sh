@@ -272,6 +272,11 @@ if [ "${E2631_FFE:-0}" = 1 ] && [ -f "$TREE/target/linux/sanechips/patches-6.18/
 	printf '%s\n' "$FFE_MARK" 'CONFIG_ZX_FFE=y' >> "$CFG"
 	echo "kernel config: FFE control plane ON (opt-in)"
 else
+	# Declare it off explicitly: the Kconfig entry exists (patch 034), and a
+	# symbol that appears in Kconfig but in no fragment is a NEW symbol that
+	# oldconfig stops and asks about - non-interactive builds die there.
+	printf '%s
+' "$FFE_MARK" '# CONFIG_ZX_FFE is not set' >> "$CFG"
 	echo "kernel config: FFE control plane off (E2631_FFE=1 to test it)"
 fi
 
