@@ -1,0 +1,7 @@
+700|admin
+1400|admin
+2000|cat /proc/1259/cmdline; echo
+3200|ls -l /proc/1259/cwd
+4400|ls -la /var/web /home/httpd /usr/local/web 2>/dev/null
+6200|grep -r "docroot\|DocumentRoot" /etc 2>/dev/null | head -5
+8000|echo ZDONE

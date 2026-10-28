@@ -1,0 +1,5 @@
+700|admin
+1400|admin
+2000|wget --help 2>&1 | sed -n "1,6p"
+3600|wget -O /dev/null http://192.168.5.19:8080/big.bin; echo "rc=$?"
+20000|echo ZDONE

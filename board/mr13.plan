@@ -1,0 +1,6 @@
+700|admin
+1400|admin
+2000|date +%s
+3200|wget -O /dev/null http://192.168.5.19:8080/big.bin; echo "big_rc=$?"
+30000|date +%s
+32000|echo ZDONE

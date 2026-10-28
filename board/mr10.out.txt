@@ -1,0 +1,27 @@
+### connected 192.168.5.1:23
+E2631
+Login: 
+=== [send @700ms] "admin\r\n"
+admin
+Password: 
+=== [send @1400ms] "admin\r\n"
+
+
+BusyBox v1.17.2 (2025-09-25 21:57:20 CST) built-in shell (ash)
+Enter 'help' for a list of built-in commands.
+
+/ # 
+=== [send @2000ms] "wget -O /dev/null http://192.168.5.19:22/; echo \"ssh22_rc=$?\"\r\n"
+wget -O /dev/null http://192.168.5.19:22/; echo "ssh22_rc=$?"
+ssh22_rc=6
+/ # 
+=== [send @7000ms] "wget -O /dev/null http://192.168.5.19:7681/; echo \"ttyd7681_rc=$?\"\r\n"
+wget -O /dev/null http://192.168.5.19:7681/; echo "ttyd7681_rc=$?"
+delete file failed:: Read-only file system
+ttyd7681_rc=5
+/ # 
+=== [send @12000ms] "echo ZDONE\r\n"
+echo ZDONE
+ZDONE
+/ # 
+### --stop-on matched, ending early

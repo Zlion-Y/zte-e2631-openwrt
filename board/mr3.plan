@@ -1,0 +1,4 @@
+700|admin
+1400|admin
+2000|busybox --list
+6000|echo ZDONE

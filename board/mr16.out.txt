@@ -1,0 +1,26 @@
+### connected 192.168.5.1:23
+E2631
+Login: 
+=== [send @700ms] "admin\r\n"
+admin
+Password: 
+=== [send @1400ms] "admin\r\n"
+
+
+BusyBox v1.17.2 (2025-09-25 21:57:20 CST) built-in shell (ash)
+Enter 'help' for a list of built-in commands.
+
+/ # 
+=== [send @2000ms] "d0=`date +%s`; for i in 1 2 3 4 5 6 7 8; do wget -q -O /dev/null http://192.168.5.19:8080/m16.bin; done; d1=`date +%s`; echo \"RES\"\"ULT $d0 $d1\"\r\n"
+d0=`date +%s`; for i in 1 2 3 4 5 6 7 8; do wget -q -O /dev/null http://192.
+168.5.19:8080/m16.bin; done; d1=`date +%s`; echo "RES""ULT $d0 $d1"
+RESULT 1793197760 1793197768
+/ # 
+=== [send @90000ms] "echo END\r\n"
+echo END
+END
+/ # 
+=== [send @91500ms] "exit\r\n"
+exit
+
+### CLOSED

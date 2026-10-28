@@ -1,0 +1,7 @@
+700|admin
+1400|admin
+2000|echo A; busybox --list 2>/dev/null | tr "
+" " "
+5000|echo B; ls /bin/busybox /usr/sbin/* 2>/dev/null | head -20
+7200|echo C; busybox 2>&1 | head -5
+8600|echo ZDONE

@@ -1,0 +1,26 @@
+### connected 192.168.5.1:23
+E2631
+Login: 
+=== [send @700ms] "admin\r\n"
+admin
+Password: 
+=== [send @1400ms] "admin\r\n"
+
+
+BusyBox v1.17.2 (2025-09-25 21:57:20 CST) built-in shell (ash)
+Enter 'help' for a list of built-in commands.
+
+/ # 
+=== [send @2000ms] "echo A; busybox --list 2>/dev/null | tr \"\r\n"
+echo A; busybox --list 2>/dev/null | tr "
+> 
+=== [send @5000ms] "echo B; ls /bin/busybox /usr/sbin/* 2>/dev/null | head -20\r\n"
+echo B; ls /bin/busybox /usr/sbin/* 2>/dev/null | head -20
+> 
+=== [send @7200ms] "echo C; busybox 2>&1 | head -5\r\n"
+echo C; busybox 2>&1 | head -5
+> 
+=== [send @8600ms] "echo ZDONE\r\n"
+echo ZDONE
+> 
+### --stop-on matched, ending early

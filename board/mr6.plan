@@ -1,0 +1,5 @@
+700|admin
+1400|admin
+2000|date +%s
+3200|for i in 1 2 3; do wget -O /dev/null http://192.168.5.19:8080/big.bin; done; date +%s
+40000|echo ZDONE

@@ -1,0 +1,7 @@
+700|admin
+1400|admin
+2000|ps
+7000|df
+9000|ls -la /var
+11000|ls -la /var/www
+13000|echo ZDONE

@@ -1,0 +1,140 @@
+### connected 192.168.5.1:23
+E2631
+Login: 
+=== [send @700ms] "admin\r\n"
+admin
+Password: 
+=== [send @1400ms] "admin\r\n"
+
+
+BusyBox v1.17.2 (2025-09-25 21:57:20 CST) built-in shell (ash)
+Enter 'help' for a list of built-in commands.
+
+/ # 
+=== [send @2000ms] "ps\r\n"
+ps
+  PID USER       VSZ      RSS   STAT  CPU  COMMAND
+    1  Z500_w9b  2528    1256  S    <1>  init 
+    2  Z500_w9b     0       0  SW   <0>  kthreadd 
+    3  Z500_w9b     0       0  SW   <0>  ksoftirqd/0 
+    5  Z500_w9b     0       0  SW<  <0>  kworker/0:0H 
+    6  Z500_w9b     0       0  SW   <1>  kworker/u4:0 
+    7  Z500_w9b     0       0  SW   <1>  rcu_sched 
+    8  Z500_w9b     0       0  SW   <0>  rcu_bh 
+    9  Z500_w9b     0       0  SW   <0>  migration/0 
+   10  Z500_w9b     0       0  SW   <1>  migration/1 
+   11  Z500_w9b     0       0  SW   <1>  ksoftirqd/1 
+   13  Z500_w9b     0       0  SW<  <1>  kworker/1:0H 
+   14  Z500_w9b     0       0  SW<  <1>  khelper 
+   15  Z500_w9b     0       0  SW   <1>  kdevtmpfs 
+   16  Z500_w9b     0       0  SW   <1>  kworker/u4:1 
+   18  Z500_w9b     0       0  SW<  <1>  perf 
+  170  Z500_w9b     0       0  SW   <1>  khungtaskd 
+  171  Z500_w9b     0       0  SW<  <0>  writeback 
+  173  Z500_w9b     0       0  SW<  <1>  kintegrityd 
+  174  Z500_w9b     0       0  SW<  <0>  bioset 
+  176  Z500_w9b     0       0  SW<  <0>  kblockd 
+  183  Z500_w9b     0       0  SW<  <1>  ata_sff 
+  230  Z500_w9b     0       0  SW   <0>  kswapd0 
+  283  Z500_w9b     0       0  SW   <1>  fsnotify_mark 
+  429  Z500_w9b     0       0  SW   <1>  spi0 
+  459  Z500_w9b     0       0  SW<  <0>  ipv6_addrconf 
+  463  Z500_w9b     0       0  SW   <1>  kworker/1:1 
+  471  Z500_w9b     0       0  SW<  <1>  deferwq 
+  475  Z500_w9b     0       0  SW   <1>  ffeflush 
+  477  Z500_w9b     0       0  SW<  <1>  kloopd0 
+  509  Z500_w9b     0       0  SWN  <0>  jffs2_gcd_mtd3 
+  511  Z500_w9b     0       0  SWN  <1>  jffs2_gcd_mtd4 
+  513  Z500_w9b     0       0  SWN  <1>  jffs2_gcd_mtd5 
+  515  Z500_w9b     0       0  SWN  <1>  jffs2_gcd_mtd9 
+  517  Z500_w9b     0       0  SWN  <0>  jffs2_gcd_mtd10 
+  520  Z500_w9b     0       0  SWN  <1>  jffs2_gcd_mtd11 
+  522  Z500_w9b     0       0  SWN  <0>  jffs2_gcd_mtd12 
+  524  Z500_w9b     0       0  SWN  <1>  jffs2_gcd_mtd13 
+  526  Z500_w9b     0       0  SWN  <0>  jffs2_gcd_mtd14 
+  565  Z500_w9b     0       0  SW   <1>  sw_port_alarm_k 
+  593  Z500_w9b  2524    1164  S    <1>  getty 
+  595  Z500_w9b  2748     836  S    <0>  pc 
+  596  Z500_w9b 17444     656  S    <0>  logcat 
+  597  Z500_w9b  174m   10800  S    <0>  cspd 
+  598  Z500_w9b  1444     832  S    <0>  rpcAgent 
+  997  Z500_w9b 27652    3136  S    <0>  diagnose 
+  998  Z500_w9b 83464    3008  S    <0>  sbusd-adaptor 
+  999  Z500_w9b 19708    2752  S    <0>  log_upload 
+ 1000  Z500_w9b 36052    4216  S    <0>  idm_service 
+ 1100  Z500_w9b 10872    2072  S    <0>  sbusd 
+ 1102  Z500_w9b     0       0  SW   <0>  RtmpCmdQTask 
+ 1103  Z500_w9b     0       0  SW   <0>  RtmpWscTask 
+ 1104  Z500_w9b     0       0  SW   <0>  HwCtrlTask 
+ 1105  Z500_w9b     0       0  SW   <0>  ser_task 
+ 1106  Z500_w9b     0       0  SW   <1>  kworker/1:2 
+ 1107  Z500_w9b 45372    6384  S    <0>  mqtt 
+ 1159  Z500_w9b     0       0  SW   <0>  RtmpMlmeTask 
+ 1259  Z500_w9b 23356   10644  S    <0>  httpd 
+ 1260  Z500_w9b 15956    1772  S    <0>  telnetd 
+ 1261  Z500_w9b 90396    3304  S    <0>  upnpd 
+ 1262  Z500_w9b 19828    5176  S    <0>  cmd 
+ 1263  Z500_w9b 17984    4860  S    <0>  laninfo 
+ 1264  Z500_w9b 17636    1936  S    <0>  uuplugind 
+ 1265  Z500_w9b 17636    1968  S    <0>  owdplugind 
+ 1266  Z500_w9b 17636    1908  S    <0>  owjdxbplugind 
+ 1293  Z500_w9b 45344    8260  S    <0>  multiapd 
+ 1346  Z500_w9b  4508    3276  S    <0>  dnsmasq 
+ 1371  Z500_w9b  3644    1772  S    <0>  pppd 
+ 6345  Z500_w9b     0       0  SW   <0>  kworker/0:0 
+ 9967  Z500_w9b     0       0  SW   <0>  kworker/0:1 
+10059  Z500_w9b     0       0  SW<  <1>  kworker/u5:1 
+10061  Z500_w9b     0       0  SW<  <1>  kworker/u5:3 
+11643  Z500_w9b  2536    1312  S    <0>  sh 
+11648  Z500_w9b  2528    1280  R    <0>  ps 
+/ # 
+=== [send @7000ms] "df\r\n"
+df
+Filesystem           1024-blocks    Used Available Use% Mounted on
+/dev/root                   18560        18560            0 100% / 
+/dev/loop0                  12288        12288            0 100% /kmodule 
+tmpfs                       40960          200        40760   0% /var 
+tmpfs                       20480            0        20480   0% /tmp 
+tmpfs                        2048            0         2048   0% /tracelog 
+tmpfs                       61440            8        61432   0% /DPITMP 
+tmpfs                        1024            0         1024   0% /uadd 
+tmpfs                        3072            0         3072   0% /owjdxbplugin/tmp 
+tmpfs                          16            0           16   0% /mnt 
+/dev/mtdblock3               1024          500          524  49% /wlan 
+/dev/mtdblock4               2048          512         1536  25% /usercfg 
+/dev/mtdblock5               2048          420         1628  21% /defcfg 
+/dev/mtdblock9               5120          440         4680   9% /UUPlugin 
+/dev/mtdblock10               640          512          128  80% /owdptsplugin/bin 
+tmpfs                        2048            0         2048   0% /owdptsplugin/tmp 
+/dev/mtdblock11              5120          456         4664   9% /status 
+/dev/mtdblock12              3072          384         2688  13% /DPIPlugin 
+/dev/mtdblock13              1024          464          560  45% /UnifiedStorage 
+/dev/mtdblock14              1536          876          660  57% /owjdxbplugin/bin 
+/ # 
+=== [send @9000ms] "ls -la /var\r\n"
+ls -la /var
+drwxrwxrwt   14 Z500_w9b root           300 Oct 25 20:11 .
+drwxr-xr-x   26 Z500_w9b root             0 Jan  1  1970 ..
+drwxr-xr-x    2 Z500_w9b root            40 Jan  1  1970 cache
+drwxr-xr-x    3 Z500_w9b root            60 Jan  1  1970 ct
+drwxr-xr-x    2 Z500_w9b root            60 Jan  1  1970 iproute2
+drwxr-xr-x    2 Z500_w9b root            40 Jan  1  1970 log
+drwxrwx---    3 Z500_w9b root            60 Oct 25 20:11 lua_tmp
+drwxr-xr-x    2 Z500_w9b root            40 Jan  1  1970 ppp
+drwxr-xr-x    2 Z500_w9b root            40 Jan  1  1970 run
+drwxr-xr-x    2 Z500_w9b root            40 Jan  1  1970 siproxd
+drwxr-xr-x    3 Z500_w9b root            60 Jan  1  1970 state
+-rwxr-xr-x    1 Z500_w9b root         15744 Oct 25 20:06 syn_version
+drwxr-xr-x    4 Z500_w9b root          3140 Oct 28 14:20 tmp
+drwxr-xr-x    2 Z500_w9b root            60 Jan  1  1970 udhcpd
+drwxr-xr-x    2 Z500_w9b root            40 Jan  1  1970 zebra
+/ # 
+=== [send @11000ms] "ls -la /var/www\r\n"
+ls -la /var/www
+ls: /var/www: No such file or directory
+/ # 
+=== [send @13000ms] "echo ZDONE\r\n"
+echo ZDONE
+ZDONE
+/ # 
+### --stop-on matched, ending early

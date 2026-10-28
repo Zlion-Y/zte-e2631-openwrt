@@ -1,0 +1,5 @@
+700|admin
+1400|admin
+2000|wget -O /dev/null http://192.168.5.19/; echo "port80_rc=$?"
+6000|wget -O /dev/null http://192.168.5.19:8080/index.html; echo "port8080_index_rc=$?"
+12000|echo ZDONE

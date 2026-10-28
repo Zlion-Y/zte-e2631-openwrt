@@ -1,0 +1,7 @@
+800|admin
+1600|admin
+2400|echo M1; uname -a; cat /proc/version 2>/dev/null
+3600|echo M2; for c in iperf3 nc ncat python python3 httpd busybox dd; do printf "%s=%s " $c "$(command -v $c >/dev/null 2>&1 && echo ok || echo -)"; done; echo
+5200|echo M3; ls /bin | head -40
+6600|echo M4; ls /usr/bin 2>/dev/null | head -30
+8000|echo ZDONE
