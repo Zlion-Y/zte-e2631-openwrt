@@ -708,10 +708,19 @@ void zx_idm_exit(struct zx_eth_adapter *adapter)
 void zx_idm_debug(struct seq_file *m)
 {
 	seq_printf(m,
-		   "idm rx_frames=%u rx_dropped=%u rx_novap=%u rx_submit=%u\n"
-		   "idm inject_ok=%u inject_full=%u tx_kicks=%u tx_queued=%u\n"
-		   "idm wifi_count=%d\n",
+		   "idm rx_frames=%u rx_dropped=%u rx_novap=%u rx_submit=%u rx_unicast=%u
+"
+		   "idm rx_ch=%u/%u/%u/%u/%u/%u/%u/%u
+"
+		   "idm inject_ok=%u inject_full=%u tx_kicks=%u tx_queued=%u hook_fired=%u
+"
+		   "idm wifi_count=%d egress_low=%d
+",
 		   zx_idm.rx_frames, zx_idm.rx_dropped, zx_idm.rx_novap,
-		   zx_idm.rx_submit, zx_idm.inject_ok, zx_idm.inject_full,
-		   zx_idm.tx_kicks, zx_idm.tx_queued, zx_idm.wifi_count);
+		   zx_idm.rx_submit, zx_idm.rx_unicast,
+		   zx_idm.rx_ch[0], zx_idm.rx_ch[1], zx_idm.rx_ch[2], zx_idm.rx_ch[3],
+		   zx_idm.rx_ch[4], zx_idm.rx_ch[5], zx_idm.rx_ch[6], zx_idm.rx_ch[7],
+		   zx_idm.inject_ok, zx_idm.inject_full, zx_idm.tx_kicks,
+		   zx_idm.tx_queued, zx_idm.hook_fired, zx_idm.wifi_count,
+		   zx_wifi_egress_low);
 }
