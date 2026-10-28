@@ -337,14 +337,11 @@ static int zx_idm_rx_ring(struct zx_idm *idm, int budget)
 				skb->dev = w->dev;
 				skb->pkt_type = PACKET_HOST;
 				idm->rx_ch[chan & 7]++;
-				idm->rx_ch[chan & 7]++;
 				/* the frame is already routed (the packet
 				 * modifier rewrote the headers); hand it
 				 * straight to the VAP's transmit path,
 				 * past netfilter
 				 */
-				if (is_unicast_ether_addr(eth_hdr(skb)->h_dest))
-					idm->rx_unicast++;
 				if (is_unicast_ether_addr(eth_hdr(skb)->h_dest))
 					idm->rx_unicast++;
 				dev_queue_xmit(skb);
