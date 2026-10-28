@@ -1,0 +1,7 @@
+#!/bin/sh
+# ffe-full-0.2 cleanup: the reboot-loop stopgap (echo 0 > .../wifi_offload,
+# appended to rc.local live on the 0.1 box) must not survive the fixed
+# image - with the wild-pointer adapter resolution fixed in ppe.c the
+# wireless offload is wanted on again.
+sed -i '/zx279128s_eth\/parameters\/wifi_offload/d' /etc/rc.local
+exit 0

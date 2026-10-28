@@ -813,8 +813,7 @@ static LIST_HEAD(zx_ppe_block_cb_list);
 int zx_eth_setup_tc(struct net_device *dev, enum tc_setup_type type,
 		    void *type_data)
 {
-	struct zx_eth_priv *priv = netdev_priv(dev);
-	struct zx_eth_adapter *adapter = priv->adapter;
+	struct zx_eth_adapter *adapter;
 	struct flow_block_offload *f = type_data;
 	struct flow_block_cb *block_cb;
 	int ret = 0;
@@ -822,6 +821,19 @@ int zx_eth_setup_tc(struct net_device *dev, enum tc_setup_type type,
 	if (type != TC_SETUP_FT)
 		return -EOPNOTSUPP;
 	if (f->binder_type != FLOW_BLOCK_BINDER_TYPE_CLSACT_INGRESS)
+		return -EOPNOTSUPP;
+
+	/* Only our own port netdevs carry zx_eth_priv.  A wireless netdev
+	 * (handed over by the mac80211 shim, patch 991) has none - reading
+	 * netdev_priv() there yields mac80211's own sub-if data, and the
+	 * adapter pointer would be a wild pointer: the singleton IDM engine
+	 * is what knows the adapter on that path.
+	 */
+	if (zx_eth_is_port(dev))
+		adapter = ((struct zx_eth_priv *)netdev_priv(dev))->adapter;
+	else
+		adapter = zx_idm_adapter();
+	if (!adapter)
 		return -EOPNOTSUPP;
 
 	f->driver_block_list = &zx_ppe_block_cb_list;

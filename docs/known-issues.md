@@ -357,3 +357,31 @@ one, `ECCREQ(8,512)` with 128-byte OOB on the sibling, and getting that wrong is
 silently uncorrectable page. The decision on 2026-10-15 was to stop there. The method to
 resume it - carve the vendor kernel's flash table out of the package and diff it against
 upstream - is scripted in `wsl/vendor-flash-table.sh`.
+
+## FFEFULL-WLAN-TC-WILD-POINTER (fixed in ffe-full-0.2, hotfixed live 2026-10-29)
+
+The first live run of the ffe-full branch reboot-looped: boot → radios up at
+~55 s → silent kernel wedge (dmesg frozen, no oops, no panic text) → hardware
+watchdog reset ~30 s later → repeat. Root cause: `zx_eth_setup_tc()` read
+`netdev_priv(dev)->adapter` unconditionally. For the wireless netdevs the
+mac80211 shim (patch 991) hands over, that memory is mac80211's sub-if data -
+the "adapter" was a wild pointer, and the flow-block bind then locked and
+incremented through it. v1.8.0 never hit this because without patch 991 a
+wireless TC_SETUP_FT never reaches the driver. Three lessons:
+
+- **The wedge, not the panic, is the reboot-loop signature**: with
+  panic_on_oops=1 and panic=3 a crash reboots in 3 s, but a silent lockup is
+  what the watchdog turns into a ~60 s cycle. Without pstore on this board
+  the wedge leaves no text - the PC-side `dmesg | tail` poller catching the
+  frozen tail (~0.6 s cadence vs the 3 s panic delay) is what separated
+  "crash" from "hang" here. netconsole is not available: CONFIG_NETPOLL is
+  off, and the tm chardev is a PRBS-test stub, so keep the poller recipe.
+- **Passing a foreign netdev into a driver's ndo_setup_tc entry point needs
+  an explicit adapter resolution** - `zx_idm_adapter()` is the singleton for
+  the wireless path (fixed in overlay ppe.c; the T1.5 staged code carried
+  the same bug, it just never ran on hardware).
+- The live stopgap: `/sys/module/zx279128s_eth/parameters/wifi_offload` to 0
+  (persisted in /etc/rc.local) makes the shim decline the block, so the box
+  runs the proven v1.8.0 data plane while the fixed image is being built.
+  **Remove that rc.local line after flashing ffe-full-0.2** - a kept
+  configuration would silently keep the wireless offload off.
