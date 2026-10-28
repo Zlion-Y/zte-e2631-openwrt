@@ -139,8 +139,11 @@ do_download() {
 	rel=$(latest) || die "cannot reach $API (set e2631.upd.mirror for an accelerator)"
 	set -- $rel
 	tag=$1; url=$2; bin=$DLDIR/$(basename "$url")
-cur=$(cat /etc/e2631-version 2>/dev/null || echo unknown)
-if ! version_newer "$tag" "$cur" && [ "${E2631_UPGRADE_FORCE:-0}" != 1 ]; then
+# Only judge a downgrade when the running version is actually readable: a
+# system without /etc/e2631-version (early images, test harnesses) cannot be
+# compared, and refusing there would block every update for no reason.
+cur=$(cat /etc/e2631-version 2>/dev/null || true)
+if [ -n "$cur" ] && ! version_newer "$tag" "$cur" && [ "${E2631_UPGRADE_FORCE:-0}" != 1 ]; then
 	die "$tag is not newer than the running $cur; set E2631_UPGRADE_FORCE=1 to flash it anyway"
 fi
 	log "downloading $(deref "$url")"

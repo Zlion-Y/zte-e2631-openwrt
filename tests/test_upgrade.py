@@ -32,10 +32,14 @@ class UpgradeTests(unittest.TestCase):
             script = 'uci() { return 1; }\n' + UPDATER
             # Redirect the one persistent version marker into the test sandbox.
             script = script.replace('/etc/.e2631-pending-version', tmp + '/pending')
+            # A running version makes the anti-downgrade guard active in the
+            # sandbox instead of being skipped as 'unknown'.
+            script = script.replace('/etc/e2631-version', tmp + '/version')
+            (path / 'version').write_text('OpenWrt v1.8.0\n')
             script += '''
 DLDIR="$TEST_DIR"
 E2631_FWSLOT="$TEST_DIR/fwslot"
-latest() { echo "v-test https://github.com/owner/repo/releases/download/v-test/image.bin"; }
+latest() { echo "v1.9 https://github.com/owner/repo/releases/download/v1.9/image.bin"; }
 fetch() {
     case "$1" in
         */SHA256SUMS) [ "$FETCH_OK" = 1 ] && cp "$TEST_DIR/manifest" "$2" ;;
@@ -67,6 +71,27 @@ do_download
                 result, pending, checked = self.download(manifest)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertFalse(pending or checked)
+
+    def test_refuse_downgrade(self):
+        digest = hashlib.sha256(b'firmware fixture').hexdigest()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp)
+            (path / 'asset').write_bytes(b'firmware fixture')
+            (path / 'manifest').write_text(digest + '  image.bin\n')
+            (path / 'version').write_text('OpenWrt v1.8.0\n')
+            script = 'uci() { return 1; }\n' + UPDATER
+            script = script.replace('/etc/.e2631-pending-version', tmp + '/pending')
+            script = script.replace('/etc/e2631-version', tmp + '/version')
+            script += '''
+DLDIR="$TEST_DIR"
+latest() { echo "v1.3 https://github.com/owner/repo/releases/download/v1.3/image.bin"; }
+fetch() { cp "$TEST_DIR/manifest" "$2"; }
+do_download
+'''
+            result = subprocess.run(['busybox', 'ash', '-c', script], text=True,
+                                    capture_output=True, env=dict(os.environ, TEST_DIR=tmp))
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('not newer', result.stderr)
 
     def test_checksum_download_failure(self):
         result, pending, checked = self.download('', fetch_ok=False)
