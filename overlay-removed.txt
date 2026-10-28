@@ -8,3 +8,5 @@
 # a real boot and always fell back to the built-in slot-1 layout.
 target/linux/sanechips/files/arch/arm/mach-zte/zx279128s-slotfix.c
 target/linux/sanechips/patches-6.18/032-ARM-zte-Add-the-ZX279128S-slot-fixup-to-the-mach-objects.patch
+# P1-6 rename: 63_e2631_wan_ssh -> 63_e2631_wan_access (now also opens 80/443)
+target/linux/sanechips/base-files/etc/uci-defaults/63_e2631_wan_ssh

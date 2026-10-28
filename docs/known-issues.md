@@ -204,7 +204,7 @@ points at something in the repository or at a measurement.
   surface: debugging
   symptom: with the router hung BELOW the main router (PC on the upstream LAN, this box's WAN port DHCP'd from it), SSH to the WAN address was refused by the wan-zone input rule - the box was undebuggable from exactly the direction it sits in
   verified: "yes (owner setup, 2026-10-28); dropbear already listens on every interface, only the firewall blocked it"
-  workaround: v1.6 ships firewall traffic rules accepting tcp/22 on the wan zone from 192.168.0.0/16 and 10.0.0.0/8 (etc/uci-defaults/63_e2631_wan_ssh). Stated plainly: first boot has no root password and dropbear accepts empty passwords until one is set - with this rule anyone on the upstream LAN can root the box until you set a password. Set it first, or delete the rule in LuCI
+  workaround: the image ships firewall traffic rules accepting tcp/22 (and, since v1.8, tcp/80+443 for the LuCI page) on the wan zone from 192.168.0.0/16 and 10.0.0.0/8 (etc/uci-defaults/63_e2631_wan_access). Verified live on v1.7: ssh root@192.168.5.19 and http://192.168.5.19 both answer from the main-router LAN. Stated plainly: first boot has no root password and dropbear accepts empty passwords until one is set - with this rule anyone on the upstream LAN can root the box until you set a password. Set it first, or delete the rule in LuCI
   note: the vendor box exposes telnet on its LAN-facing side with a factory password - the equivalent posture, minus the WAN-zone scoping
 - id: WIRELESS-PROFILE-VENDOR-FACTS
   severity: minor
