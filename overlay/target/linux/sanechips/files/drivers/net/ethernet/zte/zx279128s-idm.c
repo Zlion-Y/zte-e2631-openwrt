@@ -172,20 +172,6 @@ MODULE_PARM_DESC(wifi_egress_low, "write only the low nibble of the fabric port 
 u32 zx_idm_hook_fired;
 EXPORT_SYMBOL_GPL(zx_idm_hook_fired);
 
-/*
- * Egress field mode: false (default) writes the fabric port 0x18-0x1f the
- * vendor fastHashRule uses; true writes only the low nibble (8-15, the wlan
- * class bit cleared).  The live downlink test decides - the portmap reverse
- * engineering and the hardware test historically disagreed.
- */
-static bool zx_wifi_egress_low;
-module_param_named(wifi_egress_low, zx_wifi_egress_low, bool, 0644);
-MODULE_PARM_DESC(wifi_egress_low, "write only the low nibble of the fabric port into the egress field");
-
-/* the nf_flow_table hook (patch 036) counts its own invocations here */
-u32 zx_idm_hook_fired;
-EXPORT_SYMBOL_GPL(zx_idm_hook_fired);
-
 struct zx_eth_adapter *zx_idm_adapter(void)
 {
 	return zx_idm.adapter;
