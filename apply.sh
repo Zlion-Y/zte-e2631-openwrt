@@ -259,25 +259,24 @@ if [ -f "$GEN" ]; then
 		echo "generic config: could not turn the soft lockup detector on" >&2; exit 1; }
 	echo "generic config: soft lockup + hung task detectors on"
 fi
-# OPT-IN (default off): the FFE control plane is the vendor-scheme rebuild.
-# v1.6 shipped it by accident of branch state, and its own init aborted (the
-# proc name had a slash), so the proven ppe path did the work; switching it on
-# by default would put an unverified learn path under a test build.
-# Enable with E2631_FFE=1 when you want to test it on hardware.
-FFE_MARK="# E2631: FFE control plane (see apply.sh / ffe branch)"
+# ffe-full branch: the FFE control plane ships ON. This branch exists to carry
+# the vendor-scheme rebuild (FFE learn/flush + the IDM wireless fabric path)
+# together with the proven PPE hardware layer; main keeps the opt-in default.
+# Set E2631_FFE=0 to build this branch with the engine compiled out.
+FFE_MARK="# E2631: FFE control plane (see apply.sh / ffe-full branch)"
 # awk, not sed: the marker carries regex characters, and a sed address built
 # from it silently deleted nothing (seven apply runs stacked seven copies).
-awk -v m="$FFE_MARK" '$0 != m && $0 != "CONFIG_ZX_FFE=y"' "$CFG" > "$CFG.tmp" && mv "$CFG.tmp" "$CFG"
-if [ "${E2631_FFE:-0}" = 1 ] && [ -f "$TREE/target/linux/sanechips/patches-6.18/034-zte-add-the-ZX279128S-FFE-control-plane.patch" ]; then
+awk -v m="$FFE_MARK" '$0 != m && $0 != "CONFIG_ZX_FFE=y" && $0 != "# CONFIG_ZX_FFE is not set"' "$CFG" > "$CFG.tmp" && mv "$CFG.tmp" "$CFG"
+if [ "${E2631_FFE:-1}" = 1 ] && [ -f "$TREE/target/linux/sanechips/patches-6.18/034-zte-add-the-ZX279128S-FFE-control-plane.patch" ]; then
 	printf '%s\n' "$FFE_MARK" 'CONFIG_ZX_FFE=y' >> "$CFG"
-	echo "kernel config: FFE control plane ON (opt-in)"
+	echo "kernel config: FFE control plane ON (ffe-full default)"
 else
 	# Declare it off explicitly: the Kconfig entry exists (patch 034), and a
 	# symbol that appears in Kconfig but in no fragment is a NEW symbol that
 	# oldconfig stops and asks about - non-interactive builds die there.
 	printf '%s
 ' "$FFE_MARK" '# CONFIG_ZX_FFE is not set' >> "$CFG"
-	echo "kernel config: FFE control plane off (E2631_FFE=1 to test it)"
+	echo "kernel config: FFE control plane off (E2631_FFE=1 to turn it on)"
 fi
 
 # The slot-aware partition parser (P0-3): the driver source ships in files/,
@@ -377,8 +376,16 @@ assert "FFE control plane source + wiring patch present" \
 assert "overlay ppe.c carries the IPv6 trap fix" \
 	grep -q 'v6 = READ_ONCE(adapter->ppe_active) || !sw' \
 	"$TREE/target/linux/sanechips/files/drivers/net/ethernet/zte/zx279128s-ppe.c"
-assert_one_line "overlay ppe.c stays a small diff (trap fix + FFE seam)" 90 25 \
+assert_one_line "overlay ppe.c stays a small diff (trap fix + FFE seam + wifi flows)" 120 40 \
 	"target/linux/sanechips/files/drivers/net/ethernet/zte/zx279128s-ppe.c"
+assert "IDM wireless fabric engine: source, Makefile wiring, nf hook, mac80211 shim" \
+	bash -c "test -f '$TREE/target/linux/sanechips/files/drivers/net/ethernet/zte/zx279128s-idm.c' && test -f '$TREE/target/linux/sanechips/patches-6.18/035-net-ethernet-zte-build-the-IDM-engine-into-the-eth-driver.patch' && test -f '$TREE/target/linux/sanechips/patches-6.18/036-net-netfilter-route-wireless-flows-of-hw-offloaded-connections-through-the-fabric.patch' && ls '$TREE'/package/kernel/mac80211/patches/subsys/991-* >/dev/null 2>&1"
+assert "wireless flowtable hotplug reload present" \
+	test -f "$TREE/target/linux/sanechips/base-files/etc/hotplug.d/net/21-e2631-wifi-ft"
+assert_one_line "overlay eth.h stays a small diff (12-bit egress + IDM decls)" 25 6 \
+	"target/linux/sanechips/files/drivers/net/ethernet/zte/zx279128s-eth.h"
+assert_one_line "overlay main.c stays a small diff (IDM poll/init/exit)" 12 2 \
+	"target/linux/sanechips/files/drivers/net/ethernet/zte/zx279128s-main.c"
 
 if [ "$APPLY_FAILED" != 0 ]; then
 	echo "apply.sh: $REPORT records structural failures; the tree is NOT in the state this script promises" >&2

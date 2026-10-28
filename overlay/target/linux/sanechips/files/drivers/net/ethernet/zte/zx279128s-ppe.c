@@ -6,12 +6,19 @@
  *
  * E2631 overlay note: this file is a FULL COPY of the base tree's
  * target/linux/sanechips/files/drivers/net/ethernet/zte/zx279128s-ppe.c
- * (overlay cp -r overwrites the base copy) carrying exactly ONE local
- * change: zx_update_traps() keeps the IPv6 ethertype trap on while the PPE
- * is active, because otherwise IPv6 addressed to the router has no path to
- * the CPU (known-issues PPE-IPV6-TCP).  apply.sh asserts the base copy is
- * still at the expected blob so a base-tree update cannot be silently
- * shadowed by this overlay.
+ * (overlay cp -r overwrites the base copy) carrying the ffe-full branch
+ * changes on top of it:
+ *  - zx_update_traps() keeps the IPv6 ethertype trap on while the PPE is
+ *    active (known-issues PPE-IPV6-TCP), so IPv6 keeps its CPU path;
+ *  - the FFE control plane (CONFIG_ZX_FFE) owns learn/delete/stats through
+ *    the zx-ffe-ops.h seam, ppe.c stays the hardware layer;
+ *  - wireless flows: the ingress check admits VAPs registered with the IDM
+ *    engine and the egress resolves through the fabric's wireless ports
+ *    0x18-0x1f (zx_idm_wifi_egress), so a flow between WAN and a VAP is
+ *    forwarded by the packet processor with the rewrite delivered to the
+ *    radio through the IDM ring (re/ffe + the vendor fastHashRule evidence).
+ * apply.sh asserts the base copies are still at the expected blob so a
+ * base-tree update cannot be silently shadowed by this overlay.
  */
 
 #include <linux/bitfield.h>
@@ -182,7 +189,7 @@ static void zx_ppe_slots(const struct zx_ppe_tuple *t, u16 slot[2])
  * key. Words 1-3 are the same constants in every entry of the stock
  * firmware, and so is the 0x44 in word 0.
  */
-static void zx_ppe_hash_entry(const struct zx_ppe_tuple *t, u16 flow, int port,
+static void zx_ppe_hash_entry(const struct zx_ppe_tuple *t, u16 flow, int egress,
 			      u32 w[9])
 {
 	u8 key[20] = {};
@@ -195,7 +202,7 @@ static void zx_ppe_hash_entry(const struct zx_ppe_tuple *t, u16 flow, int port,
 	for (i = 0; i < 7; i++)
 		zx_ppe_put_bits(key, 24 + 16 * i, 16, hw[i]);
 	w[0] = FIELD_PREP(ZX_CLA_W0_FLOW, flow) | ZX_CLA_W0_FWD |
-	       FIELD_PREP(ZX_CLA_W0_EGRESS, ZX_BRPORT(port)) | ZX_CLA_W0_BITS;
+	       FIELD_PREP(ZX_CLA_W0_EGRESS, egress) | ZX_CLA_W0_BITS;
 	w[1] = 0xfa11c000;
 	w[2] = 0x00000608;
 	w[3] = 0x80000000;
@@ -320,7 +327,9 @@ int zx_ppe_flow_add(struct zx_eth_adapter *adapter,
 	if (rhashtable_lookup_fast(&adapter->ppe_flows, &f->cookie, zx_ppe_ht_params))
 		return -EEXIST;
 
-	/* the hardware only sees frames from our switch ports */
+	/* the hardware only sees frames from our switch ports; a flow learned
+	 * on a wireless netdev comes in through the fabric via the IDM, the
+	 * VAPs registered there carry the same right */
 	if (flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_META)) {
 		struct flow_match_meta match;
 
@@ -329,7 +338,8 @@ int zx_ppe_flow_add(struct zx_eth_adapter *adapter,
 			if (adapter->ports[i] &&
 			    adapter->ports[i]->ifindex == match.key->ingress_ifindex)
 				break;
-		if (i == ZX_NUM_PORTS)
+		if (i == ZX_NUM_PORTS &&
+		    !zx_idm_wifi_ingress(adapter, match.key->ingress_ifindex))
 			return -EOPNOTSUPP;
 	}
 
@@ -420,9 +430,17 @@ int zx_ppe_flow_add(struct zx_eth_adapter *adapter,
 		}
 	}
 
-	if (!odev || !zx_eth_is_port(odev))
+	if (!odev)
 		return -EOPNOTSUPP;
-	port = ((struct zx_eth_priv *)netdev_priv(odev))->port;
+	if (zx_eth_is_port(odev)) {
+		port = ZX_BRPORT(((struct zx_eth_priv *)netdev_priv(odev))->port);
+	} else {
+		/* wireless: resolve the VAP's fabric port, either directly or
+		 * through the bridge FDB when odev is the bridge master */
+		port = zx_idm_wifi_egress(adapter, odev, eth.h_dest);
+		if (port < 0)
+			return port;
+	}
 	if (!is_valid_ether_addr(eth.h_source) || !is_valid_ether_addr(eth.h_dest))
 		return -EOPNOTSUPP;
 

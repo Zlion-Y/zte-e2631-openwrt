@@ -1,0 +1,11 @@
+--- a/drivers/net/ethernet/zte/Makefile
++++ b/drivers/net/ethernet/zte/Makefile
+@@ -2,3 +2,4 @@
+ obj-$(CONFIG_ZX279128S_ETH) += zx279128s-eth.o
+ zx279128s-eth-y := zx279128s-main.o zx279128s-ppe.o zx279128s-switch.o
+ zx279128s-eth-$(CONFIG_ZX_FFE) += zx279128s-ffe.o
++zx279128s-eth-y += zx279128s-idm.o
+
+The IDM engine is unconditional like the rest of the eth driver: the
+wireless offload has its own runtime switch (zx279128s-idm.c module
+parameter wifi_offload), and ppe.c calls the VAP helpers unconditionally.

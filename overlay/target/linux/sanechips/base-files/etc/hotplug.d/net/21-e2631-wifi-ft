@@ -1,0 +1,22 @@
+#!/bin/sh
+# fw4 renders the flowtable before the wireless VAPs attach to the bridge:
+# a fresh boot always ended up with the phy*-ap* devices missing from the
+# flowtable device list (observed on the first v1.4-rc boot), so no wireless
+# flow was ever offered to the packet processor.  Reload once, delayed, when
+# a VAP appears.  The guard keeps every later call a no-op.
+
+case "$ACTION" in
+add|ifup) ;;
+*) exit 0 ;;
+esac
+
+case "$DEVICENAME" in
+phy[0-9]-ap[0-9]) ;;
+*) exit 0 ;;
+esac
+
+(
+	sleep 8
+	nft list flowtable inet fw4 ft 2>/dev/null | grep -q "phy" && exit 0
+	fw4 reload
+) &

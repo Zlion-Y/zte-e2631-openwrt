@@ -1,0 +1,37 @@
+--- a/net/netfilter/nf_flow_table_ip.c
++++ b/net/netfilter/nf_flow_table_ip.c
+@@ -423,6 +423,12 @@
+ 	return 1;
+ }
+ 
++/* ZX279128S ethernet driver, built-in: the wireless side of a hw-offloaded
++ * flow, injected into the switch fabric (see zx279128s-idm.c).
++ */
++int zx_idm_flow_xmit(struct sk_buff *skb, struct nf_flowtable *ft,
++		     struct flow_offload *flow);
++
+ unsigned int
+ nf_flow_offload_ip_hook(void *priv, struct sk_buff *skb,
+ 			const struct nf_hook_state *state)
+@@ -443,6 +449,21 @@
+ 	if (!tuplehash)
+ 		return NF_ACCEPT;
+ 
++	/* A flow the packet processor has taken still delivers its
++	 * wireless-side packets to the CPU: inject them into the fabric
++	 * through the IDM ring, the hardware applies the rewrite and
++	 * forwards out the egress port.  NF_ACCEPT falls back to the
++	 * software path below.
++	 */
++	if (state->in && state->in->ieee80211_ptr) {
++		struct flow_offload *zx_flow = container_of(tuplehash,
++				struct flow_offload,
++				tuplehash[tuplehash->tuple.dir]);
++
++		if (test_bit(NF_FLOW_HW, &zx_flow->flags))
++			return zx_idm_flow_xmit(skb, flow_table, zx_flow);
++	}
++
+ 	ret = nf_flow_offload_forward(&ctx, flow_table, tuplehash, skb);
+ 	if (ret < 0)
+ 		return NF_DROP;
