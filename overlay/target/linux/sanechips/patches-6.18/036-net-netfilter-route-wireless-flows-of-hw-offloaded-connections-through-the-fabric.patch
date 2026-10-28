@@ -1,6 +1,6 @@
 --- a/net/netfilter/nf_flow_table_ip.c
 +++ b/net/netfilter/nf_flow_table_ip.c
-@@ -423,6 +423,12 @@
+@@ -423,6 +423,13 @@
  	return 1;
  }
  
@@ -9,6 +9,7 @@
 + */
 +int zx_idm_flow_xmit(struct sk_buff *skb, struct nf_flowtable *ft,
 +		     struct flow_offload *flow);
++bool zx_idm_hook_wlan_ingress(const struct net_device *in);
 +
  unsigned int
  nf_flow_offload_ip_hook(void *priv, struct sk_buff *skb,
@@ -23,7 +24,7 @@
 +	 * forwards out the egress port.  NF_ACCEPT falls back to the
 +	 * software path below.
 +	 */
-+	if (state->in && state->in->ieee80211_ptr) {
++	if (state->in && zx_idm_hook_wlan_ingress(state->in)) {
 +		struct flow_offload *zx_flow = container_of(tuplehash,
 +				struct flow_offload,
 +				tuplehash[tuplehash->tuple.dir]);

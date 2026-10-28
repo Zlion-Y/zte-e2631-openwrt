@@ -402,6 +402,7 @@ int zx_wifi_flow_offload(struct net_device *dev, enum tc_setup_type type,
 			 void *type_data);
 int zx_idm_flow_xmit(struct sk_buff *skb, struct nf_flowtable *ft,
 		     struct flow_offload *flow);
+bool zx_idm_hook_wlan_ingress(const struct net_device *in);
 void zx_idm_debug(struct seq_file *m);
 
 #endif

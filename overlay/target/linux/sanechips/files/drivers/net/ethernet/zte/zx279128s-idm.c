@@ -138,6 +138,10 @@ struct zx_idm {
 	u32			rx_frames;
 	u32			rx_dropped;
 	u32			rx_novap;
+	u32			rx_unicast;
+	u32			rx_ch[8];
+	u32			rx_unicast;
+	u32			rx_ch[8];
 	u32			inject_ok;
 	u32			inject_full;
 	u32			tx_kicks;
@@ -155,6 +159,34 @@ static struct zx_idm zx_idm;
 static bool zx_wifi_offload = true;
 module_param_named(wifi_offload, zx_wifi_offload, bool, 0644);
 MODULE_PARM_DESC(wifi_offload, "program wireless flows into the packet processor");
+
+/*
+ * Egress field mode: false (default) writes the fabric port 0x18-0x1f the
+ * vendor fastHashRule uses; true writes only the low nibble (8-15, the wlan
+ * class bit cleared).  The live downlink test decides - the portmap reverse
+ * engineering and the hardware test historically disagreed.
+ */
+static bool zx_wifi_egress_low;
+module_param_named(wifi_egress_low, zx_wifi_egress_low, bool, 0644);
+MODULE_PARM_DESC(wifi_egress_low, "write only the low nibble of the fabric port into the egress field");
+
+/* the nf_flow_table hook (patch 036) counts its own invocations here */
+u32 zx_idm_hook_fired;
+EXPORT_SYMBOL_GPL(zx_idm_hook_fired);
+
+/*
+ * Egress field mode: false (default) writes the fabric port 0x18-0x1f the
+ * vendor fastHashRule uses; true writes only the low nibble (8-15, the wlan
+ * class bit cleared).  The live downlink test decides - the portmap reverse
+ * engineering and the hardware test historically disagreed.
+ */
+static bool zx_wifi_egress_low;
+module_param_named(wifi_egress_low, zx_wifi_egress_low, bool, 0644);
+MODULE_PARM_DESC(wifi_egress_low, "write only the low nibble of the fabric port into the egress field");
+
+/* the nf_flow_table hook (patch 036) counts its own invocations here */
+u32 zx_idm_hook_fired;
+EXPORT_SYMBOL_GPL(zx_idm_hook_fired);
 
 struct zx_eth_adapter *zx_idm_adapter(void)
 {
@@ -304,11 +336,17 @@ static int zx_idm_rx_ring(struct zx_idm *idm, int budget)
 					     len);
 				skb->dev = w->dev;
 				skb->pkt_type = PACKET_HOST;
+				idm->rx_ch[chan & 7]++;
+				idm->rx_ch[chan & 7]++;
 				/* the frame is already routed (the packet
 				 * modifier rewrote the headers); hand it
 				 * straight to the VAP's transmit path,
 				 * past netfilter
 				 */
+				if (is_unicast_ether_addr(eth_hdr(skb)->h_dest))
+					idm->rx_unicast++;
+				if (is_unicast_ether_addr(eth_hdr(skb)->h_dest))
+					idm->rx_unicast++;
 				dev_queue_xmit(skb);
 				idm->rx_frames++;
 				work++;
@@ -421,12 +459,34 @@ EXPORT_SYMBOL_GPL(zx_wifi_flow_offload);
  * the frame was queued into the fabric, NF_ACCEPT to fall back to the
  * software flowtable path.
  */
+/*
+ * Whether the flowtable hook (patch 036) should offer this ingress device
+ * to the engine: a registered VAP, or a bridge that has VAPs behind it
+ * (bridged wireless clients enter the stack on the bridge master, where
+ * ieee80211_ptr is NULL - the first revision's condition never fired for
+ * them).
+ */
+bool zx_idm_hook_wlan_ingress(const struct net_device *in)
+{
+	int i;
+
+	if (!zx_idm.ready || !zx_idm.wifi_count)
+		return false;
+	for (i = 0; i < zx_idm.wifi_count; i++)
+		if (zx_idm.wifi[i].dev == in)
+			return true;
+	return netif_is_bridge_master(in);
+}
+EXPORT_SYMBOL_GPL(zx_idm_hook_wlan_ingress);
+
 int zx_idm_flow_xmit(struct sk_buff *skb, struct nf_flowtable *ft,
 		     struct flow_offload *flow)
 {
 	struct zx_idm_wifi *w = NULL;
+	struct net_device *port;
 	int i;
 
+	zx_idm_hook_fired++;
 	if (!zx_idm.ready)
 		return NF_ACCEPT;
 
@@ -435,8 +495,25 @@ int zx_idm_flow_xmit(struct sk_buff *skb, struct nf_flowtable *ft,
 			w = &zx_idm.wifi[i];
 			break;
 		}
-	if (!w)
-		return NF_ACCEPT;
+	if (!w) {
+		/* bridge ingress: the source MAC's FDB port names the VAP
+		 * the frame came from; without it the fabric still matches
+		 * the flow (the key is the 5-tuple), so fall back to the
+		 * first registered channel */
+		if (!IS_ENABLED(CONFIG_BRIDGE) ||
+		    !netif_is_bridge_master(skb->dev))
+			return NF_ACCEPT;
+		rtnl_lock();
+		port = br_fdb_find_port(skb->dev, eth_hdr(skb)->h_source, 0);
+		rtnl_unlock();
+		for (i = 0; i < zx_idm.wifi_count; i++)
+			if (zx_idm.wifi[i].dev == port) {
+				w = &zx_idm.wifi[i];
+				break;
+			}
+		if (!w)
+			w = &zx_idm.wifi[0];
+	}
 
 	if (zx_idm_inject(&zx_idm, skb, w))
 		return NF_ACCEPT;	/* ring full: the software path takes it */
@@ -507,7 +584,7 @@ int zx_idm_wifi_egress(struct zx_eth_adapter *adapter,
 			return -EOPNOTSUPP;
 	}
 
-	return w->port;
+	return zx_wifi_egress_low ? 8 + w->idm_off : w->port;
 }
 
 /* ---- Bring-up and teardown -------------------------------------------- */

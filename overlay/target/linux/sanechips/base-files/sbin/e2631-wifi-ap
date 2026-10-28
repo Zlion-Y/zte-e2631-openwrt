@@ -109,7 +109,8 @@ if [ -z "$secs" ]; then
 		# 574 Mbit/s PHY - the "cannot reach 500M" complaint), and 5G lost the
 		# 80 MHz rates too. phy0 (ofs 0) is Band 1 = 2.4G, phy1 (+1) Band 2 =
 		# 5G. HE40 + noscan pins the 2.4G behaviour to the vendor's forced
-		# 40 MHz; 5G runs HE80 (2x2 80 MHz). The RF calibration itself is the
+		# 40 MHz; 5G runs HE160 (2x2 160 MHz - the radio supports it, owner-confirmed
+		# 2026-10-29; mt76 falls back to 80 MHz if the band cannot hold it). The RF calibration itself is the
 		# vendor's own (the /wlan/caldata blob, chip id 0x7916, handed to the
 		# driver through the mt7916_eeprom.bin request); what remains
 		# vendor-only is the proprietary per-rate SKU tuning in their
@@ -117,7 +118,7 @@ if [ -z "$secs" ]; then
 		case "$ofs" in
 		0)	uci set "wireless.radio$n.htmode=HE40"
 			uci set "wireless.radio$n.noscan=1" ;;
-		*)	uci set "wireless.radio$n.htmode=HE80" ;;
+		*)	uci set "wireless.radio$n.htmode=HE160" ;;
 		esac
 		uci set "wireless.radio$n.disabled=0"
 		uci -q delete "wireless.default_radio$n"

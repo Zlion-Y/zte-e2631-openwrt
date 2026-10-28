@@ -36,7 +36,7 @@ config wifi-device 'radio1'
 	option path 'soc/f000000.pcie/pci0000:00/0000:00:00.0/0000:01:00.0+1'
 	option band '5g'
 	option channel '36'
-	option htmode 'HE80'
+	option htmode 'HE160'
 	option country 'CN'
 	option disabled '1'
 
