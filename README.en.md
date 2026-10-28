@@ -229,6 +229,21 @@ the literal token never does.
   and its "USB 3.0" line); each is listed with the measurement that closed it in
   [docs/01-情报汇总与事实核验-2026-10-13.md](docs/01-情报汇总与事实核验-2026-10-13.md).
   The thanks and the corrections are both meant sincerely.
+- **[@zwzzrl](https://github.com/zwzzrl/zte-e2631-openwrt)** - the other port's hardware
+  iterating fork. A large part of v1.4-v1.8 comes from his device work: the whole manual
+  WAN-port feature (`sbin/e2631-wanport`, the LuCI page, `e2631_ports`, the 14-case offline
+  self-test) with his end-to-end on-device acceptance (wan -> lan3 -> revert), his two real
+  incidents that killed the automatic variant (PPPoE/static uplinks are undetectable, and an
+  auto-switch turned the management port into WAN, whose REJECT input dropped SSH/HTTP),
+  the discovery that hardware flow offload breaks IPv6 TCP (handshake in 1 ms, zero payload)
+  with the `zx_update_traps()`/trap-DMAC mechanism, the wifi-boot re-provision fix, the
+  shipped wireless sections, apply.sh's overlay-removed deletion sync, the rpcd exec bits,
+  and the PPE experiments (external hash table, vendor CLA init registers, 520 slots across
+  five hash tables) plus the warning that a PPE module on AUTOLOAD hangs this board into a
+  serial-only recovery - which is why the FFE control plane ships opt-in, never by default.
+- **[@zwthys-cyber](https://github.com/zwthys-cyber/zte-e2631-openwrt)** - upgrade hardening and
+  CI: strictly parsed mandatory SHA256SUMS, https-only mirrors, a pinned release repository,
+  the upgrade failure-path tests, and the baseline for this repo's two workflows.
 - [cubingmucus998/zte-zx279128s-recon](https://github.com/cubingmucus998/zte-zx279128s-recon) - the public recon
   material for this SoC. A large share of the first DTB, partition-table and flash facts came from there.
 - **@cnjn** - [linux-mainline-zte-zxslc-sr1010](https://github.com/cnjn/linux-mainline-zte-zxslc-sr1010), prior art

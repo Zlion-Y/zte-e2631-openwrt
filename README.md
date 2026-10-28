@@ -223,6 +223,24 @@ nvmem MAC 接线和 JFFS2 那组补丁；它的 `tools/*.py` 筛查被重写成�
   每条都连同"是哪个实测把它关掉"的记在
   [docs/01-情报汇总与事实核验-2026-10-13.md](docs/01-情报汇总与事实核验-2026-10-13.md) 里。
   感谢和更正都是认真的。
+- **[@zwzzrl](https://github.com/zwzzrl/zte-e2631-openwrt)** —— 同型端口的真机迭代者，本仓库
+  v1.4–v1.8 的很大一部分来自他的实测与代码：
+  - **手动 WAN 口选择**整个功能（`sbin/e2631-wanport`、LuCI「网络 → WAN 口」页、`e2631_ports`、
+    14 场景离线自检）连同他的真机整链验收（wan → lan3 → 回退）一起采纳；他同时用两起真实事故
+    证明了「自动盲插」不可取（PPPoE/静态上行探不到；自动切换会把管理网口切成 WAN，WAN 区
+    input=REJECT → SSH/HTTP 全断，只能到现场换线）。
+  - **硬件卸载打断 IPv6 TCP** 是他先在真机上测出来的（握手 1ms、载荷 0 字节），并定位到
+    `zx_update_traps()` 清 IPv6 ethertype trap + MAC 移出 trap-DMAC 表的联动。本仓库据此
+    选择「改驱动而非关功能」（PPE 激活时 IPv6 trap 恒开），但问题的发现与因果链是他的。
+  - `e2631-wifi-boot` 的**重配网修复**（标记存在但 uci 里没有 wifi-device 时重新 provision，
+    否则整个开机周期 LuCI 都没有无线页）、出厂 `wireless` 段、apply.sh 的
+    **overlay-removed 删除同步**机制、rpcd 插件执行位、`/etc/config` 权限归一，均来自他的真机踩坑。
+  - 他对 **PPE/IPv6 卸载的外部哈希表**、原厂 CLA 初始化寄存器、520 槽/5 张 hash 表、以及
+    「PPE 模块 AUTOLOAD 会把机器搞成开机挂死」的警告，构成了 `docs/原厂加速方案逆向-2026-10-28.md`
+    的重要输入（其中「开机挂死只能串口救」那条，直接决定了我们不在未验证的情况下发货 FFE 控制面）。
+- **[@zwthys-cyber](https://github.com/zwthys-cyber/zte-e2631-openwrt)** —— 升级加固与 CI：
+  强制且严格解析的 `SHA256SUMS`、镜像加速仅 https、限定发布仓库、升级失败路径回归测试
+  （`tests/test_upgrade.py`），以及本仓库 `.github/workflows/` 的两个 workflow 的基线。
 - [cubingmucus998/zte-zx279128s-recon](https://github.com/cubingmucus998/zte-zx279128s-recon) —— 这颗 SoC 的公开侦察材料。
   最早那批 DTB、分区表和 flash 事实，很大一块出自这里。
 - **@cnjn** —— [linux-mainline-zte-zxslc-sr1010](https://github.com/cnjn/linux-mainline-zte-zxslc-sr1010)：
