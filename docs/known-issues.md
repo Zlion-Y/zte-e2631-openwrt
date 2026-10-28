@@ -264,6 +264,14 @@ points at something in the repository or at a measurement.
   cause: "do_check compared the release tag with /etc/e2631-version by string equality; the two formats ('v1.3' vs 'OpenWrt v1.7') never match, so every release looked like an update. There was no ordering at all"
   workaround: "version numbers are normalised (strip the label, keep the dotted digits) and compared component-wise as numbers (1.10 > 1.9); do_download additionally refuses a release that is not newer unless E2631_UPGRADE_FORCE=1, so the automatic path can no longer downgrade. Deployed live on the running box as well as in the source"
   note: 7 unit cases pass (v1.3<v1.7, v1.8>v1.7, equal, 1.10>1.9, 1.9<1.10, 1.7.1>1.7, 2.0>1.99.9)
+- id: WIFI-UI-DISABLED-EARLY-BOOT
+  severity: minor
+  status: mitigated
+  surface: wi-fi
+  symptom: "after a flash the LuCI Wireless page shows both radios disabled for the first ~70 s; a user who logs in quickly enables them by hand (reported 2026-10-29 on v1.8.0)"
+  verified: "yes - dmesg on the flashed unit: 'e2631-wifi-boot: automatic Wi-Fi initialization complete' at 69.4 s; a controlled repro (restore /rom/etc/config/wireless, delete the marker, run /sbin/e2631-wifi-boot) ends with all four sections disabled=0 and both APs broadcasting, so the automatic path is correct - it is only slow"
+  cause: "the shipped /etc/config/wireless carries disabled=1 on purpose: netifd must not bring the radio up before e2631-wifi-eeprom has staged the caldata and loaded mt7916 (that race is the cold-bind hang). e2631-wifi-load is START=95 and e2631-wifi-boot waits DEFER=25 s before polling for the phys, provisioning and running wifi up"
+  workaround: "wait ~70 s, or use the wired/WAN address meanwhile; enabling the radios by hand early is harmless because the boot script then finds the markers already correct. Shortening DEFER to ~10 s would bring the AP up around 50 s but narrows the safety margin against the cold-bind hang - not changed without serial-attached hardware runs"
 - id: WIFI-PROVISION-HT20
   severity: major
   status: fixed
