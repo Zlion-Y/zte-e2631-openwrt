@@ -294,6 +294,9 @@ int zx_ffe_ops_register(const struct zx_ffe_ops *ops)
 	if (zx_ffe_registered)
 		return -EBUSY;
 	rcu_assign_pointer(zx_ffe_ops, ops);
+	/* the seam the ppe block callback consults (zx_ffe_active reads the
+	 * plain pointer; both sides are built-in and never unload) */
+	WRITE_ONCE(zx_ffe_ops_ptr, ops);
 	zx_ffe_registered = true;
 	pr_info("registered as the flow offload control plane\n");
 	return 0;
@@ -303,6 +306,7 @@ EXPORT_SYMBOL_GPL(zx_ffe_ops_register);
 void zx_ffe_ops_unregister(void)
 {
 	zx_ffe_registered = false;
+	WRITE_ONCE(zx_ffe_ops_ptr, NULL);
 	rcu_assign_pointer(zx_ffe_ops, NULL);
 	synchronize_rcu();
 }

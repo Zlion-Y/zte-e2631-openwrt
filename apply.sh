@@ -382,7 +382,7 @@ assert "IDM wireless fabric engine: source, Makefile wiring, nf hook, mac80211 s
 	bash -c "test -f '$TREE/target/linux/sanechips/files/drivers/net/ethernet/zte/zx279128s-idm.c' && test -f '$TREE/target/linux/sanechips/patches-6.18/035-net-ethernet-zte-build-the-IDM-engine-into-the-eth-driver.patch' && test -f '$TREE/target/linux/sanechips/patches-6.18/036-net-netfilter-route-wireless-flows-of-hw-offloaded-connections-through-the-fabric.patch' && ls '$TREE'/package/kernel/mac80211/patches/subsys/991-* >/dev/null 2>&1"
 assert "wireless flowtable hotplug reload present" \
 	test -f "$TREE/target/linux/sanechips/base-files/etc/hotplug.d/net/21-e2631-wifi-ft"
-assert_one_line "overlay eth.h stays a small diff (12-bit egress + IDM decls)" 25 6 \
+assert_one_line "overlay eth.h stays a small diff (12-bit egress + IDM decls)" 30 6 \
 	"target/linux/sanechips/files/drivers/net/ethernet/zte/zx279128s-eth.h"
 assert_one_line "overlay main.c stays a small diff (IDM poll/init/exit)" 12 2 \
 	"target/linux/sanechips/files/drivers/net/ethernet/zte/zx279128s-main.c"

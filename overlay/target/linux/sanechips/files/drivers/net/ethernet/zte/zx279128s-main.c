@@ -1196,6 +1196,7 @@ static int zx_eth_dma_state_show(struct seq_file *s, void *data)
 			   READ_ONCE(adapter->rx_cur_idx[i]));
 	rtnl_unlock();
 
+	zx_idm_debug(s);
 	return 0;
 }
 
