@@ -13,9 +13,9 @@ This one repository holds the whole port: the overlay that turns the base tree i
 E2631 build (`overlay/`), the local build path (`wsl/`, grouped in `wsl/INDEX.md`, and the
 portable entry points in `scripts/`), the board-side scripts and the vendor-side flash
 plans (`board/`), the Windows-side tooling (`host/`), and the two working documents with
-the evidence notes (`docs/`). There is no CI any more - the build happens in WSL on this
-machine, and `make check` (which runs `wsl/check-kit.sh` and the ash/dts gates) plus
-`node build/host/release.mjs` are the checks that used to live in a workflow.
+the evidence notes (`docs/`). The build happens in WSL on this machine; `make check` is the
+local gate, `.github/workflows/check.yml` runs the same set on every push/PR, and
+`.github/workflows/firmware.yml` builds on demand.
 
     git clone --branch pr-zte-zxhn-h3600 https://github.com/Zlion-Y/openwrt-sanechips-mirror openwrt
     git -C openwrt checkout db8b8d4130457dbe46558a7cea872dd2dae539e6
@@ -45,6 +45,10 @@ the finished image for the things that stop a boot - `root=` against the
 partition order the dtb really creates, built-in flash/squashfs/jffs2
 drivers, the forced command line, USB and watchdog staying disabled,
 soft-float, and the root filesystem's package list.
+
+Per-version firmware, measured status and changelog live in
+[Releases](https://github.com/Zlion-Y/zte-e2631-openwrt/releases); the per-item evidence and
+trade-offs are in [docs/known-issues.md](docs/known-issues.md) and `docs/v1.*-progress.md`.
 
 ## Board facts a builder must know
 
@@ -104,7 +108,7 @@ drives are mounted inside the distro, so nothing has to be piped over stdio.
 `wsl/INDEX.md` groups the other scripts in there (build path / patch generators /
 witnesses / probes) so the file count does not hide which ones to run.
 
-Publishing is the last local step, since there is no CI any more:
+Publishing is a manual step (the release is created from a local build):
 `node build/host/publish.mjs --tag <t> --bin out/<package>.bin --notes out/<notes>.md`
 creates the Release, uploads the package plus a `SHA256SUMS`, and prints GitHub's own
 asset digest so the upload can be compared with the local sha256. It refuses a file whose
@@ -116,65 +120,27 @@ without ever extracting into it, so it reported whatever the previous run had le
 it now extracts first. Any "what is really in the rootfs" answer that comes from a
 directory you did not just unpack is a stale answer.
 
-## Status on the real board (2026-10-24, v1.3; the v1.2 notes are kept below)
+## Choosing the WAN port (any wired port, selected by hand)
 
-Current package: Release **`v1.3`** -- the theme is "from flashable to usable", with the evidence
-chain for every item in [docs/known-issues.md](docs/known-issues.md):
+The factory calls it "WAN/LAN adaptive": cspd's NetAdapt probes the uplink and then
+reprograms the switch through an ioctl. This port does not touch the switch at all - the
+four ports are four netdevs, so "which port is the WAN" is only **which netdev the wan
+interface is bound to, and that netdev must not be in br-lan**. Reverse-engineering notes:
+[docs/wanlan-adaptive-逆向记录-2026-10-27.md](docs/wanlan-adaptive-逆向记录-2026-10-27.md).
 
-1. **Flow offloading on by default (hardware acceleration)**: the v1.2 ceiling of 305/190 Mbit/s
-   was never a missing engine -- the gmac driver has carried the PPE hardware path
-   (`zx279128s-ppe.c`, TC_SETUP_FT) all along; what was missing is the nft flowtable statement
-   package and the firewall switch.  v1.3 ships `kmod-nft-offload` plus
-   `flow_offloading=1` (and hw), and defaults RPS/XPS, IRQ affinity and PAUSE-frame
-   advertisement off (that last one traced to an upload ceiling on the sibling ZX279133 port,
-   right.com.cn thread-8486503).  Known limits: PPPoE may not take the hardware path; the PPE
-   table holds 384 entries, overflow falls back to software.
-2. **Wi-Fi autoload on by default**: sequencing and recovery from tigaotg's handoff PR#1
-   (verified on this hardware: dual-band auto-broadcast, SSID/key change survives reboot).
-   First boot provisions WPA2-PSK (key derived from the unit MAC, printed on the console),
-   never an open network.  Opt out with `/etc/e2631-wifi-noautoload`.  The association
-   hard-hang stays open (see known-issues).
-3. **47 MiB userdata partition (optional extroot, triple-gated)**: the window
-   0x3f00000..0x6e00000 is free in every vendor version checked (all four upgrade packages
-   declare identical slot tables; the stock kernel declares nothing beyond 0x2fc0000; the
-   programmer dump shows 0x3cc0000..0x72c0000 erased).  preinit only attaches the UBI; the
-   activation gate requires a real UBIFS superblock before enabling the fstab mount (boot can
-   never format the volume); the initializer needs an explicit E2631_CONFIRM.
-4. **The diagnostic heartbeat is opt-in** (`touch /etc/e2631-hb-enable` restores it); LuCI moves
-   to the official Bootstrap theme (apply.sh no longer clones a third-party repo).
+- **Factory layout by default**: `wan` is the uplink, `lan1/lan2/lan3` are in `br-lan`.
+  Nothing runs at boot - no service, no hotplug hook.
+- **Manual only**: `e2631-wanport apply <lan1|lan2|lan3|wan>`, or LuCI's network page.
+  Written to uci, survives a reboot. A target port that currently has link (usually the
+  management cable) is refused unless `--force` is given.
+- **The WAN MAC is pinned** in `e2631_ports.global.wan_mac`, so leases, DUIDs and upstream
+  MAC bindings survive a port move.
+- **Logic self-test on a PC**: `sh scripts/selftest-wanport.sh`.
 
-### The v1.2 wording, kept for its measured numbers
+**Why not automatic**: PPPoE, static and DHCP-less uplinks are undetectable, and an
+automatic switch can lock the operator out (the management port becomes WAN, whose zone
+rejects input). `apply` is the only entry point.
 
-`v1.2` -- `e2631-openwrt-v1.2.bin`, 20,972,052 B, sha256
-`02b35106a1259ed1aed04c35cb6b037c635b6fb68f3e2906da2931cb96d12ddc`.  Its kernel region is
-byte-identical to the `gen1` image in the table below (the one flashed and run on the box), so the
-boot path carried no new variable; everything that differed was in the rootfs:
-
-| release | rootfs side |
-|---|---|
-| `v1.0` | first package that flashes and boots; no `/sbin/e2631-wifi-ap`; the 600 s trial gate still auto-reverted to the stock slot |
-| `v1.1` | adds `/sbin/e2631-wifi-ap`; the first-boot auto-revert becomes opt-in (`touch /etc/e2631-trial-arm`) |
-| `v1.2` | fixes that helper: named-section parsing (the generator writes `radioN`/`default_radioN`, not `@wifi-iface[n]`), the `+N` path suffix for a second phy on one device, and a `wifi down/up` cycle instead of a bare `wifi reload`.  Confirmed on the box: `phy1-ap0 type AP ssid E2631 channel 36 (5180 MHz)`, hostapd running, **phone sees the 5G network** |
-
-Manual radio, two commands (`/sbin/e2631-wifi-on 0` then `/sbin/e2631-wifi-ap`) -- the verified
-v1.2 path, still available as the fallback.
-
-| | |
-|---|---|
-| flash through the vendor `supgrade.html` page | **works** - the page accepted the package as-is, wrote slot 1, serial went 33 -> 34 on its own, and rebooted into our OpenWrt |
-| switch back to the vendor system from OpenWrt | **works** - `e2631-fwslot switch` + `reboot`, also reachable from failsafe |
-| LuCI (Argon theme), `reboot`, the three-colour LED | **work** |
-| Ethernet | link trains at 1 Gbps, but throughput plateaus at ~305 Mbit/s in and ~190 Mbit/s out - the driver has no checksum/TSO/SG/RSS offload and one RX queue, and all of that work lands on CPU0 even though both cores are online |
-| Wi-Fi (MT7916) | **usable, not stable, off by default** - see below |
-
-The radio does not come up unless `/etc/e2631-wifi-autoload` exists or someone runs
-`/sbin/e2631-wifi-on 0`. That is a deliberate choice, not a workaround: with the driver
-loaded from `rc.d`, a failed experiment cost the ability to get back into the box.
-Everything up to "AP beaming, monitor interface, air RX" has been verified alive on this
-board. Two things have not: the **first firmware download after a power cycle** succeeds on
-roughly one attempt in three (three cold boots on this exact image: hung, worked, hung),
-and a **client associating** still hard-hangs the machine, silently, with no AER record and
-no oops. Both are documented with their sample data in `docs/02-...md` section P.
 
 ## What is deliberately not in here
 

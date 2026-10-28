@@ -9,10 +9,9 @@
 
 本仓库装着这个端口的全部内容：把基线树变成 E2631 构建的 overlay（`overlay/`）、本地构建路径
 （`wsl/`，按 `wsl/INDEX.md` 分组；可移植的入口在 `scripts/`）、板侧脚本与原厂侧刷写计划（`board/`）、
-Windows 侧工具（`host/`），以及带证据注记的两份中文工作文档（`docs/`）。**这里已经没有 CI** ——
-构建发生在本机的 WSL 里，`make check`（跑 `wsl/check-kit.sh` 与 ash/dts 门禁）加上
-`node build/host/release.mjs` 就是原来放在 workflow 里的那些检查。
-**当前状态总览：[docs/v1.3-progress.md](docs/v1.3-progress.md)**（已完成/待办，与博客同步）。
+Windows 侧工具（`host/`），以及带证据注记的中文工作文档（`docs/`）。构建在本机的 WSL 里跑，
+`make check` 是本地门禁入口；`.github/workflows/check.yml` 在每次 push/PR 上跑同一套检查，
+构建由 `.github/workflows/firmware.yml` 按需触发。
 
     git clone --branch pr-zte-zxhn-h3600 https://github.com/Zlion-Y/openwrt-sanechips-mirror openwrt
     git -C openwrt checkout db8b8d4130457dbe46558a7cea872dd2dae539e6
@@ -30,6 +29,11 @@ Windows 侧工具（`host/`），以及带证据注记的两份中文工作文�
 （sha256 `02b35106…`，也就是已发布的 v1.2）；来龙去脉与重新切一份的注意事项写在 [seed/README.md](seed/README.md)。
 
 在"让四十分钟的构建当测试"之前，有三道筛查必须先过：
+
+各版本的固件、真机状态与变更日志写在 [Releases](https://github.com/Zlion-Y/zte-e2631-openwrt/releases)
+里对应版本下；逐条的实测与取舍记在 [docs/known-issues.md](docs/known-issues.md) 与
+`docs/v1.*-progress.md`。
+
 `tools/dts_lint.mjs` 对着内核补丁和抓下来的头文件，解析板级文件里的 include、`&labels` 和 dt-binding 宏；
 槽位工具用 `-Werror` 原生编译，必须既接受一个合成包、又拒绝一个被翻掉一字节的副本；
 `tools/verify_img.mjs` 检查成品镜像里那些会让机器起不来的东西 —— `root=` 对得上 dtb 真正创建的分区顺序、
@@ -79,7 +83,7 @@ musl.libc.org 在 12 秒探测窗口内一个字节都不给）。三件事让�
 所以什么都不必靠 stdio 管道搬。`wsl/INDEX.md` 把里面其余脚本分了组（构建路径 / 补丁生成器 / 见证 / 探针），
 免得文件数量盖住"该跑哪几个"。
 
-发布是最后一个本地步骤，因为已经没有 CI 了：
+发布仍是手动一步（Release 由本地构建产物创建）：
 `node build/host/publish.mjs --tag <t> --bin out/<package>.bin --notes out/<notes>.md`
 建 Release、上传包和一份 `SHA256SUMS`，并把 GitHub 自己算出来的 asset digest 打出来，好跟本地 sha256 并排比。
 头 16 字节不是那四个原厂魔数的文件它直接拒绝，所以一个只打了一半的包不可能被误发出去。
@@ -88,95 +92,26 @@ musl.libc.org 在 12 秒探测窗口内一个字节都不给）。三件事让�
 于是它报的是上一轮留在那儿的东西 —— 现在它先解包。任何"根文件系统里到底有什么"的回答，
 只要来自一个你本次没有刚解出来的目录，那就是个过期答案。
 
-## 真机上的状态（最新构建 v1.6；v1.3–v1.5 与更早见 git 历史与各 progress 文档）
+## WAN 口选择（任意有线口当 WAN，手动指定）
 
-当前构建：**`v1.6`**（本轮离线验证，未发布到 GitHub——发布节奏由 owner 决定）。
-历史 Release：`v1.3`（"从能刷到能用"）及 v1.4/v1.5 的迭代说明见各 progress 文档与
-[docs/known-issues.md](docs/known-issues.md)：
+原厂叫「WAN/LAN 自适应」/ 盲插，它是在 cspd 的 NetAdapt 里探测上行后用 ioctl 改交换芯片端口角色。
+这里完全不碰芯片：四个口本来就是四个独立 netdev，"谁当 WAN"只等于 **wan 接口绑在哪个 netdev、
+那个 netdev 不在 br-lan 里**。逆向记录见
+[docs/wanlan-adaptive-逆向记录-2026-10-27.md](docs/wanlan-adaptive-逆向记录-2026-10-27.md)。
 
-1. **流卸载默认开启（硬件加速）**：v1.2 的 305/190 Mbit/s 封顶不是缺引擎——gmac 驱动一直带着
-   PPE 硬件流卸载（`zx279128s-ppe.c`），缺的只是 nft flowtable 语句包和防火墙开关。
-   v1.3 补齐 `kmod-nft-offload` + `flow_offloading=1`（含 hw），并默认启用 RPS/XPS、
-   IRQ 亲中和 PAUSE 帧通告关闭（后者的依据是同族 ZX279133 端口的实测，恩山 thread-8486503）。
-   已知边界：PPPoE 可能不走硬件路径；PPE 表 384 条，溢出自动回落软件路径。
-   **v1.4 附带 IPv6 修复**：zwzzrl fork 真机实测发现硬件卸载会打断 IPv6 TCP（握手 1 ms
-   成功、载荷 0 字节；根因是 PPE 激活时 IPv6 ethertype trap 被清掉、MAC 又移出 trap-DMAC
-   表，IPv6 发往路由器的帧无路可达 CPU）。v1.4 修驱动而非砍功能（`zx279128s-ppe.c`
-   overlay 副本：PPE 激活时 IPv6 trap 恒开，IPv6 走软件路径、IPv4 照走硬件路径）——
-   该修复按 fork 的实测机制推证，**未真机验证**；万一 IPv6 再挂，在 LuCI
-   `网络 → 防火墙` 关掉「硬件流量卸载」即可回到已知良好状态。详见 known-issues
-   `PPE-IPV6-TCP`。
-2. **Wi-Fi 开机自启（默认开启）**：时序与恢复机制来自 tigaotg 的交接 PR#1（真机验证过双频自动
-   广播、改 SSID/密码重启保留）。首次开机配 WPA2-PSK（密码由本机 MAC 派生并打印在 console），
-   绝不广播开放网络；上次启动未完成则跳过本次自启。不想要：`touch /etc/e2631-wifi-noautoload`。
-   客户端关联硬死机仍列为 open（见 known-issues）。
-3. **47 MiB userdata 分区（可选 extroot，三重门控）**：分区表新增 `userdata`
-   （0x3f00000..0x6e00000）。窗口安全性核对过三条独立证据（四包版本头槽表一致、原厂内核分区
-   止于 0x2fc0000、编程器全片 0x3cc0000..0x72c0000 擦空）。preinit 只挂 UBI；激活门读到
-   UBIFS 超级块魔数才开 fstab 挂载（**开机永不格式化**）；初始化器要显式
-   `E2631_CONFIRM=ERASE_USERDATA_PARTITION`。分区按名字发现，不依赖 mtd 编号。
-4. **心跳诊断默认关闭**（`touch /etc/e2631-hb-enable` 恢复）；Argon 主题保留为默认——
-   源码 vendor 进仓库（apply.sh 不再运行时克隆第三方仓库），Bootstrap 作后备。
+- **默认就是原厂布局**：`wan` 当 WAN，`lan1/lan2/lan3` 在 `br-lan`。开机不做任何动作，
+  没有开机服务、没有热插拔钩子。
+- **手动指定**：`e2631-wanport apply <lan1|lan2|lan3|wan>`，或 LuCI 的 `网络 → WAN 口`
+  点一行的「设为 WAN 口」。写进 uci，重启后保持；目标口当前有链路时会先拒绝（多半是管理网线），
+  确认要换这个口时加 `--force`。
+- **WAN MAC 固定**在 `e2631_ports.global.wan_mac`：换物理口时上游看到的 MAC 不变，租约、
+  DUID、上游的 MAC 绑定都还能续。
+- **逻辑层自检**在 PC 上跑：`sh scripts/selftest-wanport.sh`。
 
-| | |
-|---|---|
-| 通过原厂 `supgrade.html` 页面刷入 | **可用** —— 页面原样收下这个包，写入槽 1，serial 自己从 33 走到 34，然后重启进我们的 OpenWrt |
-| 从 OpenWrt 切回原厂系统 | **可用** —— `e2631-fwslot switch` + `reboot`，failsafe 里也够得着；LuCI 板卡页也有按钮 |
-| 在线更新（GitHub Release） | **可用** —— `e2631-upgrade run`（或 LuCI 备份/升级页"在线升级"标签）；ghproxy 加速可配 |
-| WAN 口调试 SSH | **可用**（v1.6）—— 挂在主路由下时上游 LAN 可直接 ssh 到 WAN 地址（防火墙放行私网段）；**首启请先设 root 密码** |
-| WAN 口选择（手动） | **可用**（v1.6，zwzzrl fork 真机验证版）—— `网络 → WAN 口`，任意有线口当 WAN，WAN MAC 固化 |
-| 2.4G/5G 速率档 | 2.4G = HE40+noscan（超原厂实测的 20MHz，2x2 上限 574M PHY）、5G = HE80；RF 校准即原厂 caldata 全量透传 |
-| LuCI（Argon 主题、全中文）、`reboot`、LED 状态灯 | **可用** —— 启动红慢闪→联网绿常亮/未联网红常亮→联网自动切换 |
-| 有线（PPE 硬件流卸载） | **≥395 Mbps 实测、CPU 7%** —— OPPO CDN 32 线程；WAN 软件计数器不动（硬件直转铁证） |
-| Wi-Fi（MT7916） | **双频自动加载、开放 AP 首启（用户自设密码）**；5G 23dBm；关联硬死机/冷启 1/3 仍 open（有 pending 自恢复） |
+**为什么不做自动识别**：PPPoE / 静态地址 / 对端不开 DHCP 的上行根本探不到；而自动切换能把
+管理侧关在门外（管理网线所在口被切成 WAN，WAN 区 `input=REJECT`，SSH/HTTP 全断）。所以
+`apply` 是唯一入口。
 
-历史包（v1.0 首个能刷能启、v1.1 加 `e2631-wifi-ap` 并改手动武装回退、v1.2 修 wifi-ap 三个真机问题）
-的注记随 release 保留；v1.3 起手动开射频的旧流程退居后备（`e2631-wifi-on 0` + `e2631-wifi-ap` 仍可用）。
-
-### v1.4：WAN 口可选（任意有线口当 WAN，手动指定；采纳 zwzzrl fork 的真机验证版）
-
-原厂叫「WAN/LAN 自适应」/ 盲插，在 cspd 的 NetAdapt 里探测上行再用 ioctl 设交换芯片
-端口角色（逆向记录见 [docs/wanlan-adaptive-逆向记录-2026-10-27.md](docs/wanlan-adaptive-逆向记录-2026-10-27.md)）。
-这里的实现完全不碰芯片：四个口本来就是四个独立 netdev，"谁当 WAN"只等于
-**wan 接口绑在哪个 netdev、那个 netdev 不在 br-lan 里**。
-
-- **默认就是原厂布局**：`wan` 口当 WAN，`lan1/lan2/lan3` 在 `br-lan`。开机不做任何
-  动作，没有开机服务、没有热插拔钩子。
-- **只允许手动指定**：`e2631-wanport apply <lan1|lan2|lan3|wan>`，或者用
-  `网络 → WAN 口` 页面点某一行的「设为 WAN 口」。改完写进 uci，重启后保持。
-- **WAN MAC 固定**在 `e2631_ports.global.wan_mac`：换物理口时上游看到的 MAC 不变，
-  租约、DUID、上游的 MAC 绑定都还能续。
-- **逻辑层自检在 PC 上跑**：`sh scripts/selftest-wanport.sh`。
-- 本轮全量清单见 [docs/v1.4-progress.md](docs/v1.4-progress.md)（含与清单结论
-  的偏差表：P2-1 fork 真机状态、P0-3 bootpara 前提不成立、P0-2 KERNEL_ 透传机制）。
-
-**为什么不自动**（zwzzrl 2026-10-27 真机结论，见逆向记录 7.6）：第一版做过「候选口各发
-一次 DHCP DISCOVER，谁应答谁当 WAN」，两处硬伤都在真机上撞到了——一是 PPPoE/静态
-地址/对端不开 DHCP 的上行根本探不到；二是自动切换能把管理侧关在门外（管理网线所在口
-被切成 WAN，WAN 区 input=REJECT，SSH/HTTP 全断，只能到现场换线）。所以自动那套代码、
-开机服务、热插拔钩子全部删除，`apply` 是唯一入口。
-
-**真机验证声明**：本节功能由 **zwzzrl fork 在真机上验证**（v4 经原厂页写 slot1、v5 在
-OpenWrt 里 `sysupgrade -n` 刷写，手动切口、网桥重排、MAC 固化与还原、LuCI 页面均验过）；
-本仓库 v1.4 构建只做了离线校验，未刷机。
-
-
-### 旧状态表（v1.2 口径，留作对照）
-
-| | |
-|---|---|
-| 通过原厂 `supgrade.html` 页面刷入 | **可用** —— 页面原样收下这个包，写入槽 1，serial 自己从 33 走到 34，然后重启进我们的 OpenWrt |
-| 从 OpenWrt 切回原厂系统 | **可用** —— `e2631-fwslot switch` + `reboot`，failsafe 里也够得着 |
-| LuCI（Argon 主题）、`reboot`、三色灯 | **可用** |
-| 有线 | 链路训练到 1 Gbps，但吞吐在 ~305 Mbit/s 进 / ~190 Mbit/s 出封顶 —— 驱动没有 checksum/TSO/SG/RSS offload、只有一个 RX 队列，而且这些活全落在 CPU0 上，尽管两个核都在线 |
-| Wi-Fi（MT7916） | **能用、不稳定、默认关闭** —— 见下 |
-
-除非存在 `/etc/e2631-wifi-autoload`，或者有人手动跑 `/sbin/e2631-wifi-on 0`，射频不会自己起来。
-这是**故意的选择，不是绕路**：只要驱动是从 `rc.d` 加载的，一次失败的实验就足以让我再也回不进这台机器。
-"AP 在广播、monitor 接口、空口 RX"之前的每一步都已在真机上确认可用。两件事还没确认：
-**冷启动后的第一次固件下载**大约三次里成一次（同一份镜像上三次冷启：挂、成、挂）；
-以及**客户端关联**仍然会把机器硬死机 —— 静默、没有 AER 记录、没有 oops。
-两条都带着样本数据写在 `docs/02-...md` 的 P 节。
 
 ## 这里刻意不放的东西
 
