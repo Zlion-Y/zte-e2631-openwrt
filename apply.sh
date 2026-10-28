@@ -263,6 +263,24 @@ fi
 # the kernel-build wiring ships as patch 033 (Kconfig + Makefile obj line);
 # what is pinned here is the symbol choice in the target config.
 ZXSP_MARK="# E2631: slot-aware partition parser (see apply.sh / P0-3)"
+# OPT-IN (default off): the FFE control plane is the vendor-scheme rebuild.
+# v1.6 shipped it by accident of branch state, and its own init aborted (the
+# proc name had a slash), so the proven ppe path did the work; switching it on
+# by default would put an unverified learn path under a test build.
+# Enable with E2631_FFE=1 when you want to test it on hardware.
+FFE_MARK="# E2631: FFE control plane (see apply.sh / ffe branch)"
+sed -i -e "\|^$FFE_MARK\$|d" -e '/^CONFIG_ZX_FFE=y\$/d' "$CFG"
+if [ "${E2631_FFE:-0}" = 1 ] && [ -f "$TREE/target/linux/sanechips/patches-6.18/034-zte-add-the-ZX279128S-FFE-control-plane.patch" ]; then
+	printf '%s\n' "$FFE_MARK" 'CONFIG_ZX_FFE=y' >> "$CFG"
+	echo "kernel config: FFE control plane ON (opt-in)"
+else
+	echo "kernel config: FFE control plane off (E2631_FFE=1 to test it)"
+fi
+
+# The slot-aware partition parser (P0-3): the driver source ships in files/,
+# the kernel-build wiring ships as patch 033 (Kconfig + Makefile obj line);
+# what is pinned here is the symbol choice in the target config.
+ZXSP_MARK="# E2631: slot-aware partition parser (see apply.sh / P0-3)"
 # The FFE control plane (ffe branch): the driver source ships in files/, the
 # kernel-build wiring ships as patch 034; the symbol choice is pinned here.
 if [ -f "$TREE/target/linux/sanechips/patches-6.18/034-zte-add-the-ZX279128S-FFE-control-plane.patch" ]; then
@@ -359,10 +377,8 @@ assert "slot-aware partition parser wired (patch 033 + config)" \
 assert "slot parser source present in files/" \
 assert "slotpart carries the partition of_node (nvmem cell -> gmac MACs)" 	grep -q 'out\[i\]\.of_node = parts\[i\]\.np;' 	"$TREE/target/linux/sanechips/files/drivers/mtd/parsers/zx279128s-slotpart.c"
 	test -f "$TREE/target/linux/sanechips/files/drivers/mtd/parsers/zx279128s-slotpart.c"
-assert "FFE control plane wired (patch 034 + config)" \
-	bash -c "test -f '$TREE/target/linux/sanechips/patches-6.18/034-zte-add-the-ZX279128S-FFE-control-plane.patch' && grep -q '^CONFIG_ZX_FFE=y\$' '$CFG'" \
-	test -f "$TREE/target/linux/sanechips/files/drivers/net/ethernet/zte/zx279128s-ffe.c"
-assert "overlay ppe.c carries the IPv6 trap fix" \
+assert "FFE control plane source + wiring patch present" \
+	bash -c "test -f '$TREE/target/linux/sanechips/patches-6.18/034-zte-add-the-ZX279128S-FFE-control-plane.patch' && test -f '$TREE/target/linux/sanechips/files/drivers/net/ethernet/zte/zx279128s-ffe.c'"assert "overlay ppe.c carries the IPv6 trap fix" \
 	grep -q 'v6 = READ_ONCE(adapter->ppe_active) || !sw' \
 	"$TREE/target/linux/sanechips/files/drivers/net/ethernet/zte/zx279128s-ppe.c"
 assert_one_line "overlay ppe.c stays a small diff (trap fix + FFE seam)" 90 25 \
