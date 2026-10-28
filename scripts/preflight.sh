@@ -105,11 +105,16 @@ grep -qs "zx-slotpart" /proc/kallsyms 2>/dev/null &&
 
 # 10: userdata formatted as UBIFS (magic 0x06101831) - or absent, which is
 # fine: the extroot gate only mounts a real superblock
-if grep -qs "userdata" /proc/mtd; then
-	idx=$(grep "userdata" /proc/mtd | sed 's/^mtd\([0-9]*\).*/\1/')
-	head -c 4 "/dev/mtd$idx" 2>/dev/null | sha256sum | grep -q "2c877f7819b017ca63cb0a53e3b12ca3" &&
+# The magic lives in the UBIFS superblock inside the UBI volume - reading the
+# raw mtd partition shows the UBI erase-counter header ("UBI#") instead, which
+# is what this check used to compare (and against a 32-char md5 string, with
+# sha256 output). Use the volume when UBI is attached.
+if [ -e /dev/ubi0_0 ] && [ "$(cat /sys/class/ubi/ubi0_0/name 2>/dev/null)" = userdata ]; then
+	head -c 4 /dev/ubi0_0 2>/dev/null | sha256sum | grep -q "4ba86c2cb7f92faec66e5192ff5e17ea75e0a564702867df37e1e8fc136df76a" &&
 		ok 10 "userdata carries the UBIFS magic" ||
-		skip 10 "userdata: first block is not a UBIFS superblock (extroot will stay off)"
+		skip 10 "userdata: volume is not UBIFS yet (extroot stays off until it is)"
+elif grep -qs "userdata" /proc/mtd; then
+	skip 10 "userdata: partition present but no UBI attached (never formatted)"
 else
 	skip 10 "userdata: no userdata partition visible"
 fi

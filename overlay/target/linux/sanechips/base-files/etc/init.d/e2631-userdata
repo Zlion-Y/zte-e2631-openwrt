@@ -15,7 +15,10 @@
 #
 # One boot of latency, in exchange for "booting can never format anything".
 START=11
-USE_PROCD=0
+# USE_PROCD is deliberately UNSET here: rc.common only tests [ -n "$USE_PROCD" ],
+# so writing the value 0 still counts as "set", switches into the procd branch
+# and replaces start() with a wrapper that does nothing (this script never opens
+# a procd instance) - the gate silently never ran. Unset = start() runs.
 
 vol_device() {
 	idx=""
@@ -31,10 +34,11 @@ vol_device() {
 }
 
 ubifs_formatted() {
-	# UBIFS superblock node magic at LEB 0 offset 0 (bytes 06 10 18 31).
+	# UBIFS superblock node magic at LEB 0 offset 0: 0x06101831, stored
+	# little-endian, so the first bytes are 31 18 10 06.
 	# md5sum, not od/hexdump: this image's busybox ships neither applet.
 	dev=$(vol_device) || return 1
-	[ "$(dd if="$dev" bs=4 count=1 2>/dev/null | md5sum | cut -c1-32)" = "2c877f7819b017ca63cb0a53e3b12ca3" ]
+	[ "$(dd if="$dev" bs=4 count=1 2>/dev/null | md5sum | cut -c1-32)" = "570471baa3a367a44fa9baef107a7216" ]
 }
 
 active() { grep -qs ' /overlay .*ubifs' /proc/mounts; }

@@ -222,6 +222,31 @@ points at something in the repository or at a measurement.
   verified: yes (seed/e2631.config inspection)
   workaround: v1.4 selects CONFIG_PACKAGE_wireless-regdb=y; the shipped etc/config/wireless sets country CN on both radios
   note: on-air acceptance (per-channel power table, DFS CAC behaviour) needs a radio and stays unchecked under the offline-only rule
+- id: USERDATA-OFFSET-CONSTANT
+  severity: blocker
+  status: fixed
+  surface: storage
+  symptom: "/sbin/e2631-userdata-init refused with 'mtd10 starts at 66060288, expected >= 0x3f00000' although the offset IS 0x3f00000 - the 47 MiB partition could never be initialised"
+  verified: "yes on the box (2026-10-28, v1.7): plan refused; 0x3f00000 = 66060288, the code compared against a hand-converted 66384896"
+  cause: "the hex-to-decimal conversion of the window start was wrong by 324608 bytes (66384896 vs 66060288) in e2631-userdata-init and lib/preinit/79_e2631_userdata"
+  workaround: both places now use $((0x3f00000)) so the constant cannot drift from the comment; after the fix the init formats 376 erase blocks into a 42.6 MiB UBI volume (37.5 MiB usable), mounts rw and passes a 20 MiB write
+  note: the volume is deliberately left DISABLED (fstab.e2631_extroot.enabled=0) - enabling it moves /overlay to the empty volume on the next boot, and nothing migrates the current config
+- id: UBIFS-MAGIC-BYTE-ORDER
+  severity: major
+  status: fixed
+  surface: storage
+  symptom: "every 'is this volume UBIFS?' test said no even for a freshly formatted volume - extroot could never activate"
+  verified: "yes on the box: the volume's first four bytes are 31 18 10 06 (0x06101831 little-endian) and mount -t ubifs succeeded, while the scripts compared the md5 of 06 10 18 31"
+  cause: "the md5 constant used for the magic (2c877f78...) is the big-endian byte sequence; the on-disk order is little-endian (md5 570471ba...). e2631-preflight additionally read the raw mtd partition (the UBI erase-counter header 'UBI#') and compared sha256 output against a 32-char md5 string"
+  workaround: "all five sites now use 570471baa3a367a44fa9baef107a7216 (preflight switched to the UBI volume and the sha256 of the little-endian magic); userdata-status reports READY:/dev/ubi0_0 (formatted UBIFS)"
+- id: USE_PROCD-ZERO-IS-NOT-OFF
+  severity: major
+  status: fixed
+  surface: boot services
+  symptom: "the extroot activation gate never ran at boot (fstab stayed enabled=0 after a formatted volume appeared), and the boot-time netune tuning was a no-op"
+  verified: "yes: /etc/init.d/e2631-userdata start returned 0 with no kmsg line and no fstab change; the script carries USE_PROCD=0"
+  cause: "rc.common tests [ -n \"$USE_PROCD\" ]; the string 0 is non-empty, so the script is treated as procd-managed and its start() is replaced by a wrapper that does nothing (no procd instance is ever opened)"
+  workaround: "the line is gone from e2631-userdata and e2631-netune (unset = the script's own start runs); after the fix the gate logs 'formatted volume found, extroot enabled' and sets enabled=1"
 - id: VERSION-NUMBERING
   severity: minor
   status: fixed

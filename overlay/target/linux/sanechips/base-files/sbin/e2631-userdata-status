@@ -30,7 +30,7 @@ for u in /sys/class/ubi/ubi[0-9]*; do
 
 		dev=/dev/${v##*/}
 		# md5sum, not od: this image's busybox ships neither od nor hexdump
-		if [ "$(dd if="$dev" bs=4 count=1 2>/dev/null | md5sum | cut -c1-32)" = "2c877f7819b017ca63cb0a53e3b12ca3" ]; then
+		if [ "$(dd if="$dev" bs=4 count=1 2>/dev/null | md5sum | cut -c1-32)" = "570471baa3a367a44fa9baef107a7216" ]; then
 			echo "READY:$dev (formatted UBIFS)"
 		else
 			echo "VOLUME:$dev (no UBIFS superblock)"

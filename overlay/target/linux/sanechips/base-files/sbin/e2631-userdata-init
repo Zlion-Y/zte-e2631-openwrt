@@ -38,7 +38,7 @@ off=$(cat "$base/offset") || die_noformat "cannot read $base/offset"
 size=$(cat "$base/size") || die_noformat "cannot read $base/size"
 
 # 2. it must be the 47 MiB window behind both image slots (>= 0x3f00000)
-[ "$off" -ge 66384896 ] || die_noformat "mtd$idx starts at $off, expected >= 0x3f00000 - refusing to touch another layout"
+[ "$off" -ge $((0x3f00000)) ] || die_noformat "mtd$idx starts at $off, expected >= 0x3f00000 - refusing to touch another layout"
 
 # 3. not mounted, and no UBI currently attached to it
 grep -qs "^/dev/mtd$idx " /proc/mounts && die_noformat "mtd$idx is mounted"
@@ -94,7 +94,7 @@ fi
 umount /tmp/e2631-udfmt
 rmdir /tmp/e2631-udfmt
 
-if [ "$(dd if=/dev/ubi0_0 bs=4 count=1 2>/dev/null | md5sum | cut -c1-32)" != "2c877f7819b017ca63cb0a53e3b12ca3" ]; then
+if [ "$(dd if=/dev/ubi0_0 bs=4 count=1 2>/dev/null | md5sum | cut -c1-32)" != "570471baa3a367a44fa9baef107a7216" ]; then
 	die_noformat "volume formatted but the UBIFS superblock is not readable back"
 fi
 

@@ -21,7 +21,10 @@
 #  GRO on - the driver already feeds napi_gro_receive(); this only makes the
 #    intent explicit and survives any future default change.
 START=20
-USE_PROCD=0
+# USE_PROCD is deliberately UNSET here: rc.common only tests [ -n "$USE_PROCD" ],
+# so writing the value 0 still counts as "set", switches into the procd branch
+# and replaces start() with a wrapper that does nothing (this script never opens
+# a procd instance) - the gate silently never ran. Unset = start() runs.
 
 PORTS="lan1 lan2 lan3 wan"
 

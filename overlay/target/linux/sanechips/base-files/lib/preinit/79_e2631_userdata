@@ -34,7 +34,7 @@ e2631_userdata_preinit() {
 	# not sanction, and the safest answer is to not touch it
 	[ "$off" -ge 0 ] || return 0
 	[ "$((off + size))" -le "$total" ] || return 0
-	[ "$off" -ge 66384896 ] || return 0   # 0x3f00000: end of slot B
+	[ "$off" -ge $((0x3f00000)) ] || return 0   # 0x3f00000: end of slot B
 
 	if ! grep -qs "^$idx\$" /sys/class/ubi/ubi[0-9]*/mtd_num 2>/dev/null; then
 		ubiattach -d 0 /dev/ubi_ctrl -m "$idx" >/dev/null 2>&1 || return 0
