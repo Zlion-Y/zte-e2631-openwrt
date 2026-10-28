@@ -38,6 +38,32 @@ API=https://api.github.com/repos/$REPOSITORY/releases/latest
 DLDIR=/tmp/e2631-upgrade
 
 log() { echo "e2631-upgrade: $*"; }
+
+# ---- version ordering ----------------------------------------------------
+# The release tag is "v1.3" while /etc/e2631-version is "OpenWrt v1.7": a
+# plain string compare reported every release as an update for every build
+# (both formats never match), so the check offered a downgrade. Normalise to
+# the dotted number, then compare component-wise as numbers.
+ver_num() {	# ver_num <string> -> "1.7" / "1.10.2"
+	printf '%s' "$1" | sed -n 's/.*[vV]\([0-9][0-9.]*\).*/\1/p'
+	[ -n "$(printf '%s' "$1" | sed -n 's/.*[vV]\([0-9][0-9.]*\).*/\1/p')" ] ||
+		printf '%s' "$1" | sed -n 's/^[^0-9]*\([0-9][0-9.]*\).*/\1/p'
+}
+
+version_newer() {	# version_newer <candidate> <current>; true when strictly newer
+	awk -v a="$(ver_num "$1")" -v b="$(ver_num "$2")" 'BEGIN {
+		if (a == "" || b == "") exit 1
+		na = split(a, x, "."); nb = split(b, y, ".")
+		n = (na > nb ? na : nb)
+		for (i = 1; i <= n; i++) {
+			ai = (i <= na ? x[i] + 0 : 0)
+			bi = (i <= nb ? y[i] + 0 : 0)
+			if (ai > bi) exit 0
+			if (ai < bi) exit 1
+		}
+		exit 1
+	}'
+}
 die() { echo "e2631-upgrade: $*" >&2; exit 1; }
 
 # fwslot installs to /usr/sbin on this layout; resolve once, fall back hard
@@ -102,13 +128,21 @@ do_check() {
 	set -- $rel
 	cur=$(cat /etc/e2631-version 2>/dev/null || echo unknown)
 	log "running: $cur   newest release: $1"
-	[ "$1" = "$cur" ] && log "up to date" || log "update available: $1 ($2)"
+	if version_newer "$1" "$cur"; then
+		log "update available: $1 ($2)"
+	else
+		log "up to date (running $cur is not older than $1)"
+	fi
 }
 
 do_download() {
 	rel=$(latest) || die "cannot reach $API (set e2631.upd.mirror for an accelerator)"
 	set -- $rel
 	tag=$1; url=$2; bin=$DLDIR/$(basename "$url")
+cur=$(cat /etc/e2631-version 2>/dev/null || echo unknown)
+if ! version_newer "$tag" "$cur" && [ "${E2631_UPGRADE_FORCE:-0}" != 1 ]; then
+	die "$tag is not newer than the running $cur; set E2631_UPGRADE_FORCE=1 to flash it anyway"
+fi
 	log "downloading $(deref "$url")"
 	fetch "$url" "$bin" || die "download failed"
 	fetch "${url%/*}/SHA256SUMS" "$DLDIR/SHA256SUMS" || die "cannot download SHA256SUMS; refusing update"

@@ -222,6 +222,15 @@ points at something in the repository or at a measurement.
   verified: yes (seed/e2631.config inspection)
   workaround: v1.4 selects CONFIG_PACKAGE_wireless-regdb=y; the shipped etc/config/wireless sets country CN on both radios
   note: on-air acceptance (per-channel power table, DFS CAC behaviour) needs a radio and stays unchecked under the offline-only rule
+- id: UPGRADE-VERSION-COMPARE
+  severity: major
+  status: fixed
+  surface: online update
+  symptom: "e2631-upgrade check reported 'update available: v1.3' on a v1.7 build - the online updater offered a downgrade to the last GitHub release"
+  verified: "yes on the box (2026-10-29, v1.7): running 'OpenWrt v1.7', newest release 'v1.3', result 'update available'"
+  cause: "do_check compared the release tag with /etc/e2631-version by string equality; the two formats ('v1.3' vs 'OpenWrt v1.7') never match, so every release looked like an update. There was no ordering at all"
+  workaround: "version numbers are normalised (strip the label, keep the dotted digits) and compared component-wise as numbers (1.10 > 1.9); do_download additionally refuses a release that is not newer unless E2631_UPGRADE_FORCE=1, so the automatic path can no longer downgrade. Deployed live on the running box as well as in the source"
+  note: 7 unit cases pass (v1.3<v1.7, v1.8>v1.7, equal, 1.10>1.9, 1.9<1.10, 1.7.1>1.7, 2.0>1.99.9)
 - id: WIFI-PROVISION-HT20
   severity: major
   status: fixed
