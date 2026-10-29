@@ -452,6 +452,14 @@ int zx_ppe_flow_add(struct zx_eth_adapter *adapter,
 	if (!is_valid_ether_addr(eth.h_source) || !is_valid_ether_addr(eth.h_dest))
 		return (atomic_inc(&zx_ppe_skip[13]), -EOPNOTSUPP);
 
+	{
+		static atomic_t dbg_n = ATOMIC_INIT(0);
+
+		if (atomic_inc_return(&dbg_n) <= 12)
+			pr_info("ppe-add dev=%s egress=%d dst=%pM src=%pM sip=%d dip=%d sport=%d dport=%d\n",
+				odev->name, port, eth.h_dest, eth.h_source,
+				rw.sip, rw.dip, rw.sport, rw.dport);
+	}
 	rw.sip = new_saddr != t.saddr;
 	rw.dip = new_daddr != t.daddr;
 	rw.sport = rw.new_sport != t.sport;

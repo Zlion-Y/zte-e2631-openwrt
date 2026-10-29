@@ -318,6 +318,15 @@ static int zx_idm_rx_ring(struct zx_idm *idm, int budget)
 				skb_put_data(skb,
 					     zx_idm_buf_ptr(idm, pos) + ZX_IDM_BUF_HEAD,
 					     len);
+				{
+					static atomic_t dbg_n = ATOMIC_INIT(0);
+
+					if (atomic_inc_return(&dbg_n) <= 12)
+						pr_info("idm-deliver len=%u chan=%u da=%pM sa=%pM proto=%04x vdev=%s\n",
+							len, chan, eth_hdr(skb)->h_dest,
+							eth_hdr(skb)->h_source,
+							ntohs(eth_hdr(skb)->h_proto), w->dev->name);
+				}
 				skb->dev = w->dev;
 				skb->pkt_type = PACKET_HOST;
 				idm->rx_ch[chan & 7]++;
