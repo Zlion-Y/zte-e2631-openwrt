@@ -19,7 +19,7 @@
 | [11-npu-0.6 构建记录](11-build-npu-0.6-2026-10-29.md) | vendor MT7916 固件/DBDC 进镜像、rootfs 几何 |
 | [12-npu-0.7 构建记录](12-build-npu-0.7-2026-10-29.md) | CLA 寄存器表/多项式/45B key/520 槽规格；poly、slots、entry 自检 |
 | [13-npu-0.8 构建记录](13-build-npu-0.8-2026-10-29.md) | MT7916 G3.2：CR 探针、WFDMA 22 写计划、patch 命令/固件头 |
-| [14-G3.3 Andes MCU 计划](14-G3.3-andes-mcu-plan-2026-10-29.md) | 命令消息 24B 头布局、三条 patch 命令、还缺的 WFDMA 环寄存器 |
+| [14-G3.3 Andes MCU 计划](14-G3.3-andes-mcu-plan-2026-10-29.md) | 命令消息 24B 头、三条 patch 命令；§6 解码：MCU TX=AndesSendCmdMsg 队列+tasklet、fw 子表五槽、环寄存器 4 连寄存器布局 |
 | [15-npu-0.9 构建记录](15-build-npu-0.9-2026-10-29.md) | Andes 三条 patch 命令的字节级编码器（`ctl` 写 `mcu`） |
 | [register-diff CSV](../../re/npu/register-diff-e2631-vs-zx279133.csv) | 机器可读差异表（block/item/e2631/reference/status/action/evidence） |
 
