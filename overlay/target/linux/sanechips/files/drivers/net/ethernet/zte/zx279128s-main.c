@@ -1405,8 +1405,13 @@ static int zx_eth_probe(struct platform_device *pdev)
 	zx_update_mac_tables(adapter);
 	mutex_unlock(&adapter->ppe_lock);
 
-	/* One NAPI context serves all ports */
+	/* One NAPI context serves all ports.  The weight has to carry the
+	 * wireless downlink too (the IDM ring drains inside this poll), and
+	 * 64 frames per round let a 160 MHz burst overrun the 2048-entry
+	 * ring: the radio stalled the moment a speed test started.
+	 */
 	netif_napi_add(adapter->ports[i], &adapter->napi, zx_eth_poll);
+	adapter->napi.weight = 256;
 	hrtimer_setup(&adapter->tx_timer, zx_eth_tx_timer,
 		      CLOCK_MONOTONIC, HRTIMER_MODE_REL);
 

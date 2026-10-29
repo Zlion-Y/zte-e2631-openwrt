@@ -372,7 +372,6 @@ static int zx_idm_rx_ring(struct zx_idm *idm, int budget)
 int zx_idm_poll(struct zx_eth_adapter *adapter, int budget)
 {
 	struct zx_idm *idm = &zx_idm;
-	u32 done;
 	int work;
 
 	if (!idm->ready || adapter != idm->adapter)
@@ -380,8 +379,14 @@ int zx_idm_poll(struct zx_eth_adapter *adapter, int budget)
 
 	spin_lock_bh(&idm->lock);
 	zx_idm_tx_reclaim(idm);
-	done = readl(idm->base + ZX_IDM_RXDONE) & 0xffff;
-	work = done ? zx_idm_rx_ring(idm, min_t(u32, budget, done)) : 0;
+	/* Walk on the descriptor's own w1, not the IDM+0x4c completion count:
+	 * that register is read-clear, so gating the walk on it threw away
+	 * every completion the budget could not consume and the ring position
+	 * then trailed the hardware for ever - a downlink burst (speed test)
+	 * desynchronised the ring and the radio went dead.  The engine fills
+	 * descriptors in submission order, which is exactly our walk order.
+	 */
+	work = zx_idm_rx_ring(idm, budget);
 	spin_unlock_bh(&idm->lock);
 	return work;
 }
