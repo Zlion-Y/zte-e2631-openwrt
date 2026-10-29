@@ -304,6 +304,15 @@ rm -f "$TREE/tmp/.packageinfo" "$TREE/tmp/.packagedeps" "$TREE/tmp/.buildinfo"
 rm -rf "$TREE"/build_dir/target-arm_cortex-a9_musl_eabi/linux-sanechips_generic/mt76-* \
 	"$TREE"/build_dir/target-arm_cortex-a9_musl_eabi/linux-sanechips_generic/mac80211-* \
 	"$TREE"/staging_dir/target-arm_cortex-a9_musl_eabi/usr/include/mac80211-backport
+# apply.sh is additive: overlay files removed from this repo stay in the tree
+# from earlier applies. Delete the wifi bring-up set explicitly (native has no
+# wireless driver until P4, so nothing emits their firmware events).
+rm -f "$TREE"/target/linux/sanechips/base-files/etc/hotplug.d/firmware/11-mt76-caldata \
+	"$TREE"/target/linux/sanechips/base-files/etc/init.d/e2631-wifi-eeprom \
+	"$TREE"/target/linux/sanechips/base-files/etc/init.d/e2631-wifi-load \
+	"$TREE"/target/linux/sanechips/base-files/sbin/e2631-wifi-boot \
+	"$TREE"/target/linux/sanechips/base-files/sbin/e2631-wifi-on \
+	"$TREE"/target/linux/sanechips/base-files/sbin/e2631-wifi-ap
 # Stale kmod-nft-offload apks from the pre-native kernel pin the old kernel hash
 # and make apk world-solve fail ("breaks:"); force a rebuild against the current
 # kernel by removing the built artifacts and the published apks. The root-sanechips

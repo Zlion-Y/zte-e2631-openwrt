@@ -31,6 +31,14 @@
 这是切换期的定义性行为，不是缺陷；网络能力随 P2（有线驱动族）与 P4（MT7916
 固件启动门禁）逐模块回归。
 
+rootfs 残留审计（0.1，逐文件核验）：**开源驱动包零残留**（manifest 与 apk
+数据库双向核验，kmod-mt76*/mac80211/cfg80211/mt7915e/mt7915-firmware/
+mt7916-firmware/wpad*/hostapd-common 全部不选中）。仍存在的 5 个 wifi 名义
+文件均无可执行行为：4 个是 OpenWrt **base-files 自带**的 netifd 辅助脚本
+（无驱动注册时 netifd 不会调用），1 个是 apply.sh 只增不删遗留的本仓热插拔
+脚本 11-mt76-caldata（固件事件永不触发；已在 apply.sh 加树内删除，0.2 起
+消失）。
+
 ## 构建
 
 ```sh
