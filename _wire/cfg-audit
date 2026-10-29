@@ -1,0 +1,10 @@
+config ZX_NPU_AUDIT
+	bool "ZTE ZX279128S npu read-only register audit"
+	depends on OF
+	help
+	  Maps the NPP/IDM/TM/PP accelerator windows and exposes a proc file
+	  that reads a small documented set of registers only when userspace
+	  writes "run". It never writes a register.
+
+	  If unsure, say Y on this board.
+

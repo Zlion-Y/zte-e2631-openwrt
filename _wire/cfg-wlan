@@ -1,0 +1,10 @@
+config ZX_CSP_WLAN
+	bool "ZTE ZX279128S vendor-native MT7916 G3 skeleton"
+	depends on PCI && OF
+	help
+	  Vendor-native MT7916 host-driver skeleton. Binds only the 14c3:790a
+	  ext-HIF function, reads BAR0 and the vendor firmware headers, and
+	  performs no write until zxnpu_wlan.enable=1 and commit=1.
+
+	  If unsure, say Y on this board.
+

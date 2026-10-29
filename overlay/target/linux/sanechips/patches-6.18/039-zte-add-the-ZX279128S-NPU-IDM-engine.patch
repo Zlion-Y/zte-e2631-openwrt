@@ -1,26 +1,26 @@
---- a/drivers/net/ethernet/zte/Kconfig
-+++ b/drivers/net/ethernet/zte/Kconfig
-@@ -59,4 +59,16 @@
+diff -ruN a/drivers/net/ethernet/zte/Kconfig b/drivers/net/ethernet/zte/Kconfig
+--- a/drivers/net/ethernet/zte/Kconfig	2026-10-30 01:45:37.045160800 +0800
++++ b/drivers/net/ethernet/zte/Kconfig	2026-10-30 01:45:37.085611600 +0800
+@@ -32,4 +32,14 @@
  
  	  If unsure, say Y on this board.
  
-+
 +config ZX_NPU_IDM
 +	bool "ZTE ZX279128S vendor-native IDM fabric engine"
-+	depends on ZX279128S_ETH
++	depends on OF
 +	help
 +	  Builds the zxnpu0 netdev and the IDM RX/TX ring engine. The
 +	  hardware is untouched until zxnpu_idm.enable=1 and the netdev is
-+	  opened; the default firmware therefore keeps the existing data
-+	  path. This is the fabric layer for the vendor-native A/W stack.
++	  opened; the default firmware therefore keeps every write out.
 +
 +	  If unsure, say Y on this board.
 +
  endif # NET_VENDOR_ZTE
---- a/drivers/net/ethernet/zte/Makefile
-+++ b/drivers/net/ethernet/zte/Makefile
-@@ -4,3 +4,4 @@
- zx279128s-eth-$(CONFIG_ZX_FFE) += zx279128s-ffe.o
- zx279128s-eth-$(CONFIG_ZX_NPU) += zx279128s-npu.o
- zx279128s-eth-$(CONFIG_ZX_NPU_AUDIT) += zx279128s-npu-audit.o
-+zx279128s-eth-$(CONFIG_ZX_NPU_IDM) += zx279128s-npu-idm.o
+diff -ruN a/drivers/net/ethernet/zte/Makefile b/drivers/net/ethernet/zte/Makefile
+--- a/drivers/net/ethernet/zte/Makefile	2026-10-30 01:45:37.044159900 +0800
++++ b/drivers/net/ethernet/zte/Makefile	2026-10-30 01:45:37.087119000 +0800
+@@ -1,3 +1,4 @@
+ # SPDX-License-Identifier: GPL-2.0-only
+ obj-$(CONFIG_ZX_NPU) += zx279128s-npu.o
+ obj-$(CONFIG_ZX_NPU_AUDIT) += zx279128s-npu-audit.o
++obj-$(CONFIG_ZX_NPU_IDM) += zx279128s-npu-idm.o

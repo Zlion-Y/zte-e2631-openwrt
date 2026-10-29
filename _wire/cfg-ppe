@@ -1,0 +1,10 @@
+config ZX_NPU_PPE
+	bool "ZTE ZX279128S vendor-native PPE/CLA access"
+	depends on OF
+	help
+	  Low-level CLA/SBRG indirect table access for the vendor-native
+	  wired data plane. The proc interface is inert until
+	  zxnpu_ppe.enable=1.
+
+	  If unsure, say Y on this board.
+

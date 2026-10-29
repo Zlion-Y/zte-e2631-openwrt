@@ -1,25 +1,26 @@
---- a/drivers/net/ethernet/zte/Kconfig
-+++ b/drivers/net/ethernet/zte/Kconfig
-@@ -82,4 +82,15 @@
+diff -ruN a/drivers/net/ethernet/zte/Kconfig b/drivers/net/ethernet/zte/Kconfig
+--- a/drivers/net/ethernet/zte/Kconfig	2026-10-30 01:45:37.904682400 +0800
++++ b/drivers/net/ethernet/zte/Kconfig	2026-10-30 01:45:37.943865700 +0800
+@@ -52,4 +52,14 @@
  
  	  If unsure, say Y on this board.
  
-+
 +config ZX_CSP_WLAN
 +	bool "ZTE ZX279128S vendor-native MT7916 G3 skeleton"
-+	depends on ZX279128S_ETH && PCI
++	depends on PCI && OF
 +	help
-+	  Probe/maps the companion PCIe function 14c3:790a and audits the
-+	  vendor MT7916 firmware files. It does not write any MT7916 register
-+	  and refuses the device until zxnpu_wlan.enable=1.
++	  Vendor-native MT7916 host-driver skeleton. Binds only the 14c3:790a
++	  ext-HIF function, reads BAR0 and the vendor firmware headers, and
++	  performs no write until zxnpu_wlan.enable=1 and commit=1.
 +
 +	  If unsure, say Y on this board.
 +
  endif # NET_VENDOR_ZTE
---- a/drivers/net/ethernet/zte/Makefile
-+++ b/drivers/net/ethernet/zte/Makefile
-@@ -6,3 +6,4 @@
- zx279128s-eth-$(CONFIG_ZX_NPU_AUDIT) += zx279128s-npu-audit.o
- zx279128s-eth-$(CONFIG_ZX_NPU_IDM) += zx279128s-npu-idm.o
- zx279128s-eth-$(CONFIG_ZX_NPU_PPE) += zx279128s-npu-ppe.o
-+zx279128s-eth-$(CONFIG_ZX_CSP_WLAN) += zxnpu-wlan.o
+diff -ruN a/drivers/net/ethernet/zte/Makefile b/drivers/net/ethernet/zte/Makefile
+--- a/drivers/net/ethernet/zte/Makefile	2026-10-30 01:45:37.903682400 +0800
++++ b/drivers/net/ethernet/zte/Makefile	2026-10-30 01:45:37.942865700 +0800
+@@ -3,3 +3,4 @@
+ obj-$(CONFIG_ZX_NPU_AUDIT) += zx279128s-npu-audit.o
+ obj-$(CONFIG_ZX_NPU_IDM) += zx279128s-npu-idm.o
+ obj-$(CONFIG_ZX_NPU_PPE) += zx279128s-npu-ppe.o
++obj-$(CONFIG_ZX_CSP_WLAN) += zxnpu-wlan.o
