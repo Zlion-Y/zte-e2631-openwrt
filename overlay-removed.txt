@@ -10,3 +10,14 @@ target/linux/sanechips/files/arch/arm/mach-zte/zx279128s-slotfix.c
 target/linux/sanechips/patches-6.18/032-ARM-zte-Add-the-ZX279128S-slot-fixup-to-the-mach-objects.patch
 # P1-6 rename: 63_e2631_wan_ssh -> 63_e2631_wan_access (now also opens 80/443)
 target/linux/sanechips/base-files/etc/uci-defaults/63_e2631_wan_ssh
+# npu branch starts from the v1.8.0 data path. These files were added by the
+# ffe-full experiment and must not leak into an npu build: IDM/mac80211 flow
+# injection, its netfilter patch, and the ffe-full-only first-boot defaults.
+target/linux/sanechips/files/drivers/net/ethernet/zte/zx279128s-idm.c
+target/linux/sanechips/patches-6.18/035-net-ethernet-zte-build-the-IDM-engine-into-the-eth-driver.patch
+target/linux/sanechips/patches-6.18/036-net-netfilter-route-wireless-flows-of-hw-offloaded-connections-through-the-fabric.patch
+package/kernel/mac80211/patches/subsys/991-wifi-mac80211-hand-wireless-flowtable-blocks-to-the-ZX279128S-packet-processor.patch
+target/linux/sanechips/base-files/etc/hotplug.d/net/21-e2631-wifi-ft
+target/linux/sanechips/base-files/etc/uci-defaults/64_e2631_ffefull_cleanup
+target/linux/sanechips/base-files/etc/uci-defaults/65_e2631_ipv6_relay
+target/linux/sanechips/base-files/etc/uci-defaults/66_e2631_hw_offload_default_off

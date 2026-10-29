@@ -1,0 +1,37 @@
+block,item,e2631,reference,status,action,evidence
+npp,base,0x921C0000,0x19000000,different,parameterize base,"E2631 hardware view; zx279133.dtsi:538"
+idm,base,0x921C8000 (NPP+0x8000),0x19280000 (NPPT+0x280000),different,rederive,re-notes-tm.md:103; zx279133.h:367
+idm,rx_tx_base,+0x08 RX base (2048x8B); +0x04 TX base (1024x8B at +0x4000),+0x08 RX base; +0x04 TX base,same-base,different doorbell model; TX unproven,use +0x08 RX/+0x04 TX,plat-idm-annot 0x66d8/0x66f0; ffe-full RX 6018 frames
+idm,tx_ring,1024x8B software ring; +0x40 kick/ack; +0x44 done low16,4 queues x1024; doorbells 0x80/0x84 and 4*(n+39/42),resolved-e2631,use +0x40/+0x44,plat-idm-annot 0x63b8/0x545c; zx279133.h:369-449
+idm,rx_submit,+0x48 write 0x10000,+0x88 RX_RELEASE,resolved-e2631,use +0x48,plat-idm-annot 0x67b0; zx279133.h:381
+idm,bp_refill,in-memory free ring + +0x48,+0x100 BP_REFILL,resolved-e2631,use +0x48 + free ring,plat-idm-annot; zx279133.h:382
+idm,rx_done,+0x4C low16,reference uses +0x88 release path,resolved-e2631,use +0x4C,plat-idm-annot 0x5cf4; zx279133-idm.c:883
+idm,open_stop,+0x24 bit2 RMW,INT_CPU +0x44; mask +0x40,different,use E2631 +0x24 bit2,plat-idm-extra 0x5748/0x56a4
+idm,queues,2 netdev idm0/idm1; runtime channels 0/2,24 RX / 16 CPU RX / 4 TX,different,rederive,idm_map runtime; zx279133.h:391-392
+idm,buffers,vendor idm_skb_stack + skb table,page_pool 2048x0x940 + BP ring 4096,different,redesign,re-notes-tm.md:137; zx279133.h:393-400
+bmu,base,0x92348000 (TM+0x8000),NPPT+0x3c000,different,rederive,re-notes-tm.md:146; zx279133.h:92
+bmu,memory,+0x04/+0x08=0x0104C040 free stacks; +0x58/+0x5C pool sizes; +0xE8/+0xEC/+0xF4/+0xF8/+0xFC pool bases/counts; sizes runtime unknown,BMU 0xecc000; normal 0x1800; jumbo 0x20,different,read-only probe,plat-idm-annot 0x887e0; zx279133.h:42-50
+bmu,alloc,+0x14 trigger; poll bit0-3; +0x0C result,BMU_ENABLE 0x3c000,different,rederive,re-notes-tm.md:151; zx279133.h:92
+qmg,base,0x9234C000 (TM+0xC000),NPPT+0x24000,different,rederive,re-notes-tm.md:165; zx279133.h:111
+sch,base,0x92354000 (TM+0x14000),NPPT+0x2c000 (SSCH),different,rederive,re-notes-tm.md:165; zx279133.h:180
+red,base,0x92344000 (TM+0x4000),NPPT+0x20004,different,rederive,re-notes-tm.md:154; zx279133.h:133
+pp,base,0x92380000,0x18000000 (pps),different,parameterize base,"E2631 hardware view; zx279133.dtsi:541"
+cla,indirect,0x9238C014 cmd/0x9238C018 done/0x9238C01C data,PPS+0x500c8/0x50208/...,different,rederive,tm-pp-annot; zx279133.h:310-312
+cla,config,0x9238C080 (rid3 via tmOnuRegWrite); 14 input bits map bit19..bit0,no same address in ref header,different,rederive,tm.dis 0x838-0x888; tm_regtables CLA rid3
+pp,indirect_cmd_format,cmd=index|(table<<22)|(rw<<27); SBRG adds bit31,reference uses different SE/CLA/PM command registers,resolved-e2631,use E2631 format + decode table semantics,tm-pp-io-annot; zx279133.h:310
+cla,hash_rule,tm_acl_get_fastHashRule 0x48c68; 45B key CRC16,offload.c ZCAM/DDR/IKEY,same-family,port algorithm + rederive tables,tm.dis.txt; zx279133-offload.c:1000
+sbrg,indirect,0x92388014 cmd/0x92388018 done/0x9238801C data,PP+0x8000 family (DSA),same-family,verify table select,tm-pp-annot; tm_regtables SBRG rid15-22
+pm,indirect,0x9239C014 cmd/0x9239C018 done/0x9239C01C data; data window 0x9239C100,no aligned constants in ref header,different,rederive,tm-pp-annot; tm_regtables PM rid0-3
+spa,indirect,0x921D4014 cmd/0x921D4018 status/0x921D401C data,NPPT+0x8054/0x8058/0x805C,different,rederive,tm_regtables SPA rid4-6; zx279133.h:338
+spa,hashram,via spa_set_indirect_rw_cmd/data,reference SE/CLA side,different,rederive,tm-pp-annot spa_set_hashram
+spa,matchram,via spa_set_indirect_rw_cmd/data,reference SE/CLA side,different,rederive,tm-pp-annot spa_set_matchram
+sipc,base,0x921CC000 (NPP+0xC000),NPPT+0x4000 (SIPC_CFG),different,rederive,re-notes-tm-regtables.txt:259; zx279133.h:73
+greg,wifi_queue1,0x921C0090/0x94 (rid70/71),GREG at NPPT+0x68/0x6c; queue1 protocol not listed,unknown,annotate greg init,re-notes-tm-regtables.txt:328; zx279133.h:62
+smac,base,0x92200000 + n*0x10000,XMAC0 0x140000 / XMAC1 0x180000 (NPPT),different,rederive,re-notes-tm-regtables.txt:263; zx279133.h:452
+irq,idm,IRQ 38 -> GIC 70 -> virq 28,5 IRQs nppt/rx/idm/buffer-release/local-test,partially-same,confirm local-test/buffer-release,/proc/interrupts; zx279133.dtsi:543
+irq,npp,IRQ 35/38,5 IRQs,partially-same,confirm mapping,/proc/interrupts; zx279133.dtsi:543
+memory,accelerator_reserved,none in /proc/iomem; System RAM 40000000-4fffffff,DT reserved BMU/SE-hash/IDM,major-different,carve at runtime,vendor-ro-2.out.txt; zx279133-sr1010.dts:29
+memory,dma,32-bit; no reserved regions; bus alias phys+0x40000000,32-bit; DT reserved BMU/SE/IDM,different,carve memory + handle bus alias,re-notes-tm.md:135; zx279133-main.c:395
+ppu,mcode,not found locally,mcode_intel.bin 103456B CRC32 0xef1d7647,unknown,pull vendor rootfs or confirm,find; zx279133-np.c:2002
+wanid,table,(16386+wanid)<<7; 32 entries; up 0-15/down 16-31,32 entries; same direction semantics,likely-same,verify slot/packing,re-notes-tm.md; zx279133-np.c:598
+wifi,pseudo_port,CLA w0[23:12] 0x18-0x1F; 0x11/0x12 apcli,no WiFi in reference,n/a,E2631-specific,re-notes-portmap.md

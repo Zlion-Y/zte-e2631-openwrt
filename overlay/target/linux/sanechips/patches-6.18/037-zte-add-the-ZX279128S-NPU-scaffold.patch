@@ -1,0 +1,25 @@
+--- a/drivers/net/ethernet/zte/Kconfig
++++ b/drivers/net/ethernet/zte/Kconfig
+@@ -36,4 +36,15 @@
+ 	  branch's re/ffe/ for the RE basis.
+ 
+ 	  If unsure, say Y on this board.
++
++config ZX_NPU
++	bool "ZTE ZX279128S npu scaffold"
++	depends on ZX279128S_ETH
++	help
++	  Builds the npu-branch scaffold. It exposes /proc/zx-npu/status and
++	  performs no MMIO access; the vendor-native wired and MT7916 data
++	  paths are added incrementally on this branch.
++
++	  If unsure, say Y on this board.
++
+ endif # NET_VENDOR_ZTE
+--- a/drivers/net/ethernet/zte/Makefile
++++ b/drivers/net/ethernet/zte/Makefile
+@@ -2,3 +2,4 @@
+ obj-$(CONFIG_ZX279128S_ETH) += zx279128s-eth.o
+ zx279128s-eth-y := zx279128s-main.o zx279128s-ppe.o zx279128s-switch.o
+ zx279128s-eth-$(CONFIG_ZX_FFE) += zx279128s-ffe.o
++zx279128s-eth-$(CONFIG_ZX_NPU) += zx279128s-npu.o

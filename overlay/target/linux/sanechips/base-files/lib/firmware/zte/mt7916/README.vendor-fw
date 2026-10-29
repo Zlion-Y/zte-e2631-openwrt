@@ -1,0 +1,17 @@
+Vendor MT7916 firmware/config for the npu branch.
+
+These files are not stored in this repository. apply.sh copies them from
+E2631_VENDOR_FW_DIR (default: $E2631_WORK/out/stock-fw) into this directory
+at build time:
+
+  WIFI_RAM_CODE_MT7916.bin
+  7916_WACPU_RAM_CODE_release.bin
+  mt7916_patch_e1_hdr.bin
+  MT7916_EEPROM.bin
+  l1profile.dat.dbdc
+  mt7916.dbdc.b0.dat
+  mt7916.dbdc.b1.dat
+
+They are the vendor blobs already pulled from the live router for the
+vendor-native CSP_WLAN work. Keep the source directory out of git; the build
+warns and continues with a missing-firmware image when it is absent.

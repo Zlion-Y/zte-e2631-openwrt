@@ -1,0 +1,26 @@
+--- a/drivers/net/ethernet/zte/Kconfig
++++ b/drivers/net/ethernet/zte/Kconfig
+@@ -59,4 +59,16 @@
+ 
+ 	  If unsure, say Y on this board.
+ 
++
++config ZX_NPU_IDM
++	bool "ZTE ZX279128S vendor-native IDM fabric engine"
++	depends on ZX279128S_ETH
++	help
++	  Builds the zxnpu0 netdev and the IDM RX/TX ring engine. The
++	  hardware is untouched until zxnpu_idm.enable=1 and the netdev is
++	  opened; the default firmware therefore keeps the existing data
++	  path. This is the fabric layer for the vendor-native A/W stack.
++
++	  If unsure, say Y on this board.
++
+ endif # NET_VENDOR_ZTE
+--- a/drivers/net/ethernet/zte/Makefile
++++ b/drivers/net/ethernet/zte/Makefile
+@@ -4,3 +4,4 @@
+ zx279128s-eth-$(CONFIG_ZX_FFE) += zx279128s-ffe.o
+ zx279128s-eth-$(CONFIG_ZX_NPU) += zx279128s-npu.o
+ zx279128s-eth-$(CONFIG_ZX_NPU_AUDIT) += zx279128s-npu-audit.o
++zx279128s-eth-$(CONFIG_ZX_NPU_IDM) += zx279128s-npu-idm.o

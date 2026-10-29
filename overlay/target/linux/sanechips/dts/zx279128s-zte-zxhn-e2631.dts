@@ -117,6 +117,35 @@
 			linux,code = <KEY_WPS_BUTTON>;
 		};
 	};
+
+	/*
+	 * npu-branch scaffold. No reg, no clocks, no interrupts: the driver
+	 * only exposes /proc/zx-npu/status until the vendor-native data path is
+	 * brought up. Keeping it resource-free means it cannot conflict with
+	 * the existing gmac/PPE driver on the same image.
+	 */
+	npu_scaffold: npu-scaffold {
+		compatible = "zte,zx279128s-npu-scaffold";
+		status = "okay";
+	};
+
+	/* P1 read-only audit; maps fixed windows, never writes a register. */
+	npu_audit: npu-audit {
+		compatible = "zte,zx279128s-npu-audit";
+		status = "okay";
+	};
+
+	/* Vendor-native IDM fabric engine; disabled until enable=1 + ifup. */
+	npu_idm: npu-idm {
+		compatible = "zte,zx279128s-npu-idm";
+		status = "okay";
+	};
+
+	/* PPE/CLA low-level table access; read/write opt-in. */
+	npu_ppe: npu-ppe {
+		compatible = "zte,zx279128s-npu-ppe";
+		status = "okay";
+	};
 };
 
 /*
