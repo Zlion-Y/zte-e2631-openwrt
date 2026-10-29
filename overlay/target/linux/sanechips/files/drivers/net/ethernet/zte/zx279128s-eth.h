@@ -404,5 +404,6 @@ int zx_idm_flow_xmit(struct sk_buff *skb, struct nf_flowtable *ft,
 		     struct flow_offload *flow);
 bool zx_idm_hook_wlan_ingress(const struct net_device *in);
 void zx_idm_debug(struct seq_file *m);
+extern atomic_t zx_ppe_skip[16];
 
 #endif

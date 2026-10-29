@@ -508,6 +508,11 @@ bool zx_idm_wifi_ingress(const struct zx_eth_adapter *adapter, int ifindex)
 {
 	int i;
 
+	/* wifi_offload=0 must really bypass the wireless offload: without
+	 * this the ppe classifier still accepts VAP ingress and the flows go
+	 * to hardware even though the IDM side was asked to stand down */
+	if (!zx_wifi_offload)
+		return false;
 	if (adapter != zx_idm.adapter)
 		return false;
 	for (i = 0; i < zx_idm.wifi_count; i++)
@@ -530,8 +535,10 @@ int zx_idm_wifi_egress(struct zx_eth_adapter *adapter,
 	struct zx_idm_wifi *w = NULL;
 	int i;
 
-	if (adapter != zx_idm.adapter || !zx_idm.wifi_count)
+	if (adapter != zx_idm.adapter || !zx_idm.wifi_count) {
+		atomic_inc(&zx_ppe_skip[15]);
 		return -EOPNOTSUPP;
+	}
 
 	for (i = 0; i < zx_idm.wifi_count; i++) {
 		if (zx_idm.wifi[i].dev == odev) {
@@ -541,8 +548,10 @@ int zx_idm_wifi_egress(struct zx_eth_adapter *adapter,
 	}
 	if (!w) {
 		if (!IS_ENABLED(CONFIG_BRIDGE) ||
-		    !netif_is_bridge_master(odev))
+		    !netif_is_bridge_master(odev)) {
+			atomic_inc(&zx_ppe_skip[16]);
 			return -EOPNOTSUPP;
+		}
 		/* br_fdb_find_port() wants RTNL (it asserts on 6.18); the
 		 * flow-offload add path runs sleepable in a work queue */
 		rtnl_lock();
@@ -550,12 +559,15 @@ int zx_idm_wifi_egress(struct zx_eth_adapter *adapter,
 						     zx_idm.wifi[0].dev);
 		if (!br || br != odev) {
 			rtnl_unlock();
+			atomic_inc(&zx_ppe_skip[17]);
 			return -EOPNOTSUPP;
 		}
 		port = br_fdb_find_port(odev, dst, 0);
 		rtnl_unlock();
-		if (!port)
+		if (!port) {
+			atomic_inc(&zx_ppe_skip[18]);
 			return -EOPNOTSUPP;
+		}
 		for (i = 0; i < zx_idm.wifi_count; i++)
 			if (zx_idm.wifi[i].dev == port) {
 				w = &zx_idm.wifi[i];

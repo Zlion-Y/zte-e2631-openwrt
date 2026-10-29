@@ -309,6 +309,15 @@ static void zx_ppe_mangle_eth(const struct flow_action_entry *act, void *eth)
 	memcpy(dest, src, act->mangle.mask ? 2 : 4);
 }
 
+/*
+ * Why the classifier refused a flow, one counter per check (dma_state shows
+ * them): 0 meta/ingress, 1 no CONTROL key, 2 not IPv4, 3 no BASIC key,
+ * 4 not IPv4 ethertype, 5 not TCP/UDP, 6 no addrs/ports, 7 mangle IP4
+ * offset, 8 mangle L4 offset, 9 mangle htype, 10 other action, 11 no odev,
+ * 12 wifi egress unresolved, 13 invalid MAC, 14 hash full.
+ */
+atomic_t zx_ppe_skip[16];
+
 int zx_ppe_flow_add(struct zx_eth_adapter *adapter,
 			   struct flow_cls_offload *f)
 {
@@ -340,7 +349,7 @@ int zx_ppe_flow_add(struct zx_eth_adapter *adapter,
 				break;
 		if (i == ZX_NUM_PORTS &&
 		    !zx_idm_wifi_ingress(adapter, match.key->ingress_ifindex))
-			return -EOPNOTSUPP;
+			atomic_inc(&zx_ppe_skip[0]); return -EOPNOTSUPP;
 	}
 
 	if (flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_CONTROL)) {
@@ -348,9 +357,9 @@ int zx_ppe_flow_add(struct zx_eth_adapter *adapter,
 
 		flow_rule_match_control(rule, &match);
 		if (match.key->addr_type != FLOW_DISSECTOR_KEY_IPV4_ADDRS)
-			return -EOPNOTSUPP;
+			atomic_inc(&zx_ppe_skip[2]); return -EOPNOTSUPP;
 	} else {
-		return -EOPNOTSUPP;
+		atomic_inc(&zx_ppe_skip[2]); return -EOPNOTSUPP;
 	}
 
 	if (flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_BASIC)) {
@@ -358,15 +367,15 @@ int zx_ppe_flow_add(struct zx_eth_adapter *adapter,
 
 		flow_rule_match_basic(rule, &match);
 		if (match.key->n_proto != htons(ETH_P_IP))
-			return -EOPNOTSUPP;
+			atomic_inc(&zx_ppe_skip[4]); return -EOPNOTSUPP;
 		t.proto = match.key->ip_proto;
 	}
 	if (t.proto != IPPROTO_TCP && t.proto != IPPROTO_UDP)
-		return -EOPNOTSUPP;
+		atomic_inc(&zx_ppe_skip[5]); return -EOPNOTSUPP;
 
 	if (!flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_IPV4_ADDRS) ||
 	    !flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_PORTS))
-		return -EOPNOTSUPP;
+		atomic_inc(&zx_ppe_skip[6]); return -EOPNOTSUPP;
 	{
 		struct flow_match_ipv4_addrs addrs;
 		struct flow_match_ports ports;
@@ -397,7 +406,7 @@ int zx_ppe_flow_add(struct zx_eth_adapter *adapter,
 				else if (act->mangle.offset == offsetof(struct iphdr, daddr))
 					new_daddr = (__force __be32)act->mangle.val;
 				else
-					return -EOPNOTSUPP;
+					atomic_inc(&zx_ppe_skip[7]); return -EOPNOTSUPP;
 				break;
 			case FLOW_ACT_MANGLE_HDR_TYPE_TCP:
 			case FLOW_ACT_MANGLE_HDR_TYPE_UDP: {
@@ -411,12 +420,12 @@ int zx_ppe_flow_add(struct zx_eth_adapter *adapter,
 				} else if (act->mangle.offset == 2) {
 					rw.new_dport = cpu_to_be16(val);
 				} else {
-					return -EOPNOTSUPP;
+					atomic_inc(&zx_ppe_skip[8]); return -EOPNOTSUPP;
 				}
 				break;
 			}
 			default:
-				return -EOPNOTSUPP;
+				atomic_inc(&zx_ppe_skip[9]); return -EOPNOTSUPP;
 			}
 			break;
 		case FLOW_ACTION_CSUM:
@@ -426,23 +435,29 @@ int zx_ppe_flow_add(struct zx_eth_adapter *adapter,
 			break;
 		default:
 			/* VLAN, PPPoE and tunnel encapsulation are not supported */
-			return -EOPNOTSUPP;
+			atomic_inc(&zx_ppe_skip[10]); return -EOPNOTSUPP;
 		}
 	}
 
-	if (!odev)
+	if (!odev) {
+		atomic_inc(&zx_ppe_skip[11]);
 		return -EOPNOTSUPP;
+	}
 	if (zx_eth_is_port(odev)) {
 		port = ZX_BRPORT(((struct zx_eth_priv *)netdev_priv(odev))->port);
 	} else {
 		/* wireless: resolve the VAP's fabric port, either directly or
 		 * through the bridge FDB when odev is the bridge master */
 		port = zx_idm_wifi_egress(adapter, odev, eth.h_dest);
-		if (port < 0)
+		if (port < 0) {
+			atomic_inc(&zx_ppe_skip[12]);
 			return port;
+		}
 	}
-	if (!is_valid_ether_addr(eth.h_source) || !is_valid_ether_addr(eth.h_dest))
+	if (!is_valid_ether_addr(eth.h_source) || !is_valid_ether_addr(eth.h_dest)) {
+		atomic_inc(&zx_ppe_skip[13]);
 		return -EOPNOTSUPP;
+	}
 
 	rw.sip = new_saddr != t.saddr;
 	rw.dip = new_daddr != t.daddr;
@@ -452,8 +467,10 @@ int zx_ppe_flow_add(struct zx_eth_adapter *adapter,
 	zx_ppe_slots(&t, slot);
 	if (!test_bit(slot[0], adapter->ppe_hash_used))
 		slot[1] = slot[0];
-	else if (test_bit(slot[1], adapter->ppe_hash_used))
+	else if (test_bit(slot[1], adapter->ppe_hash_used)) {
+		atomic_inc(&zx_ppe_skip[14]);
 		return -EBUSY;
+	}
 
 	e = kzalloc_obj(*e);
 	if (!e)

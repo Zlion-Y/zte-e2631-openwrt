@@ -1196,6 +1196,18 @@ static int zx_eth_dma_state_show(struct seq_file *s, void *data)
 			   READ_ONCE(adapter->rx_cur_idx[i]));
 	rtnl_unlock();
 
+	seq_printf(s, "ppe_skip[meta=%d nock=%d v6=%d nobasic=%d nonip=%d nol4=%d nokeys=%d ip4off=%d l4off=%d htype=%d action=%d noodev=%d wifiegr=%d badmac=%d hashfull=%d]\n",
+		   atomic_read(&zx_ppe_skip[0]), atomic_read(&zx_ppe_skip[1]),
+		   atomic_read(&zx_ppe_skip[2]), atomic_read(&zx_ppe_skip[3]),
+		   atomic_read(&zx_ppe_skip[4]), atomic_read(&zx_ppe_skip[5]),
+		   atomic_read(&zx_ppe_skip[6]), atomic_read(&zx_ppe_skip[7]),
+		   atomic_read(&zx_ppe_skip[8]), atomic_read(&zx_ppe_skip[9]),
+		   atomic_read(&zx_ppe_skip[10]), atomic_read(&zx_ppe_skip[11]),
+		   atomic_read(&zx_ppe_skip[12]), atomic_read(&zx_ppe_skip[13]),
+		   atomic_read(&zx_ppe_skip[14]));
+	seq_printf(s, "wifi_egress_skip[badadapter=%d notbridge=%d wrongbridge=%d nofdb=%d]\n",
+		   atomic_read(&zx_ppe_skip[15]), atomic_read(&zx_ppe_skip[16]),
+		   atomic_read(&zx_ppe_skip[17]), atomic_read(&zx_ppe_skip[18]));
 	zx_idm_debug(s);
 	return 0;
 }
