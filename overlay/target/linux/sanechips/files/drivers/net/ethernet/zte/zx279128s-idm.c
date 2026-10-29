@@ -31,6 +31,7 @@
 #include <linux/if_bridge.h>
 #include <linux/io.h>
 #include <linux/moduleparam.h>
+#include <linux/printk.h>
 #include <linux/netdevice.h>
 #include <linux/slab.h>
 #include <net/flow_offload.h>
@@ -326,9 +327,20 @@ static int zx_idm_rx_ring(struct zx_idm *idm, int budget)
 					     len);
 				{
 					static atomic_t dbg_n = ATOMIC_INIT(0);
+					void *b0 = idm->bufs + (pos % ZX_IDM_RX_DESCS) * ZX_IDM_BUF_SIZE;
 
-					if (atomic_inc_return(&dbg_n) <= 12)
-						pr_info("idm-deliver len=%u chan=%u da=%pM sa=%pM proto=%04x vdev=%s\n",
+					if (atomic_inc_return(&dbg_n) <= 6) {
+						pr_info("idm-deliver len=%u chan=%u w1=%08x w0=%08x dma=%pad\n",
+							len, chan, w1,
+							le32_to_cpu(idm->rx[pos].w0),
+							&(dma_addr_t){ zx_idm_buf_dma(idm, pos % ZX_IDM_RX_DESCS) });
+						print_hex_dump(KERN_INFO, "  b+0 : ", DUMP_PREFIX_OFFSET,
+							       16, 1, b0, 32, false);
+						print_hex_dump(KERN_INFO, "  b+16: ", DUMP_PREFIX_OFFSET,
+							       16, 1, b0 + ZX_IDM_BUF_HEAD, 32, false);
+					}
+					if (atomic_read(&dbg_n) <= 12)
+						pr_info("idm-deliver-hdr len=%u chan=%u da=%pM sa=%pM proto=%04x vdev=%s\n",
 							len, chan, eth_hdr(skb)->h_dest,
 							eth_hdr(skb)->h_source,
 							ntohs(eth_hdr(skb)->h_proto), w->dev->name);
