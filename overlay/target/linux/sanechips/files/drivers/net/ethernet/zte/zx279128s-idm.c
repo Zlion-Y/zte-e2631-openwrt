@@ -325,28 +325,31 @@ static int zx_idm_rx_ring(struct zx_idm *idm, int budget)
 				skb_put_data(skb,
 					     zx_idm_buf_ptr(idm, pos) + ZX_IDM_BUF_HEAD,
 					     len);
-				{
-					static atomic_t dbg_n = ATOMIC_INIT(0);
-					void *b0 = idm->bufs + (pos % ZX_IDM_RX_DESCS) * ZX_IDM_BUF_SIZE;
-
-					if (atomic_inc_return(&dbg_n) <= 6) {
-						pr_info("idm-deliver len=%u chan=%u w1=%08x w0=%08x dma=%pad\n",
-							len, chan, w1,
-							le32_to_cpu(idm->rx[pos].w0),
-							&(dma_addr_t){ zx_idm_buf_dma(idm, pos % ZX_IDM_RX_DESCS) });
-						print_hex_dump(KERN_INFO, "  b+0 : ", DUMP_PREFIX_OFFSET,
-							       16, 1, b0, 32, false);
-						print_hex_dump(KERN_INFO, "  b+16: ", DUMP_PREFIX_OFFSET,
-							       16, 1, b0 + ZX_IDM_BUF_HEAD, 32, false);
-					}
-					if (atomic_read(&dbg_n) <= 12)
-						pr_info("idm-deliver-hdr len=%u chan=%u da=%pM sa=%pM proto=%04x vdev=%s\n",
-							len, chan, eth_hdr(skb)->h_dest,
-							eth_hdr(skb)->h_source,
-							ntohs(eth_hdr(skb)->h_proto), w->dev->name);
-				}
 				skb->dev = w->dev;
 				skb->pkt_type = PACKET_HOST;
+				/* the full TX-side contract: mac80211's
+				 * ieee80211_subif_start_xmit() reads the
+				 * ethertype from skb->protocol and TX control
+				 * from skb->cb, and it locates the ethernet
+				 * header through mac_header.  A skb from
+				 * napi_alloc_skb() has none of these set, so
+				 * 0.5-0.7 handed the radio frames with
+				 * protocol 0 and garbage TX flags and every
+				 * offloaded downlink vanished without a trace.
+				 */
+				memset(skb->cb, 0, sizeof(skb->cb));
+				skb_reset_mac_header(skb);
+				skb->protocol = eth_hdr(skb)->h_proto;
+				{
+					static atomic_t dbg_n = ATOMIC_INIT(0);
+
+					if (atomic_inc_return(&dbg_n) <= 12)
+						pr_info("idm-tx len=%u chan=%u proto=%04x da=%pM sa=%pM vdev=%s
+",
+							len, chan, ntohs(skb->protocol),
+							eth_hdr(skb)->h_dest, eth_hdr(skb)->h_source,
+							w->dev->name);
+				}
 				idm->rx_ch[chan & 7]++;
 				/* the frame is already routed (the packet
 				 * modifier rewrote the headers); hand it
