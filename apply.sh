@@ -75,14 +75,12 @@ cp "$HERE/tools/mkfactory.mjs" "$TREE/tools/e2631-mkfactory.mjs"
 # is not executable.
 for f in sbin/e2631-probe sbin/e2631-trial sbin/e2631-commit sbin/e2631-leds sbin/e2631-hb \
 	 sbin/e2631-linkspeed sbin/e2631-wifi-on sbin/e2631-wifi-ap sbin/e2631-fwstate \
-	 sbin/e2631-wifi-boot sbin/e2631-upgrade sbin/e2631-netune-apply \
+	 sbin/e2631-upgrade sbin/e2631-netune-apply \
 	 sbin/e2631-wanport \
 	 sbin/e2631-userdata-status sbin/e2631-userdata-firstboot sbin/e2631-userdata-init \
-	 etc/init.d/e2631-trial etc/init.d/e2631-wifi-eeprom etc/init.d/e2631-wifi-load \
-	 etc/init.d/e2631-leds etc/init.d/e2631-hb etc/init.d/e2631-userdata \
+	 etc/init.d/e2631-trial etc/init.d/e2631-leds etc/init.d/e2631-hb etc/init.d/e2631-userdata \
 	 etc/init.d/e2631-netune \
-	 lib/upgrade/platform.sh \
-	 etc/hotplug.d/firmware/11-mt76-caldata; do
+	 lib/upgrade/platform.sh; do
 	chmod +x "$TREE/target/linux/sanechips/base-files/$f"
 done
 
@@ -288,6 +286,65 @@ fi
 rm -f "$TREE/target/linux/sanechips/patches-6.18/021-net-ethernet-zte-Add-ZX279128S-Ethernet-switch-drive.patch"
 rm -f "$TREE/target/linux/sanechips/patches-6.18/034-zte-add-the-ZX279128S-FFE-control-plane.patch"
 echo "native: open-source eth/FFE patches removed from the base tree"
+
+# The target-level DEFAULT_PACKAGES still names wpad-basic-mbedtls; on the
+# native line the open AP userspace is gone with the driver.
+sed -i '/^\twpad-basic-mbedtls$/d' "$TREE/target/linux/sanechips/Makefile"
+
+# make defconfig merges CONFIG_DEFAULT_* from tmp/.targetinfo; that file is
+# generated from the *original* device definitions (mt7915e, nft-offload, ...)
+# and silently re-enables everything the seed refuses. Purge it so defconfig
+# regenerates targetinfo from the edited image Makefile.
+rm -f "$TREE/tmp/.targetinfo" "$TREE/.targetinfo"
+rm -rf "$TREE/tmp/info"
+# make's package dependency database and the previous build's work dirs still
+# reference mac80211/mt76; left in place, world tries to compile mt76 against
+# the now-absent mac80211 backport headers and dies.
+rm -f "$TREE/tmp/.packageinfo" "$TREE/tmp/.packagedeps" "$TREE/tmp/.buildinfo"
+rm -rf "$TREE"/build_dir/target-arm_cortex-a9_musl_eabi/linux-sanechips_generic/mt76-* \
+	"$TREE"/build_dir/target-arm_cortex-a9_musl_eabi/linux-sanechips_generic/mac80211-* \
+	"$TREE"/staging_dir/target-arm_cortex-a9_musl_eabi/usr/include/mac80211-backport
+# Stale kmod-nft-offload apks from the pre-native kernel pin the old kernel hash
+# and make apk world-solve fail ("breaks:"); force a rebuild against the current
+# kernel by removing the built artifacts and the published apks. The root-sanechips
+# skeleton also persists across builds (Oct-13 wpad/rc.d leftovers were found in
+# an image despite a clean manifest) - purge it so every install starts empty.
+rm -rf "$TREE"/build_dir/target-arm_cortex-a9_musl_eabi/linux-sanechips_generic/packages \
+	"$TREE"/build_dir/target-arm_cortex-a9_musl_eabi/root-sanechips \
+	"$TREE"/build_dir/target-arm_cortex-a9_musl_eabi/root.orig-sanechips \
+	"$TREE"/bin/targets/sanechips/generic/packages/kmod-nft-offload-*.apk \
+	"$TREE"/bin/packages/arm_cortex-a9/base/kmod-nft-offload-*.apk
+echo "native: stale targetinfo/package caches purged (DEFAULT_ re-derivation)"
+
+# The tree .config dates from the original bootstrap and still carries the
+# open-source wireless selection as =y; build.sh reuses it verbatim (it never
+# re-seeds). Strip every banned selection and leave an explicit refusal in its
+# place so defconfig keeps it unset.
+sed -i -e '/^CONFIG_PACKAGE_kmod-mt7915e=y$/d' \
+	-e '/^CONFIG_PACKAGE_kmod-mt7915-firmware=y$/d' \
+	-e '/^CONFIG_PACKAGE_kmod-mt7916-firmware=y$/d' \
+	-e '/^CONFIG_PACKAGE_kmod-mt76/d' \
+	-e '/^CONFIG_PACKAGE_kmod-mac80211=y$/d' \
+	-e '/^CONFIG_PACKAGE_kmod-cfg80211=y$/d' \
+	-e '/^CONFIG_PACKAGE_hostapd-common=y$/d' \
+	-e '/^CONFIG_PACKAGE_wpad-mbedtls=y$/d' \
+	-e '/^CONFIG_PACKAGE_wireless-regdb=y$/d' \
+	-e '/^CONFIG_DEFAULT_kmod-mt7915e=y$/d' \
+	-e '/^CONFIG_DEFAULT_kmod-mt7915-firmware=y$/d' \
+	-e '/^CONFIG_DEFAULT_kmod-mt7916-firmware=y$/d' \
+	-e '/^CONFIG_DEFAULT_hostapd-common=y$/d' \
+	"$TREE/.config"
+for p in kmod-mt7915e kmod-mt7915-firmware kmod-mt7916-firmware kmod-mac80211 \
+	 kmod-cfg80211 hostapd-common wpad-mbedtls wireless-regdb; do
+	grep -q "^# CONFIG_PACKAGE_${p} is not set\$" "$TREE/.config" || \
+		printf '# CONFIG_PACKAGE_%s is not set\n' "$p" >> "$TREE/.config"
+done
+# kmod-nft-offload stays selected: firewall4 DEPENDS on it (stock OpenWrt
+# plumbing), and an earlier refusal line would leave the dependency unsatisfied
+# at apk world-solve. Inert on this line - see the image Makefile comment.
+sed -i '/^# CONFIG_PACKAGE_kmod-nft-offload is not set$/d' "$TREE/.config"
+printf 'CONFIG_PACKAGE_kmod-nft-offload=y\n' >> "$TREE/.config"
+echo "native: .config stripped of the open-source wireless drivers (refusals written)"
 
 # npu branch: the scaffold is the branch's identity and has no MMIO access, so
 # unlike FFE it is always built. The kernel-build wiring ships as patch 037;

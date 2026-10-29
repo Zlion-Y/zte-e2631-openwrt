@@ -473,12 +473,15 @@ warn('cpu enable-method matches the string the compiled platsmp registers',
       // the hard "no open-source data plane" gate below.
     ];
     for (const [p, why] of need) ok(`${p} is installed (${why})`, pkgs.has(p), pkgs.has(p) ? '' : 'not in the manifest');
-    // native-0.1: the open-source data plane must not ship, period. The same
+    // native-0.1: the open-source wireless stack must not ship. The same
     // defconfig machinery that once pulled these in (DEVICE_PACKAGES, DEPENDS,
     // DEFAULT_) makes a positive absence check the only trustworthy gate.
+    // kmod-nft-offload is deliberately allowed: it is firewall4's stock DEPENDS
+    // (a netfilter module, not a data-plane driver) and stays inert - no
+    // flow_offloading default, no TC_SETUP_FT hook on this line.
     const banned = [...pkgs].filter((p) =>
-      /^kmod-mt76|^kmod-mt7915e$|^kmod-mt7916-firmware$|^kmod-mac80211$|^kmod-cfg80211$|^wpad|^hostapd$|^kmod-nft-offload$/.test(p));
-    ok('no open-source wired/wireless data-plane packages in the image (native line)',
+      /^kmod-mt76|^kmod-mt7915e$|^kmod-mt7916-firmware$|^kmod-mt7915-firmware$|^kmod-mac80211$|^kmod-cfg80211$|^wpad|^hostapd$/.test(p));
+    ok('no open-source wireless driver packages in the image (native line)',
       banned.length === 0, banned.join(', '));
     // FEATURES on this target still says "usb", and OpenWrt's default package
     // list keys off FEATURES. A USB kmod in the image is the user's hard no:

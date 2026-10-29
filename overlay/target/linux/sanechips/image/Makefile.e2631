@@ -44,8 +44,12 @@ define Device/zte_zxhn-e2631
   # Argon (v1.0..v1.2's default theme) is VENDORED at
   # overlay/package/luci/luci-theme-argon since v1.3: same theme, but no
   # GitHub clone at apply time. Bootstrap stays in the list as the fallback.
-  # native-0.1: kmod-mt7915e / kmod-mt7916-firmware / kmod-nft-offload are
-  # deliberately gone - the open-source data plane does not ship on this line.
+  # native-0.1: kmod-mt7915e / kmod-mt7916-firmware are deliberately gone -
+  # the open-source wireless driver does not ship on this line. kmod-nft-offload
+  # stays: it is firewall4's stock DEPENDS (a small netfilter module, not a
+  # data-plane driver) and fighting the dependency breaks apk world-solve; it is
+  # inert here - no flow_offloading uci default, and with the eth driver removed
+  # there is no TC_SETUP_FT hook for it to talk to.
   DEVICE_PACKAGES := e2631-fwslot \
 	ubi-utils block-mount \
 	zte-mesh luci-app-zte-mesh \
