@@ -1,0 +1,72 @@
+#!/bin/sh
+# Console liveness beacon, AND a copy that survives the power cut.
+#
+# Why two sinks: when this board dies the kernel stops printing mid-line, so the
+# serial console is the classic witness.  But the serial port is a shared,
+# single-owner resource and the operator needs it to type.  So every line also
+# goes to a file on the jffs2 overlay with a periodic sync: after a hard hang and
+# a power cycle the tail of that file still says which phase was running and what
+# the last uptime was.  Syncing per line would chew the NAND, so sync happens on
+# phase changes (caller runs `e2631-hb-now`) and every SYNC_EVERY-th beat.
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+interval=${1:-3}
+LOGF=${LOGF:-/root/e2631-hb.log}
+SYNC_EVERY=${SYNC_EVERY:-5}
+DMESG_EVERY=${DMESG_EVERY:-10}
+n=0
+
+sta() { iw dev phy0-ap0 station dump 2>/dev/null | grep -c '^Station'; }
+irqs() { grep -m1 -i 'mt79' /proc/interrupts 2>/dev/null | cut -d: -f2- | tr -s ' ' '\n' | awk '{s+=$1} END{print s+0}'; }
+aer() {
+	t=0
+	for f in /sys/bus/pci/devices/*/aer_dev_fatal /sys/bus/pci/devices/*/aer_dev_nonfatal \
+		/sys/bus/pci/devices/*/aer_dev_correctable; do
+		[ -r "$f" ] || continue
+		v=$(awk '{for(i=1;i<=NF;i++) if($i ~ /^[0-9]+$/) s+=$i} END{print s+0}' "$f" 2>/dev/null)
+		t=$((t + ${v:-0}))
+	done
+	echo "$t"
+}
+beat() {
+	line="HB up=$(cut -d ' ' -f1 /proc/uptime) irq=$(irqs) sta=$(sta) aer=$(aer) ld=$(cut -d ' ' -f1 /proc/loadavg)"
+	echo "$line" > /dev/kmsg
+	echo "$line" >> "$LOGF"
+	n=$((n + 1))
+	# Carry the kernel's own last words along. The driver prints things like
+	# station-added / AER records right before a hard hang, and dmesg does not
+	# survive the power cut that follows -- this file does.
+	if [ $((n % DMESG_EVERY)) -eq 0 ]; then
+		dmesg | tail -2 | sed 's/^/KM /' >> "$LOGF"
+	fi
+	[ $((n % SYNC_EVERY)) -eq 0 ] && sync
+}
+
+if [ "$1" = now ]; then	# one-shot: e2631-hb now "<text>" -- synced, for phase tags
+	echo "HB $2 up=$(cut -d ' ' -f1 /proc/uptime)" > /dev/kmsg
+	echo "HB $2 up=$(cut -d ' ' -f1 /proc/uptime)" >> "$LOGF"
+	sync
+	exit 0
+fi
+
+# Append, never truncate: on 2026-10-14 a truncating ">" here ate the tail of the
+# boot that had just died, which was the one piece of evidence we went looking
+# for. The per-boot marker replaces the lost "opened" line.
+echo "=== hb opened up=$(cut -d ' ' -f1 /proc/uptime) interval=$interval sync-every=$SYNC_EVERY ===" >> "$LOGF"
+# Then bound it. /root is jffs2 on an 8 MiB overlay, a beat is ~45 B every 3 s, and
+# after two boots of uptime the file was already 1610 lines / 69 KB with no cap in
+# place. The first "no space left on device" here would also be the first lost
+# evidence, so keep the newest LIMIT lines - the tail of the boot that died is what
+# this file is read for, and tail keeps it.
+LIMIT=${LIMIT:-600}
+if [ "$(wc -l < "$LOGF" 2>/dev/null || echo 0)" -gt "$LIMIT" ]; then
+	if tail -n "$LIMIT" "$LOGF" > "$LOGF.rot" 2>/dev/null; then
+		mv -f "$LOGF.rot" "$LOGF"
+	else
+		rm -f "$LOGF.rot"
+	fi
+fi
+sync
+while :; do
+	beat
+	sleep "$interval"
+done

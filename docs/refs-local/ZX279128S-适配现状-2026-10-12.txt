@@ -1,0 +1,398 @@
+ZX279128S（Sanechips / 中兴）生态适配现状 — 五份资料通读纪要
+生成时间：2026-10-12
+资料：github.com/cubingmucus998/zte-zx279128s-recon · openwrt/openwrt#25469 ·
+      Medium: Resurrecting ISP E-Waste · openwrt.style.dev/h3600 · github.com/Zlion-Y/e2631-mainline-zx279128s
+
+================================================================================
+0. 一句话结论
+================================================================================
+ZX279128S 这颗 SoC 的 OpenWrt/主线适配，在 2026-09 月底到 10 月中之间发生了质变：
+H3600 那条线已经把 6.18 的完整驱动栈（SMP / 时钟 / GPIO / PCIe / MDIO / 以太网 + PPE 硬件转发 /
+硬件交换 / SPI-NAND+UBI / USB3 / Wi-Fi 6）全部打通并在真机验证，但 PR #25469 至今 open 未合，
+OpenWrt master 里还没有 target/linux/sanechips。
+E2631（你自己的仓库）停在"内核起来、驱动为 0"的阶段，README 已过期（写在 08-31），
+树里其实已经放进了 cnjn 的整套 ZX279133 网络驱动，并在 09-27 修了 3 个真实的数据面 bug。
+最大的信息增量：F670L recon 仓库明确把 E2631 项目列为"两个被同一份材料卡住的项目"之一，
+并已经把你说的下一步（逆向 tm.ko）所需的 tm.ko / switch.ko 连同完整符号表公开了。
+=> 现在的正确姿势不是再自己逆向，而是「抄 H3600 的驱动栈 + 用 recon 的符号表对齐寄存器语义」。
+
+================================================================================
+1. 四条线的关系（同一颗 SoC，四块不同的板）
+================================================================================
+板子              厂商/渠道          形态          RAM/Flash            无线          状态
+----------------  ----------------  ------------  -------------------  ------------  --------------------------
+ZXHN H3600 (V9)   Hyperoptic UK     家用网关      512MB/128MB SPI-NAND  MT7915D       OpenWrt 6.18 全功能跑通
+ZXHN H1600        同上              同门型号      同上                  MT7915D       同一 target 支持
+ZXHN E2631        中兴 巡天AX3000   家用路由器    256MB/128MB SPI-NAND  MT7916/7976   主线 6.18.38 只到 shell
+ZXHN F670L        Airtel India      GPON ONT      512MB/128MB           MT7603E+MT7663 仅侦察，未启动移植
+SoC 统一为 ZX279128S：双核 Cortex-A9 @1GHz（ARMv7-A），用户态**软浮点 / arm EABI5**
+（原厂内核 `# CONFIG_VFP is not set`、用户态 ELF e_flags=0x05000202 带 SOFT_FLOAT 位，
+2026-10-12 真机三重实测；注意 ISA 是 ARMv7 而非 armv5），无硬件 AES。
+
+关键事实：外设 compatible 字符串在整个板族里是稳定的（recon 仓库已用真机 DT 逐条比对）：
+  zte,ZX279127-uart · zte,iram · arm,cortex-a9-gic · arm,cortex-a9-global-timer
+  arm,pl310-cache · arm,cortex-a9-twd-wdt · zte,zx279128s-mdio · zte,ZX279127-dwc2 · snps,dwc3
+其中 MDIO 连地址都一样：mdio@9a101000 reg=<0x9a101000 0x18>。
+唯一"同块不同用"的：0x92000000 + 0x400000 —— H3600 当以太网 MAC（gmac），F670L 原厂当 pon@92000000。
+
+================================================================================
+2. 逐份资料要点
+================================================================================
+
+--------------------------------------------------------------------------------
+2.1 OpenWrt PR #25469 — sanechips: add support for ZTE ZXHN H3600
+--------------------------------------------------------------------------------
+提交人：Navid Ghahremani (ghahramani)      创建：2026-09-29      最后更新：2026-10-10
+状态：**open / 未合并**，mergeable_state = unstable，label = kernel + core packages
+规模：4 个 commit，58 个文件，+9037 / -1（已 rebase 到 master 936617ab59，checkpatch 0 error）
+
+硬件规格（PR 自述）
+  SoC     Sanechips ZX279128S，2× Cortex-A9 @1.0GHz（ARMv7-A）
+  RAM     512 MiB DDR3
+  Flash   128 MiB SPI-NAND（HeYangTek HYF1GQ4UDACAE / Winbond W25N01）
+  无线    MediaTek MT7915D，2.4/5GHz DBDC 802.11ax，走 PCIe
+  以太    5× 10/100/1000M（4 LAN + 1 WAN），SoC 内置交换
+  USB     1× USB2.0 Host（Synopsys DWC3）
+  LED/按键 11× GPIO LED、4× 按键（Reset / WPS / Wi-Fi / LED 开关）
+  UART    X1A22 排针，3.3V TTL 115200 8N1（Pin1=VCC 不接，2=TX，3=RX，4=GND）
+  电源    12V/1.5A
+
+实际落地的文件（我从 PR 文件清单核对，非转述）——target/linux/sanechips/：
+  files/arch/arm/mach-zte/platsmp-zx279128s.c      +173   第二核 SMP 上核
+  files/arch/arm/mach-zte/zx279128s.c              +19
+  files/drivers/clk/zte/clk-zx279128s.c            +459   CRM 时钟/复位
+  files/drivers/gpio/gpio-zx279128s.c              +78
+  files/drivers/net/ethernet/zte/zx279128s-main.c  +1502  以太网主驱动
+  files/drivers/net/ethernet/zte/zx279128s-ppe.c   +803   硬件包转发引擎 PPE
+  files/drivers/net/ethernet/zte/zx279128s-switch.c +354  硬件交换（switchdev）
+  files/drivers/net/ethernet/zte/zx279128s-eth.h   +385
+  files/drivers/net/mdio/mdio-zx279128s.c          +158
+  files/drivers/net/phy/sanechips.c                +153   ZX5201 PHY
+  files/drivers/pci/controller/dwc/pcie-zx279128s.c +333  PCIe host（DWC）
+  files/drivers/spi/spi-zx279128s-spifc.c          +353   SPI 控制器
+  arch/arm/boot/... dts/zx279128s-zxhn-h3600.dts   +34（指 include 的 SoC dtsi）
+  patches-6.18/ 共 27 个补丁（001~027），重点：
+    001  amba-pl011 恢复 zx29 UART 支持
+    004  dt-bindings: l2c2x0 描述 ZTE 设备读串行化
+    005  ARM: l2c: Serialize device reads with cache maintenance  ← L2C-310 那个坑的最终形态
+    006~007  ZTE ZX279128S platform + CPU hotplug
+    008~009  CRM 时钟 + 复位
+    010~013  GPIO / pinctrl-single / syscon
+    014~015  PCIe host controller
+    016~018  MDIO 控制器 + ZX5201 PHY
+    019~020  以太网交换驱动
+    021~022  SPI flash 控制器
+    023~024  USB DWC3 generic-plat
+    025~026  SoC dtsi + H3600 板级 dts
+    027  mtd/spinand: HeYangTek 保留两种坏块标记
+  config-6.18                                      +526
+  base-files/lib/upgrade/platform.sh               +231   双槽 sysupgrade + uImage/板型校验
+  package/kernel/mt76/patches/001-wifi-mt76-serialize-register-reads-with-outer-cache.patch  +110
+
+已验证工作项（作者自述 + 安装页 "What works"）
+  4×GbE LAN + GbE WAN，每口独立 netdev（lan1~lan4、wan）
+  MT7915 Wi-Fi 6 双频并发，带原厂校准数据与 MAC
+  128MiB SPI-NAND + 坏块处理 + overlay + sysupgrade 保配置
+  USB Host（页面写 USB 3.0）、全部 LED、4 个按键；电源灯红→绿状态指示
+  硬件流卸载（IPv4 NAT）：940Mbps 下行 / 930 上行，CPU 约 5%（默认关）
+  硬件 LAN 交换：LAN 口间 ~940Mbps（走 CPU 只有 ~600），默认关
+  不支持：两个 RJ11 FXS 电话口
+
+刷写路径（关键，对你直接可用）
+  串口 X1A22 → 上电按 1 → cspboot 密码 → U-Boot：
+      setenv ipaddr 192.168.1.1 / serverip 192.168.1.2
+      tftp 0x43000000 openwrt-...-initramfs.uImage && bootm 0x43000000
+  → 备份 tag / wifi / kernel_A / rootfs_A → sysupgrade -n 到 Slot 0
+  回退：mtd erase kernel1 && reboot，cspboot 检测 Slot 0 失效自动回落 Slot B 原厂固件并回写两槽
+  构建：分支 ghahramani/openwrt 的 zte-zxhn-h3600，target sanechips/generic，profile zte_zxhn-h3600
+  预编译：build r36668+5-d9f8ecc394（含 initramfs.uImage / sysupgrade.bin / sha256sums / 独立软件源）
+
+MAC/校准布局：LAN 基础 MAC 取自 tag 分区 0x1e；WAN = base+1；2.4G = base+2（置本地管理位）；
+5G = base+3；无线校准从 wifi 分区 JFFS2 的 caldata 读。
+
+上游化进展与阻力（这一段决定它短期能不能进 OpenWrt）
+  andrewjlamarche（OpenWrt 维护者）09-29 明确表态：去 LKML 上游化，先拆内核和 OpenWrt；
+    "of all the new targets sitting here with PRs，none have been accepted …
+     a new not-upstream-supported target being accepted are extremely low IMO"。
+  ghahramani 10-10 更新：已 rebase；已向 linux-arm-kernel 提交 **24 个补丁的 RFC 系列**
+    （基线 Linux 7.3-rc5），并在 MAINTAINERS 里登记 ARM/ZTE ZX279128S SOC SUPPORT 自任维护者；
+    另拆出两个前置子系统修复：MTD HeYangTek SPI-NAND BBT、NVMEM fixed-layout consumer offset。
+  openwrt-ai 的自动 commit 检查在 10-10 仍挂着一串意见，主要两条：
+    ① 一个 commit 里混进了影响所有 target 的 core-package 改动（mt76 outer-cache read lock、
+       fstools 的 MEMREAD cleanmarker 检测），要求拆成独立 commit；
+    ② commit message 拿"被本 PR 之前版本取代的写法"作对比，应改成描述"本 commit 增加了什么"。
+  => 结论：功能面基本 OK，卡在流程/上游化路径上，短期进不了 master。
+
+--------------------------------------------------------------------------------
+2.2 Medium 长文 — Resurrecting ISP E-Waste（作者同 Ghahremani）
+--------------------------------------------------------------------------------
+主线：£15~20 的二手 Hyperoptic H3600（原厂 Linux 4.1.25 载波固件）→ 16 天 → 主线 Linux 6.18 + OpenWrt。
+阶段与坑（按文章顺序）：
+
+① 破壳拿 root / 备份
+   原厂 web 漏洞拿到临时 root → 逐分区 dd 出来 tftp 上传，保住 bootloader.bin / wifi 校准 / tag 凭据。
+
+② bootloader 密码（这一段是"AI 破局"的招牌）
+   在 bootloader.bin 偏移 0x5b3c3 找到 *** Please input bootmode password: *** 紧邻的
+   20 字节硬编码 SHA-1：4A746281E9135F96E0777E658C08015ECEF42440
+   SHA-1 不可逆，只能猜；按中兴芯片命名习惯构造掩码爆破，命中：
+     输入 Boot4128s!  →  SHA1 = 4a746281e9135f96e0777e658c08015ecef42440（完全一致）
+     构成 = Boot + 4128s（ZX279128S 的内部硅片标识）+ !
+   输入即掉进不受限的 U-Boot（2013.04，板型 zx279128sevb，cspboot #）。
+
+③ 从零写 target/linux/sanechips
+   反编译 flash dump 里的扁平设备树（FDT），重建：内存映射（0x40000000，512MB DDR3）、
+   pinmux、时钟树、外设基址 → 写成 zx279128s.dtsi + zx279128s-zte-zxhn-h3600.dts；
+   双核 A9 SMP 上核、GIC-400、硬件定时器、复位线；U-Boot TFTP 纯 RAM 迭代（不写 flash）。
+
+④ 最硬的 bug：L2C-310 外部缓存写缓冲未排空 vs PCIe MMIO 读
+   现象：冷启动 mt7915e 报 "Message 00000010 (seq 1) timeout / Failed to start MCU firmware"，
+   或大文件传输中无线直接掉总线；网上那些"加 timeout、重插模块"全无效。
+   根因：Cortex-A9 不会自动 snoop PCIe bus-mastering。MT7915 通过 PCIe DMA 写状态字到内存并置中断，
+   但 CPU 在外层 L2C-310 里的写缓冲还没排空到物理 DDR3 时就执行了 MMIO 寄存器读 →
+   读到过期状态字 → 判定 MCU 死了 → 直接把 PCIe 链拉掉。
+   修法（进入上游补丁形态）：在 mt76 和 Sanechips PCIe 驱动里加显式外层缓存栅栏：
+     outer_sync(); mb();   /* Ensure outer L2 cache write-buffer drainage before PCIe MMIO read */
+   结果：MCU 超时彻底消失，双频 802.11ax 稳定跑满千兆无线、零丢包。
+   对应 PR 里的 patches-6.18/004 + 005（"l2c: Serialize device reads with cache maintenance"）
+   和 package/kernel/mt76/patches/001-wifi-mt76-serialize-register-reads-with-outer-cache.patch。
+
+⑤ PCIe PERST# 有效极性 + DWC LTSSM 重训
+   MT7915 重启后偶发消失。用 devmem 探寄存器发现 DWC 控制器因 PERST# 低有效极性反了而一直把卡按在复位。
+   修 reset 断言逻辑 + 加显式 LTSSM 重训循环 → 每次开机都能稳定协商到 Gen2。
+
+⑥ 逆向硬件 PPE：940+ Mbps
+   把 SoC 里的硬件包转发引擎和硬件 LAN 交换接上 Linux switchdev/phylink、中断驱动 NAPI、
+   每 CPU 统计、ethtool MAC/RMON 计数。开关走 UCI（/etc/config/hw_switching + procd 服务）
+   或 sysfs（echo 1 > /sys/devices/platform/soc/92000000.ethernet/hw_switching），
+   不依赖 LuCI；LuCI 勾选框通过补丁包提供（因为 luci-app-firewall 是核心包，上游不愿合硬件专属开关）。
+
+⑦ 工具链现实（值得注意）
+   作者明确写了：OpenAI Codex 即便付费 Pro 也频繁撞配额（5 小时锁、周限额），
+   在需要跨数千行内核驱动/头文件/寄存器 dump 的深水区不可用；
+   最终靠 Claude Code + Antigravity 的大上下文多文件重构撑住。
+   ——这条对你是直接可用的经验：这类活必须用能一次吞下整棵驱动目录的模型。
+
+--------------------------------------------------------------------------------
+2.3 openwrt.style.dev/h3600 — 固件分发/安装页
+--------------------------------------------------------------------------------
+性质：非官方镜像站，作者自建，托管分支 zte-zxhn-h3600 的构建产物 + 自建 apk 软件源。
+分支：github.com/ghahramani/openwrt 的 zte-zxhn-h3600；构建号 r36668+5-d9f8ecc394。
+产物：
+  openwrt-sanechips-generic-zte_zxhn-h3600-initramfs.uImage（TFTP RAM 起动）
+      SHA-256 034231f2f2a757e7dd807600c6eebc5acfb86b2a93471c75e1d381b54fcda05c
+  openwrt-sanechips-generic-zte_zxhn-h3600-squashfs-sysupgrade.bin（刷 NAND / 后续升级）
+      SHA-256 5506294a04d8aeca1c40d6651b41956d58329c8e39bbbe23516b097b41563d1a
+  另有 INSTALL-H3600.md、上游 patch、包清单 manifest、软件源签名公钥 public-key.pem。
+软件源：因为 OpenWrt 官方服务器还没有该机型的包（内核模块一个都没有），
+  必须改用 https://openwrt.style.dev/h3600/... 下的 targets + packages 索引（签名与固件同钥）。
+  空间约 15MB 空闲；USB 存储支持不在镜像里，要 apk add kmod-usb-storage block-mount kmod-fs-ext4 e2fsprogs。
+构建环境提示：官方 buildbot 容器 ghcr.io/openwrt/buildbot/buildworker-v3.11.8:v21；
+  内核在 target/linux/sanechips（patches-6.18/、config-6.18）；用 IGNORE_ERRORS='n m' 对齐官方镜像构建。
+
+--------------------------------------------------------------------------------
+2.4 github.com/cubingmucus998/zte-zxhn-f670l 侦察仓库（2026-10-02）
+--------------------------------------------------------------------------------
+来源：一台 Airtel India 的 ZXHN F670L GPON ONT，靠已知的 factory-mode 入口拿到临时 root shell。
+它存在的理由写得很直白：**两个项目正被同一批材料卡住** —— OpenWrt PR #25469 和你自己的
+Zlion-Y/e2631-mainline-zx279128s；后者作者自己写的下一步就是"逆向原厂 tm.ko"，而这个仓库里就有。
+
+已公开的原厂内核模块（ELF32 ARM，Flags 0x5000000 = Version5 EABI，vermagic 4.1.25 SMP mod_unload ARMv7）：
+  tm.ko                 1,240,916 B  流量管理/分类，**9,764 个符号**，导出 1,286 个具名函数
+  switch.ko               198,140 B  有线交换 + 以太网口驱动，1,723 符号 / 214 具名函数
+  mt7663_ap.ko          3,443,184 B  MT7663（5GHz）无线驱动
+  mt7603e_ap.ko         1,469,504 B  MT7603E（2.4GHz）无线驱动
+  plat-zxylzb_9128S.ko    141,084 B  平台驱动（名字里带 9128S 家族）
+  bspdriver.ko             63,632 B  板级支持
+  gpondrv.ko               38,332 B  GPON
+  lan_test.ko              15,368 B  LAN 诊断
+switch.ko 直接把有线口模型摊开了（这是"寄存器语义"级别的信息，不是黑盒）：
+  ethdrv_port_dev_init / _open / _stop / _get_stats / _set_mac_addr / _change_mtu / _ioctl
+  get_sw_port_from_devname · ethdrv_set_wanportid · hf_set_l3_entry · l3_hardfastReg
+  drv_add_igmp_addr_gpon_sfu · omci_recv
+docs/ 里还有：真机 DT（/sys/firmware/fdt，6691B，反编译）、H3600 的 OpenWrt DTS 作结构对照、
+PORT-PLAN.md（逐项比对 + 剩余未知项 + 探测方法）、vermagic.txt、3 个上游驱动补丁（MDIO/以太/硬件交换）、
+dts/ 里一份"先把已验证块填上、未知标 TODO"的 F670L 草案 DTS、tools/ 抽取脚本。
+
+它的核心判断（结论对你同样成立）：外设 compatible 跨板一致、MDIO 地址一致，
+**该板族的移植是"设备树 + 板级文件"的活，不是"写驱动"的活**。
+PORT-PLAN 里的 F670L 待解清单（第 2~7 项对你和 H3600 都基本通用）：
+  PHY 地址（H3600 上是 MDIO 8/10/11/12/13；4 个 GPHY 块在 0x9b000000/9b100000/9b200000/9b300000）
+  PCIe 寄存器基址（H3600 用 3 段 reg + reg-names）
+  MAC 地址来源偏移（H3600 读 tag 分区 0x1e）
+  GPIO 基址 / LED+按键 GPIO（按键只能物理试探）
+  时钟频率（topcrm/lsp0crpm/lsp1crpm，H3600 用 fixed-clock 占位，可照抄）
+硬规则（他自己总结的，也适用于你）：TFTP 起不来之前绝不写 flash；加载地址必须 0x43000000；
+只在非活动的 A/B 槽里试镜像；用户态一律软浮点（arm EABI5）。
+（原文写作 "armv5 软浮点" —— 软浮点这条是真约束，但 ISA 层级是 ARMv7-A；
+ 2026-10-12 真机三重实测见 2.5。）
+
+--------------------------------------------------------------------------------
+2.5 Zlion-Y/e2631-mainline-zx279128s（你自己的仓库，我从 API 逐项核对）
+--------------------------------------------------------------------------------
+仓库现状（**注意：README 已经落后于树里的实际内容**）
+  分支：只有 main          总 commit：7 个
+  e7c304fd  2026-08-31  ZTE ZXHN E2631 (ZX279128S) mainline Linux 6.18.38 port（初始导入）
+  6fd8b526 / 3306d009  2026-08-31  CI：tag 触发 + contents:write 以发 Release
+  eeffed92 / 50564c85 / 473c20bf  2026-08-31  文档、build 脚本、CI 跳过纯文档改动
+  f3a814f5  **2026-09-27  fix(net): RX 缓冲全量 DMA 校验后才摘除；skb xmit 补 tx_prepared/tx_stopping
+                        复查；flow_stats 初始化 ret**   ← 唯一一次功能性提交，且是最新的
+  版本：Linux 6.18.38（注意：6.18 是 LTS，当前同线已到 6.18.45；6.18.38 发布于 2026-07-04）
+
+真机成绩（2026-08-31 实测日志，已上板）：U-Boot(tag v0.1.1 预编译 uImage) → 内核 6.18.38 → 交互式 busybox
+  控制台：earlycon=zteuart,0x94404000（标准 pl011 earlycon 会打到错误寄存器，表现为 Starting kernel 后静默）
+  CPU 特性：half thumb fastmult edsp thumbee tls —— 无 VFP、无 NEON、无硬件除法
+           （2026-10-12 用同一台机的原厂 4.1.25 固件复测，得 `half fastmult edsp tls`：
+             同样无 vfp/vfpv3/neon/idiv*，差异只在 thumb/thumbee —— 已由原厂 /proc/config.gz
+             证实是 `# CONFIG_ARM_THUMB(E) is not set` 的内核配置差异，与硬件能力无关。
+             另两条独立佐证：原厂 /bin/busybox 的 ELF e_flags = 0x05000202（含 SOFT_FLOAT 位）、
+             加载器 /lib/ld-uClibc-0.9.33.2.so。=> 用户态 soft-float 已定案。）
+  L2C-310 256KB / GIC / arm_global_timer 1000 BogoMIPS / 单核（rcu 把 NR_CPUS=16 限制到 nr_cpu_ids=1）
+  内存 256MB DDR3-1333（U-Boot 报 256MiB，DT 里写 128MB）
+  NAND：128MB SPI NAND，Manu ID 0x01 Chip ID 0x15 = AMD/Spansion HYF1GQ4UTACAE
+  mihomo 所需内核特性全部内建并验证符号：TUN / TPROXY(xt_TPROXY + nf_tproxy v4v6) / xt_socket /
+    nftables(nft_tproxy、nft_socket、nft_compat) / iptables-legacy / conntrack / NAT /
+    REDIRECT、MASQUERADE、MARK / 策略路由 / IPv6 / zram / overlayfs / ext4·squashfs·vfat
+
+README 声称的进度表（dated 2026-08-31）
+  已完成：mainline 启动、ZTE 定制串口、交互式 shell、L2C/GIC/定时器、mihomo 内核特性、板上网络命令、DT
+  未开始：有线网络驱动、第二核 SMP、SPI-NAND + 透明解密（AES-128-ECB，密钥由 zte_token 派生）、
+          PCIe host（zte,ZX279127-pcie，通了 WiFi 就能用 MT7916）
+  占位：时钟树（topcrm/lsp0crpm/lsp1crpm 用 fixed-clock）；DW MMC / USB host 在 DT 里保持 disabled
+
+**README 之外的实情（我重新拉 main 的 tree / 目录核对，这是最重要的发现）**
+  1) 树里已经有整套 cnjn 的 ZX279133 网络驱动，不是"参考补丁"，是**已落树**：
+       drivers/net/ethernet/zte/  Kconfig, Makefile,
+         zx279133-main.c(18K)  zx279133-np.c(60K)  zx279133-tm.c(29K)  zx279133-idm.c(38K)
+         zx279133-mac.c(20K)   zx279133-netdev.c(50K)  zx279133-offload.c(29K)
+         zx279133-rtl8372n.c(76K)  zx279133-lan-conduit.c  zx279133-lan.h
+         zx279133-ptp.c  zx279133-stats.h  zx279133.h(29K)
+       drivers/net/mdio/  mdio-zx279133.c, mdio-sr1010-zx279051-audit.c
+       drivers/net/phy/   zx279051.c + zx279051-fullmask.h
+       以及 clk-zx279133.c / gpio-zx279133.c / pinctrl-zx279133.c / pwm-zx279133.c /
+       zx279133_wdt.c / zx279133-pvt.c(hwmon) / zx279133-efuse.c(nvmem) /
+       phy-zx279133-{pon,uni}-serdes.c / spi-zx279133-sfc.c / soc/zte/*-audit.c
+       加上 arch/arm64/boot/dts/zte/zx279133.dtsi + zx279133-sr1010.dts
+       —— 即 cnjn 那套 **ARM64 / ZX279133（SR1010）** 的完整补丁已被搬进这棵 ARM32 的树。
+  2) upstream-series/ 里放着 cnjn 的 16 个补丁原始集（0001~0016，含 0008 MDIO、0013 NPPT 以太网 206KB、
+       0014 LAN conduit + RTL8372N DSA 128KB），另有 COMMITS / ORIGINAL-COMMITS / SERIES / SHA256SUMS。
+  3) **09-27 那次提交改的正是这套驱动的数据面**，说明已经在真机上跑过并踩到坑：
+       zx279133-idm.c（+19 -12）  rx_take_buffer：key 只是 lower_32_bits 摘要，命中键位后必须比对全量 DMA
+                                  （XSK 走 xdp dma、page 走 page_pool dma），不匹配继续探下一槽；
+                                  只有全量命中才拷贝并摘除条目。修的是哈希碰撞/陈旧描述符时错拿在途缓冲、
+                                  留孤儿条目（后续 refill 被 WARN 并计数卡死 → RX 渐进死亡）以及
+                                  XSK union 误回收导致的 use-after-free。
+       zx279133-netdev.c（+12）    start_xmit_common：与 xdp/xsk 路径一致，持 tx_lock 后复查
+                                  tx_prepared / tx_stopping，修 stop/datapath_put 竞态窗口内
+                                  写描述符被 tx_prepare memset 覆盖导致的 skb + DMA 映射泄漏。
+       zx279133-offload.c（+1 -1） flow_stats：has_age 与 has_stat 双缺时 ret 未初始化即返回 → 初始化为 0。
+  4) 但 arch/arm/boot/dts/zte/zx279128s-e2631.dts（4155B）**仍然没有打开** mdio / gephy / pcie /
+     nand / spifc，全都 status="disabled"；cpus 里也只留了 cpu@0，注释写明"原厂上核方式
+     zte,zx279128-smp 尚未移植"。也就是说：驱动搬进来了，但 E2631 的 DT 还没把它们接上去。
+  5) research.md(8.7KB) 是内核版本调研笔记：确认 6.18 是 LTS（2025-11-30 起，EOL 预计 2028-12），
+     6.18.38 是 6.18.y 稳定线的补丁版本，不是 mainline；并强调"源码有 ≠ 构建产物有"，要分三层看。
+
+仓库结构（实际）：完整内核源码树（clone 即构建，无需套补丁）+
+  arch/arm/boot/dts/zte/zx279128s-e2631.dts + arch/arm/configs/zx279128s_e2631_defconfig(17KB) +
+  initramfs-e2631.cpio.gz(4.1MB，已内嵌) + e2631-tools/（tftpd2.py、pack_uimage.py、serial_ctl.py、
+  bootflow2.py、initramfs-src/{init.c,pack2.py}、mkconfig.sh、cleanbuild3.sh、mihomobuild.sh）+
+  build.sh / build.bat / .github/workflows/build.yml（main + v* tag 构建并发 Release）
+
+引导备忘（已实测）
+  上电按 1，密码 5cE080@fyBD（注意与 H3600 的 Boot4128s! 不同），拦住 autoboot
+  setenv ipaddr 192.168.10.66 / serverip <PC>；tftp 0x43000000 uImage-e2631.img；bootm 0x43000000
+  镜像必须加载到 0x43000000（远离 0x40008000 与 0x42000000）——直接加载到入口会走 uImage XIP 路径，
+  64 字节头压在内核入口上 → 静默崩溃
+  编译：make ARCH=arm CROSS_COMPILE=arm-none-linux-gnueabihf- zx279128s_e2631_defconfig → zImage →
+        ⚠ 此三元组名带 `hf`（硬浮点），与本文 §5"用户态一律 soft-float"**自相矛盾**。
+          已实测定案用户态是**软浮点**（见 2.5 三条证据）。此命令要么当时显式带了 -mfloat-abi=soft，
+          要么三元组名需订正（soft-float 的正确写法是 arm-none-linux-gnueabi-）。
+          注：2.2 里那个"软浮点探针 1234.5*0.25+1 x4 = 6.1504"在软/硬浮点下结果相同，
+          **不能**用来判定 ABI —— 判 ABI 要看 ELF e_flags 的 0x200 位。
+         zte/zx279128s-e2631.dtb → cat zImage dtb > zImage-dtb → pack_uimage.py
+  Windows/MSYS2：-j4 上限，arch/arm/Makefile 已强制 -marm，fixdep/gen_init_cpio 带 CRLF 补丁
+
+--------------------------------------------------------------------------------
+2.6 社区侧（恩山论坛，作者 shihy 的发帖与回帖）
+--------------------------------------------------------------------------------
+原帖（2026-08-31）自述："基于 cnjn 的研究，巡天 AX3000 的内核主线也跑起来了，只不过适配了 0 个驱动 …
+  后面我也不会再适配维护（Token 用完了）"；并呼吁"有想给这个系列做 openwrt/immortalwrt 的，
+  可以尝试适配网卡/PHY 驱动、闪存驱动等等（工作量很大）"；实测最高 165Mbps，
+  "CPU 两个核一个拉满一个空闲，玩玩可以，长期会不会爆缸不知道，这货温度本来就高"。
+回帖（2026-09-06）："中兴的 SoC 好像都没有 AES …真的不适合搞海淘"，
+  "telnet 传了个 mihomo 进去测试，只能单核、TUN、CPU 拉满"。
+=> 现实约束很清楚：单核（**是他们那份构建没上 SMP，不是硅片只有单核** —— 原厂固件双核在线、
+   且原厂内核本身就是 SMP 内核：`#2 SMP` / `CONFIG_SMP=y` / `NR_CPUS=2`）+ 无 AES 硬加速
+   + 软浮点 = 科学上网/加密吞吐的天花板很低，
+   这一条不会因为移植进步而改变，是硅层面的。
+
+================================================================================
+3. 交叉比对：现在到底"适配到哪里了"
+================================================================================
+维度                       H3600(OpenWrt 6.18)        E2631(你的树)               差距
+-------------------------  -------------------------  --------------------------  -----------------
+内核启动到 shell           ✅ 6.18 完整               ✅ 6.18.38 已上板           持平
+串口（ZTE 定制 PL011）     ✅ patch 001               ✅ zteuart earlycon          持平
+第二核 SMP                 ✅ platsmp-zx279128s.c      ❌ DT 里只有 cpu@0           差一份 platsmp
+时钟树                     ✅ clk-zx279128s.c(+459)    ⚠️ fixed-clock 占位          可抄
+GPIO / pinctrl             ✅ +78 / pinctrl-single    ❌ 未描述                   可抄
+MDIO                       ✅ mdio-zx279128s.c         ❌ DT disabled（地址相同！）  可抄
+以太网 MAC + PHY           ✅ main.c 1502 行          ❌ 未接（但 zx279133 驱动在树） 移植/改名
+硬件包转发 PPE             ✅ ppe.c 803 行            ❌ 未接                     参考 zx279133-offload.c
+硬件 LAN 交换(switchdev)   ✅ switch.c 354 行         ❌ 未接                     参考 zx279133-rtl8372n.c
+PCIe host (DWC)            ✅ pcie-zx279128s.c 333 行 ❌ DT disabled               可抄
+SPI-NAND / UBI            ✅ spifc + UBI + sysupgrade ❌ 未移植（还有 AES-128-ECB 透明解密） 可抄
+Wi-Fi                     ✅ MT7915D 双频 802.11ax   ❌ PCIe 未通（MT7916 驱动已编入）  通 PCIe 即可
+USB                       ✅ DWC3（H3600 有口）      ⚠️ 驱动已验证但本机无对外口   —
+软件源/生态                ✅ 自建 apk 源、LuCI 包      ❌ 无                        —
+OpenWrt 上游              ⚠️ PR open 未合             ❌ 无 target                 —
+主线内核上游              ⚠️ 24 补丁 RFC 已发        ❌ 无                        —
+
+================================================================================
+4. 对你（E2631）最有价值的 6 件事，按优先级
+================================================================================
+1) **不要再去逆向 tm.ko**。H3600 那条线已经把同一颗 SoC 的以太网 + PPE + 硬件交换写成了可读的 C
+   （zx279128s-main.c / ppe.c / switch.c，共 2.6K 行，patches-6.18/019~020），
+   F670L recon 仓库也把你的项目明确列为"被同一批材料卡住"并公开了 tm.ko/switch.ko 的完整符号表。
+   正确做法：拿 H3600 的驱动当**语义字典**，用 switch.ko 的 214 个具名函数
+   （ethdrv_port_dev_*、ethdrv_set_wanportid、hf_set_l3_entry…）对齐寄存器含义。
+2) **先接 MDIO + PHY，这是最小可验证单元**。MDIO 地址 0x9a101000 在两块板上完全一致、
+   compatible 相同（zte,zx279128s-mdio），你的 DT 里节点都写好了只是 disabled。
+   E2631 的 GPHY 块在 0x9b000000/9b100000/9b200000/9b300000（4 个），PHY 地址需探。
+3) **DT 是当前唯一的真实缺口**。驱动搬进来了（09-27 还在修数据面），但 e2631.dts 里
+   mdio/gephy/pcie/nand/spifc 全 disabled、cpus 只有 cpu@0。
+   照 H3600 的 patches-6.18/025（SoC dtsi 417 行）+026（板级 393 行）改写即可。
+4) **第二核 SMP**：抄 platsmp-zx279128s.c（173 行）——这是把 165Mbps 天花板往上抬的唯一办法，
+   而且你的 DTS compatible 里已经写了 "zte,zx279128-smp"（原厂 enable-method）。
+5) **PCIe 通了才有 Wi-Fi**：MT7916 驱动已编进内核，只差 pcie-zx279128s.c + DT 节点。
+   同时务必一起带上 L2C-310 的设备读串行化（patches 004/005 + mt76 patch 001），
+   否则会复现 mt7915/7916 的 MCU 超时与随机掉卡。
+6) **README 该更新**。它现在写着"有线网络驱动 ❌ 未开始"，但树里已有整套 ZX279133 网络驱动且
+   09-27 修过 3 个真实 bug —— 对外沟通与接手者判断都会被误导。
+
+================================================================================
+5. 风险 / 不可控项（不因为移植进步而消失）
+================================================================================
+· 硬件无 AES 加速 + 软浮点 + 当前移植只跑 1 核（原厂侧双核在线）→ 加密转发/科学上网天花板低（社区实测 165Mbps 上限）。
+· 无 VFP/NEON（原厂 `# CONFIG_VFP is not set` + 用户态 ELF e_flags 带 SOFT_FLOAT 位 + ld-uClibc，
+  2026-10-12 三重实测；并与 08-31 自建 6.18.38 的 Features 行交叉印证）
+  → 用户态一律 soft-float / arm EABI5（zig arm-linux-musleabi 静态编译，或原厂 uClibc 0.9.33.2）。
+  ⚠ 是"软浮点"，**不是 "armv5"** —— ISA 层级是 ARMv7-A。
+· flash 带 AES-128-ECB 透明解密，密钥由 zte_token 派生 —— 一旦要动 NAND 持久化就绕不开，
+  这也是 H3600 那条线之外唯一"必须自己解"的部分。
+· OpenWrt 对"未上游化的新 target"态度明确：维护者原话"chances … extremely low"。
+  即便 H3600 合了，E2631 仍要自己走一遍板级文件 + 上游化，或者就长期挂在自建分支/自建源上。
+· 温度/长期稳定性：社区对这颗 SoC 的评价就是"本来就热"，满载长期跑要自己观察。
+
+================================================================================
+6. 关键链接
+================================================================================
+侦察仓库（材料源）   https://github.com/cubingmucus998/zte-zx279128s-recon
+OpenWrt PR           https://github.com/openwrt/openwrt/pull/25469
+构建分支             https://github.com/ghahramani/openwrt/tree/zte-zxhn-h3600
+主线 RFC（24 补丁）  https://github.com/ghahramani/linux/tree/h3600-linux-rfc
+固件与安装           https://openwrt.style.dev/h3600/
+工程长文             https://ghahremani.medium.com/resurrecting-isp-e-waste-how-an-ai-breakthrough-unlocked-the-hyperoptic-zte-h3600-ported-modern-60e74c87c11e
+你的仓库             https://github.com/Zlion-Y/e2631-mainline-zx279128s
+恩山讨论             https://www.right.com.cn/forum/thread-8487689-1-3.html
+前序工作（UART 逆向/ZX279133 补丁）  https://github.com/cnjn/linux-mainline-zte-zxslc-sr1010

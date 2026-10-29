@@ -1,0 +1,12 @@
+#!/bin/sh
+# Disarm the first-boot auto-revert (/sbin/e2631-trial).
+#
+# /etc is on the jffs2 overlay, so this file survives reboots - which is the
+# point: it has to still be there after a reboot, and its absence is what makes
+# the next boot go back to the stock firmware slot instead.
+touch /etc/e2631-accepted || {
+	echo "e2631-commit: cannot write /etc/e2631-accepted - is the overlay mounted?" >&2
+	exit 1
+}
+sync
+echo "e2631-commit: accepted, the auto-revert is disarmed"

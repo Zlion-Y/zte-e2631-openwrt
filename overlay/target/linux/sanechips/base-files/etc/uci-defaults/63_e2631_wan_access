@@ -1,0 +1,46 @@
+#!/bin/sh
+# WAN-side debug access (2026-10-28, owner request; extended 2026-10-29 with
+# LuCI): the router hangs BELOW the main router in the typical test setup - PC
+# on the main-router LAN, this box's WAN port DHCP'd from it - and the wan zone
+# input rule (REJECT) made the box unreachable from exactly the direction
+# debugging happens. dropbear and uhttpd already listen on every interface;
+# only the firewall blocked them. Accept 22/80/443 from private-range sources
+# on the wan zone.
+#
+# SECURITY, stated plainly: first boot ships an OPEN setup network and NO
+# root password, and both dropbear and LuCI accept empty credentials until one
+# is set - with these rules, anyone on the upstream LAN can root the box
+# (shell or web UI) until you set a password. Set it immediately (System -> Administration), or delete this
+# rule in Network -> Firewall -> Traffic Rules.
+uci -q batch <<-EOF
+	add firewall rule
+	set firewall.@rule[-1].name='Allow-SSH-WAN-Private'
+	set firewall.@rule[-1].src='wan'
+	set firewall.@rule[-1].src_ip='192.168.0.0/16'
+	set firewall.@rule[-1].proto='tcp'
+	set firewall.@rule[-1].dest_port='22'
+	set firewall.@rule[-1].target='ACCEPT'
+	add firewall rule
+	set firewall.@rule[-1].name='Allow-SSH-WAN-CGNAT'
+	set firewall.@rule[-1].src='wan'
+	set firewall.@rule[-1].src_ip='10.0.0.0/8'
+	set firewall.@rule[-1].proto='tcp'
+	set firewall.@rule[-1].dest_port='22'
+	set firewall.@rule[-1].target='ACCEPT'
+	add firewall rule
+	set firewall.@rule[-1].name='Allow-HTTP-WAN-Private'
+	set firewall.@rule[-1].src='wan'
+	set firewall.@rule[-1].src_ip='192.168.0.0/16'
+	set firewall.@rule[-1].proto='tcp'
+	set firewall.@rule[-1].dest_port='80'
+	set firewall.@rule[-1].target='ACCEPT'
+	add firewall rule
+	set firewall.@rule[-1].name='Allow-HTTPS-WAN-Private'
+	set firewall.@rule[-1].src='wan'
+	set firewall.@rule[-1].src_ip='192.168.0.0/16'
+	set firewall.@rule[-1].proto='tcp'
+	set firewall.@rule[-1].dest_port='443'
+	set firewall.@rule[-1].target='ACCEPT'
+	commit firewall
+EOF
+exit 0

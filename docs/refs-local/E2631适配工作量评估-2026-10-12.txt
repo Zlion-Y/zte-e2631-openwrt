@@ -1,0 +1,230 @@
+================================================================================
+ZTE ZXHN E2631（国内巡天 AX3000）主线/OpenWrt 适配工作量评估
+日期：2026-10-12
+基线：Zlion-Y/e2631-mainline-zx279128s @ main
+================================================================================
+
+【零、结论】
+
+工作量：不大。远小于"从零适配一颗无资料的国产 SoC"。
+
+理由只有一条，但足够决定性：
+    H3600 那个 OpenWrt PR 的驱动，是给 ZX279128S（Cortex-A9）写的，
+    跟 E2631 是【同一个 SoC、同一个 CPU 核】—— 不是"同家族"，是精确同型号。
+    E2631 又已经把内核跑到 busybox shell 了。
+    两块地基都在，剩下的是板级设备树 + 校准 + 集成，不是驱动开发。
+
+一句话概括难度分布：
+    "能不能跑" 已经不是问题；"能不能刷进去并保存" 才是问题。
+    全部工作量里，约七成集中在 NAND 写入 + AES 透明解密这一件事上。
+
+
+【一、三条决定工作量的事实（本条最重要）】
+
+1) 驱动层几乎零工作量 —— 因为型号精确相同，不是"类似"
+
+   H3600  PR #25469 的驱动（全部以 zx279128s 命名，非 zx279133）：
+     platsmp-zx279128s.c(+173)     第二核
+     clk-zx279128s.c(+459)         时钟
+     gpio-zx279128s.c              GPIO
+     zx279128s-main.c(+1502)       以太网主体
+     zx279128s-ppe.c(+803)         硬件转发
+     zx279128s-switch.c(+354)      switchdev
+     mdio-zx279128s.c              MDIO
+     phy/sanechips.c               GPHY
+     pcie-zx279128s.c(+333)        PCIe host
+     spi-zx279128s-spifc.c         SPI-NAND 控制器
+     + patches-6.18/ 27 个补丁
+
+   E2631 的 DT compatible 里已经写着 "zte,zx279128s-mdio"，
+   与 H3600 的 compatible 字符串【完全一致】。MDIO 连地址都一样（0x9a101000）。
+   这些驱动不需要你写，只需要搬 + 接线。
+
+2) 一个必须纠正的坑：E2631 仓库树里那套 zx279133 驱动，不是给这颗芯片的
+
+   drivers/net/ethernet/zte/ 下有 15 个 zx279133-*.c（约 353KB，1.1 万行），
+   来自 cnjn 的 ZX279133 项目。但：
+
+     ZX279133  = 双核 Cortex-A53（SR1010 星云MAX、BE5100/BE6800/BE7200）
+     ZX279128S = 双核 Cortex-A9  @1GHz（H3600、F670L、E2631）
+
+   架构不同（A53 vs A9）。E2631 实测日志里 CPU ID = 0x414fc091，是 Cortex-A9。
+   所以这套 zx279133 驱动【只能当同代 IP 的控制器写法参考】，不能直接当成品用。
+   真正能直接用、且完全同 SoC 的，是 H3600 PR 里那套 zx279128s 驱动。
+   （README 把它标成"参考"是对的；但别误以为"树里有网络驱动了"。）
+
+   附带情报：cnjn 已在 2026-10-11 发布 SR1010 的 ImmortalWrt 25.12 + Linux 6.18，
+   可与原厂互刷。这是国内中兴自研 SoC 上 OpenWrt 的第二个成功案例，
+   说明这条路走得通，且他踩过的坑（UART 寄存器布局、periphid 0x001feffe）
+   你已经在他的补丁里直接受益。
+
+3) 已经完成的部分比 README 写的多
+
+   README 的进度表是 2026-08-31 的，已过期。实测已完成：
+     ✅ 主线 6.18.38 启动到交互式 busybox shell（真机日志在仓库里）
+     ✅ ZTE 定制 PL011 串口（earlycon=zteuart,0x94404000）
+     ✅ L2C-310 / GIC / 全局定时器 / 单核运行
+     ✅ mihomo 全套内核特性内建并验证（TUN / TPROXY / nftables / zram / overlayfs）
+     ✅ 软浮点用户态跑通（2026-10-12 定案：硬约束是**软浮点/arm EABI5**；ISA 是 ARMv7-A，非 armv5）
+     ✅ DT 骨架（CPU / GIC / PL310 / 双串口）
+     ✅ 引导流程工具链（tftpd2.py / pack_uimage.py / bootflow2.py + CI 出 Release）
+
+   DT 里已描述但 status="disabled" 的：NAND、SPIFC、PCIe、MDIO、GEPHY。
+   —— 节点都写好了，只是没接线。这就是"设备树活"的典型形态。
+
+
+【二、分层工作量（从易到难）】
+
+L0  内核启动到 shell .................... 已完成   真机实测
+L1  双核 SMP ............................ 小       抄 platsmp-zx279128s.c(+173) + patch 007
+L2  有线网络 4×GbE ...................... 中       MDIO + GPHY + GMAC 接线与对齐
+L3  PCIe + Wi-Fi 6 ...................... 中       PCIe host + 必带 L2C 串行化补丁
+L4  NAND 读取 ........................... 小到中   SPIFC 控制器
+L5  NAND 写 + AES + 双槽 sysupgrade ..... 大       ★ 唯一硬骨头
+L6  OpenWrt target 集成 ................. 小到中   target 目录 + platform.sh + LuCI
+L7  LED / 按键 / 时钟校准 ............... 小       收尾
+
+--- L1 双核 SMP（小）---
+现在只起了 1 核（日志："smp: Brought up 1 node, 1 CPU"）。
+H3600 的 platsmp-zx279128s.c 只有 173 行，配套 patch 007，参考 patch 004。
+这是把"单核 165Mbps"天花板抬上去的前提，优先级高、成本低。
+
+--- L2 有线网络（中）---
+E2631 是 4 口全内置 GPHY（H3600 是 4 LAN 内置 + 1 WAN 外置 ZX5201，结构略不同）。
+DT 里要做的事：
+  · mdio@9a101000 从 disabled 改 okay（地址与 H3600 一致，直接抄）
+  · GEPHY 挂到 mdio 下（H3600 的 SoC dtsi 里【没有】gephy@9b000000 这个节点，
+    内置 PHY 是直接作为 mdio 子节点描述的，LAN = 地址 10~13）
+    → 建议删掉 E2631 DT 里那个 gephy 节点，照 H3600 的写法挂
+  · 补 gmac 节点（0x92000000，H3600 也是这个地址）
+  · MAC 地址来源位置要对（H3600 读 flash tag 分区 @0x1e 6 字节）
+
+--- L3 PCIe + Wi-Fi（中）---
+E2631 无线是 MT7916 + MT7976（H3600 是 MT7915D）。
+好消息：驱动同为 mt7915e，只需换 firmware 与校准数据（EEPROM/OTP）。
+PCIe 部分必须注意（这是 H3600 作者花了最久的地方）：
+  ★ L2C-310 不会 snoop PCIe bus-master。MT7916 DMA 写完状态字，
+    外层 L2 写缓冲还没排到 DDR3，CPU 就执行 MMIO 读 → 读到过期状态
+    → 判定 MCU 死亡 → 拉掉 PCIe 链。
+    修法：outer_sync(); mb();  （对应 patches 004 / 005）
+    不带这两个补丁上 PCIe，mt7916 必现超时掉卡。
+  · 顺带：2.4G 射频是 MT7976，5G 也是同一套片，校准数据要从原厂分区里捞。
+
+--- L4 NAND 读取（小到中）---
+E2631 真机日志确认：SPI NAND，AMD/Spansion HYF1GQ4UTACAE 128MiB，
+Manu ID 0x01 / Chip ID 0x15，走 spifc@94406000。
+H3600 是 HYF1GQ4UDACAE —— 同系列同容量，型号只差一个字母（U**T**ACAE vs U**D**ACAE）。
+H3600 有 spi-zx279128s-spifc.c，读取这条路是通的。
+（注意：DT 里那个 nand@d80000 / zx279128s-denali-nand 节点应当删掉，是误写。）
+
+--- L5 NAND 写 + AES + 双槽 sysupgrade（大）★ 真正的门槛 ---
+这是全部工作量的重心，也是"国内版"最独特的地方。
+  · 原厂 flash 分区带 AES-128-ECB 透明解密，密钥由 zte_token 派生
+  · 分区布局是双槽 A/B（kernel1 / kernel2 / rootfs / usercfg / middleware / parameter tags）
+  · 要刷写并保存，绕不开解密这条链
+  · 但注意：这条链【只影响"写 flash 持久化"】，不影响"能不能跑"。
+    内核走 TFTP 加载进 RAM 运行，完全不碰 flash。
+  → 策略建议：先不做。用 RAM 引导把 L1~L4 全部验证完，
+    最后再决定是否啃 L5。若只想要一台能跑 mihomo 的机器，
+    RAM 引导 + 外挂存储 已经够用。
+  → 若要做：先 cat /proc/mtd 把原厂分区表拉出来（写 DT 直接要用）。
+
+--- L6 OpenWrt 集成（小到中）---
+在 H3600 那个 sanechips target 里加 Device/zte_zxhn-e2631：
+  · 改 memory 节点（E2631 是 256MB，DT 现在写 128MB，该改成 0x10000000）
+  · 分区表
+  · 复用 patch 025 的 zx279128s.dtsi（397 行 SoC 级）
+  · 复用 patch 026 的板级模板（361 行）
+  · 复用 Build/zte-slot-marker（32 字节槽头）与双槽 platform.sh
+注意 H3600 的 reserved-memory 里有 pp@5da00000（38MB PP 区），
+E2631 只有 256MB，0x5da00000 物理不存在，必须删掉或重算。
+
+--- L7 收尾（小）---
+LED / 按键 GPIO 只能物理试（H3600 作者也是这么做的）；
+时钟树现在用 fixed-clock 占位，必要时逐个校准。
+
+
+【三、"国内"这一限定额外带来什么】
+
+E2631 本身是中兴国内零售版（巡天 AX3000），同硬件还有：
+  E2633 = 中国移动定制、E1630 = 中国电信、E2627/E2637 = 联通线
+硬件基本一致，差异在分区表、运营商中间件、Web 定制。
+
+国内版相比 H3600（英国 Hyperoptic 定制）多出来的负担：
+
+  1. flash 分区 AES-128-ECB 透明解密 + zte_token 密钥派生
+     → 落在 L5，只影响刷写保存。这是唯一"国内特有"的额外项。
+     → 参考：中兴光猫/路由的配置分区也是 AES-128-CBC，
+        密钥由 SN + MAC + 固件版本派生，不同批次设备密钥不同。
+        ZX279128S 固件解密在 2023 年已有公开研究（看雪论坛 XYUU 帖）。
+
+  2. 运营商定制版（E2633/E1630/E2637）比零售版更麻烦：
+     TR-069 远控、regioncode 省份码、中间件分区。
+     如果是零售 E2631，这一层可以整个跳过。
+
+  3. 用户态生态：必须**软浮点 / arm EABI5**（armel）。
+     已实测定案（2026-10-12 真机三条独立证据）：原厂内核 `# CONFIG_VFP is not set`；
+     原厂 `/bin/busybox` 的 ELF `e_flags=0x05000202`（含 EF_ARM_ABI_FLOAT_SOFT 位）；
+     加载器 `/lib/ld-uClibc-0.9.33.2.so`。
+     OpenWrt 官方包要为本 target 重新编 —— 本 target 的 FEATURES 里没有 `fpu`，
+     出来的本来就是 soft-float，**正合要求，不必特意去"选 armv5 目标"**；
+     或用 zig arm-linux-musleabi 静态编译。
+     —— 硬约束是"**软浮点**"，**不是 "armv5"**（本机 CPU 是 ARMv7-A，
+        `-march=armv5te` 只是兼容性选择）。这一条不会因为移植进步而消失。
+
+  4. 不算负担的一条：国内没有 OpenWrt 现成支持，但
+     cnjn（SR1010）和 H3600 作者（英国）两条线已经把资料摊开了，
+     加上 F670L 侦察仓库的 8 个原厂模块（tm.ko / switch.ko 符号表完整），
+     资料面反而比一年前厚得多。
+
+
+【四、建议的执行顺序】
+
+第 0 步（今天就能做，零风险）
+    在你的 E2631 上 telnet 进去执行：cat /proc/mtd
+    把原厂分区表录下来 —— 写 DT、做 L5 都要用。
+    顺手把 /proc/mtd 每段大小和名字存好。
+
+第 1 步（低风险，高收益）
+    补 L1：双核 SMP。抄 173 行 + patch，立刻把单核天花板去掉。
+
+第 2 步（主战场）
+    补 L2：MDIO + GPHY 接线，把有线网络打通。这是第一个真里程碑。
+    不要再自己逆向 tm.ko —— 用 H3600 的 zx279128s-main.c/ppe.c/switch.c
+    （2.6K 行可读 C）当语义字典，用 F670L 仓库 switch.ko 的 214 个具名函数对齐寄存器含义。
+
+第 3 步
+    补 L3：PCIe + Wi-Fi。004/005 补丁必须一起带，否则必掉卡。
+
+第 4 步
+    补 L6：在 sanechips target 里加 E2631 device，出 initramfs，
+    TFTP 验证（不写 flash，零风险）。
+
+第 5 步（可选，最硬）
+    啃 L5：NAND 写 + AES。若目标只是"跑 mihomo"，可以不做。
+
+
+【五、三条不会因为移植进步而改变的硬约束】
+
+  1. 用户态必须软浮点 / arm EABI5（原厂内核 `# CONFIG_VFP is not set`；ELF e_flags 带 SOFT_FLOAT 位）
+     —— 硬约束是"**软浮点**"，**不是 "armv5"**（本机 ISA 是 ARMv7-A，见【三】第 3 条）
+  2. 没有 AES 硬加速 → 加密类负载（mihomo 等）单核性能封顶
+  3. flash 分区 AES 透明解密（密钥由 zte_token 派生）—— 动 NAND 持久化就绕不开
+
+
+【六、风险提示（沿用既有硬规则）】
+
+  · 没验证 TFTP 引导前，绝不刷 flash。RAM 引导免费，刷写不是。
+  · 镜像必须加载到 0x43000000，加载到 0x40008000 会走 uImage XIP 路径，
+    64 字节头压在内核入口上 → 静默崩溃（你的仓库已记录）。
+  · 测试镜像只进非活动 A/B 槽，且要在有 UART 兜底之后。
+  · 别把 H3600 的 sysupgrade.bin 直接刷进 E2631：
+    board_name 校验会拒；-F 强刷会按 H3600 分区表把 UBI 写到 0x4700000 长 57MB，
+    那是 E2631 原厂 B 槽 + 配置区 → 砖，且原厂回不去。
+
+
+================================================================================
+结论复述：这是一份"设备树 + 校准 + 集成"的活，不是"写驱动"的活。
+地基（内核 + 驱动）已经由 H3600 那条线打完，而且是同型号同 CPU 核。
+唯一需要真正投入的是 NAND 写入链（AES + 双槽），而它是可选的。
+================================================================================

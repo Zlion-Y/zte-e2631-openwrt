@@ -1,0 +1,47 @@
+#!/bin/sh
+# First-boot safety net for this port -- ARMED ONLY ON REQUEST.
+#
+# cspboot chooses a slot by comparing the serial numbers in the version headers; it has no
+# idea whether the image it started actually works.  So an OpenWrt that boots but cannot be
+# reached would stay in charge forever, and the only way back to the stock slot would be
+# opening the case.  That is what this script is for: unless the image is accepted, hand the
+# boot back (e2631-commit writes the acceptance file; /etc is on the jffs2 overlay so it
+# survives reboots).
+#
+# It is NOT the default any more.  Shipping it armed meant every flashed box fell back to
+# stock firmware ten minutes later unless someone thought to run e2631-commit -- and "why did
+# it go back to stock on its own?" is a worse first experience than the risk it protects
+# against, especially while the only thing this image promises is wired LAN plus a manually
+# started radio.  To get the auto-revert back:
+#     touch /etc/e2631-trial-arm
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+TRIAL_TIMEOUT=${TRIAL_TIMEOUT-600}
+CONFIRM=${CONFIRM-/etc/e2631-accepted}
+ARM=/etc/e2631-trial-arm
+
+[ -f "$CONFIRM" ] && exit 0
+
+if [ ! -f "$ARM" ]; then
+	echo "e2631-trial: disarmed (no $ARM) - this image keeps the boot; run e2631-commit to record acceptance"
+	exit 0
+fi
+
+echo "e2631-trial: this boot is a trial - run e2631-commit within ${TRIAL_TIMEOUT}s to keep it"
+
+left=$TRIAL_TIMEOUT
+while [ "$left" -gt 0 ] && [ ! -f "$CONFIRM" ]; do
+	sleep 5
+	left=$((left - 5))
+done
+
+if [ -f "$CONFIRM" ]; then
+	echo "e2631-trial: accepted, staying"
+	exit 0
+fi
+
+echo "e2631-trial: nobody accepted it, handing the boot back to the stock slot"
+if e2631-fwslot switch; then
+	reboot
+else
+	echo "e2631-trial: the switch failed, staying put - fix it by hand"
+fi

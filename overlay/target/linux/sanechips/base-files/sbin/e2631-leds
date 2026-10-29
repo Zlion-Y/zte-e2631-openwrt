@@ -1,0 +1,84 @@
+#!/bin/sh
+# Drive the tri-colour lamp from what the box is actually doing.
+#
+# Stock firmware semantics (from its manual) are kept where they are worth
+# keeping and deliberately broken where being different is more useful:
+#
+#   booting            red   blink slow   (user request: slower than the 200 ms stock)
+#   up, no default route  red  solid      (stock: same)
+#   up, internet route    green solid    (user request: steady, not the slow
+#                                            pulse it used to be)
+#   flashing a slot       blue  blink fast (stock: all three blink)
+#
+# The channels are named <function>:<color> by the LED core, so they are looked
+# up by colour: the DTS uses LED_FUNCTION_STATUS for red/blue and
+# LED_FUNCTION_WAN_ONLINE for green, and renaming a function must not break this
+# script. All three are active-low, which the LED core already inverts.
+. /lib/functions.sh
+
+up_ms=600
+off_ms=600
+pulse_on=0
+pulse_off=0
+
+find_led() {
+	local want=$1 l
+	for l in /sys/class/leds/*; do
+		case "${l##*/}" in
+		*":$want"|"$want":*) echo "$l"; return 0 ;;
+		esac
+	done
+	return 1
+}
+
+state() { # <led dir> on|off|blink|pulse
+	local led=$1 mode=$2
+	[ -d "$led" ] || return 0
+	case "$mode" in
+	on)
+		echo none > "$led/trigger"
+		cat "$led/max_brightness" > "$led/brightness" 2>/dev/null || echo 255 > "$led/brightness"
+		;;
+	off)
+		echo none > "$led/trigger"
+		echo 0 > "$led/brightness"
+		;;
+	blink)
+		echo timer > "$led/trigger"
+		echo "$up_ms" > "$led/delay_on"
+		echo "$off_ms" > "$led/delay_off"
+		;;
+	pulse)
+		echo timer > "$led/trigger"
+		echo "$pulse_on" > "$led/delay_on"
+		echo "$pulse_off" > "$led/delay_off"
+		;;
+	esac
+}
+
+red=$(find_led red)
+green=$(find_led green)
+blue=$(find_led blue)
+
+upgrading() {
+	[ -e /tmp/.e2631-upgrade ] && return 0
+	pidof e2631-fwslot >/dev/null 2>&1 && return 0
+	pidof sysupgrade >/dev/null 2>&1
+}
+
+# A default route is the cheapest honest signal that the WAN side works; netifd
+# only installs one once the wan interface has a lease and has been probed.
+online() { ip route show default 2>/dev/null | grep -q 'via' ; }
+
+while :; do
+	if upgrading; then
+		state "$red" off; state "$green" off; state "$blue" blink
+	elif online; then
+		state "$red" off; state "$green" on; state "$blue" off
+	elif [ "$(cut -d' ' -f1 /proc/uptime | cut -d. -f1)" -lt 45 ]; then
+		state "$red" blink; state "$green" off; state "$blue" off
+	else
+		state "$red" on; state "$green" off; state "$blue" off
+	fi
+	sleep 2
+done

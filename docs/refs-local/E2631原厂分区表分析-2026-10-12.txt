@@ -1,0 +1,308 @@
+================================================================================
+⚠⚠ 本文档的分区偏移列**已作废**（2026-10-12 二次定案）⚠⚠
+--------------------------------------------------------------------------------
+本文第三节的"offset/end"两列 = 把 /proc/mtd 的**尺寸累加**得来的 —— 而 /proc/mtd
+根本没有偏移列。实测证明该假设错误：内核**内建分区表**（vmlinux 偏移 0x432358）
+给出的真值是 kernel1=28M@0x700000、kernel2=28M@0x2300000、rootfs=(0,0) 占位符、
+UNIFIED@0x6E00000、UUPlugin@0x6F00000、DPIPlugin@0x7400000、JDXBPLUGIN@0x7700000、
+owdptsbin@0x7900000、status@0x7A00000（其中三处已用真机字节比对命中）。
+**"槽 B 与国内插件分区重叠"是被这个假偏移制造出来的，实际不存在。**
+本文仍可作为"E2631 与 H3600 前 7MB 分区表逐项一致"的参考，但**务必不要用它的偏移列**。
+权威版本见：《E2631分区真实落点定案-2026-10-12.txt》(第 2 版)。
+================================================================================
+
+ZTE ZXHN E2631（国内零售版）原厂 flash 分区表分析
+日期：2026-10-12
+数据来源：真机 admin shell 执行 cat /proc/mtd（A 级证据）
+固件 shell：BusyBox v1.17.2 (2025-09-25 21:57:20 CST)
+================================================================================
+
+【零、最重要的发现】
+
+E2631 与 H3600 的分区表，**前 7MB 逐项完全一致**：
+
+    bootloader  0x0000000 + 0x0100000   (1MB)   ← 完全相同
+    tag         0x0100000 + 0x0100000   (1MB)   ← 完全相同
+    wifi        0x0200000 + 0x0100000   (1MB)   ← 完全相同
+    usercfg     0x0300000 + 0x0200000   (2MB)   ← 完全相同
+    defcfg      0x0500000 + 0x0200000   (2MB)   ← 完全相同
+
+不只是"名字都叫 tag/wifi"——是**起始偏移和长度都一模一样**。
+这说明两台机器跑的是同一套 ZTE 固件框架、同代 SDK，"前段布局"可以直接照抄 H3600 的 DTS。
+
+从 kernel 开始两者分道扬镳：
+    E2631  = 组件化扁平分区（14 个，每个功能一个分区）+ 尾部 80MB 没用
+    H3600  = 整槽 A/B（各 32MB）+ 尾部 57MB UBI
+
+这对你是个**大利好**：照抄的部分正好是最容易写错的部分（tag/wifi 的偏移）。
+
+
+【一、E2631 完整分区表（含换算）】
+
+dev     name          size         offset       end
+-----   -----------   ----------   ----------   ----------
+mtd0    Whole flash   128.000MB    0x00000000   0x08000000
+mtd1    Bootloader      1.000MB    0x00000000   0x00100000
+mtd2    tag             1.000MB    0x00100000   0x00200000
+mtd3    wifi            1.000MB    0x00200000   0x00300000
+mtd4    usercfg         2.000MB    0x00300000   0x00500000
+mtd5    defcfg          2.000MB    0x00500000   0x00700000
+mtd6    kernel1         3.250MB    0x00700000   0x00A40000
+mtd7    kernel2         3.250MB    0x00A40000   0x00D80000
+mtd8    rootfs         18.125MB    0x00D80000   0x01FA0000
+mtd9    UUPlugin        5.000MB    0x01FA0000   0x024A0000
+mtd10   owdptsbin       0.625MB    0x024A0000   0x02540000
+mtd11   status          5.000MB    0x02540000   0x02A40000
+mtd12   DPIPlugin       3.000MB    0x02A40000   0x02D40000
+mtd13   UNIFIED         1.000MB    0x02D40000   0x02E40000
+mtd14   JDXBPLUGIN      1.500MB    0x02E40000   0x02FC0000
+-----   -----------   ----------   ----------   ----------
+合计已分配           47.750MB    结束于       0x02FC0000
+未分配               80.250MB    0x02FC0000   0x08000000
+
+擦除块 erasesize = 0x20000 = 128KB（所有分区均为整数倍，无异常）
+
+**注意 mtd0 的偏移基准**：mtd1 (Bootloader) 的 offset 是 0x00000000，
+说明这张表是按"芯片物理绝对地址"排的，mtd1 就是 flash 的 0x0。
+写 DTS 时 reg 直接填上表 offset 即可。
+
+
+【二、与 H3600 的逐项对照】
+
+                E2631                          H3600
+--------------  ---------------------------    ----------------------------
+bootloader      0x0000000 + 1MB                0x0000000 + 1MB      ← 同
+tag             0x0100000 + 1MB                0x0100000 + 1MB      ← 同
+wifi            0x0200000 + 1MB                0x0200000 + 1MB      ← 同
+usercfg         0x0300000 + 2MB                0x0300000 + 2MB      ← 同
+defcfg          0x0500000 + 2MB                0x0500000 + 2MB      ← 同
+kernel          0x0700000 + 3.25MB ×2          0x0700000 + 4MB      ← 起点同，长度不同
+(slot0 全长)    ——                            0x0700000 ~ 0x2700000 (32MB)
+slot0_gap       —— (无此概念)                  0x0B00000 + 27MB
+trailer         —— (无此概念)                  0x2600000 + 1MB
+stock/slot1     kernel2 @0x0A40000 + 3.25MB    0x2700000 + 32MB (只读)
+rootfs          0x0D80000 + 18.125MB (单分区)  —— (H3600 的 rootfs 在 UBI 里)
+国内插件        6 个分区共 16.125MB             —— (完全没有)
+ubi             —— (无)                        0x4700000 + 57MB
+尾部空闲        80.250MB                       0 (全用满)
+
+关键结构差异：
+  · H3600 是"整槽 A/B"：槽间距 32MB（0x700000 / 0x2700000），
+    槽内 = kernel 4MB + 27MB gap + 1MB trailer。
+    槽起始地址是 cspboot 的扫描锚点，作者特意写注释说要保住这两个头。
+  · E2631 是"组件化"：kernel1/kernel2 各 3.25MB（间距 0x340000），
+    rootfs 独立一个 18.125MB，其余全是功能分区。
+  → **两者不能共用同一份 partition 节点，也不能共用同一份 platform.sh。**
+     H3600 的双槽 sysupgrade 逻辑对 E2631 不适用（槽布局根本不同）。
+
+
+【三、必须立刻做的两件备份（最高优先级）】
+
+这两个分区是设备的**唯一身份与校准数据**，一旦损坏，Wi-Fi 报废且无法恢复：
+
+  mtd2 "tag"   1MB  —— MAC 地址、SN、板级参数
+                        （H3600 是在 +0x1e 处读 6 字节 MAC，E2631 待验证）
+  mtd3 "wifi"  1MB  —— **MT7916/MT7976 的 Wi-Fi 校准数据（EEPROM/OTP）**
+                        → 这就是之前说的"换 firmware + 校准数据"里的那份数据，
+                          就在这个分区里，不用另找。
+
+建议连带 bootloader 一起备份（1MB，用于分析 cspboot 扫描逻辑）：
+
+    dd if=/dev/mtd2 of=/tmp/tag.bin
+    dd if=/dev/mtd3 of=/tmp/wifi.bin
+    dd if=/dev/mtd1 of=/tmp/bootloader.bin
+
+然后用你已有的 telnet 拉回本机（busybox 环境，参考既有的 TFTP/HTTP POST 拉取流程）。
+**在做任何刷写动作之前，先把这三个文件拿到手。**
+
+
+【四、识别出的"国内特供"分区（H3600 完全没有）】
+
+这三个分区是纯商业插件，对 OpenWrt 没有价值，但**占了 9.5MB**：
+
+  mtd9   UUPlugin     5.000MB   命名推测与网易 UU 加速器相关（待确认，标为推测）
+  mtd12  DPIPlugin    3.000MB   DPI = 深度包检测插件
+  mtd14  JDXBPLUGIN   1.500MB   命名含义待确认
+  ------ 合计 9.500MB
+
+另外几个非标准分区：
+  mtd10  owdptsbin    0.625MB   含义待确认
+  mtd11  status       5.000MB
+  mtd13  UNIFIED      1.000MB
+
+**这三条 + 80.25MB 空闲，就是国内版相比英国版"多出来"的实质差异。**
+之前我推测"国内特有的负担是 AES 加密"——现在看，更具体、更直观的负担是
+**这套组件化的国内分区结构**：H3600 那套整槽 + UBI 的现成方案在这里一行都用不上。
+
+对适配而言，好消息是这部分是**可回收的**（见第六节）。
+
+
+【五、一个必须提前解决的工程约束：kernel 分区只有 3.25MB】
+
+    E2631 的 kernel1 分区 = 0x340000 = 3.25MB
+    而你仓库里已实测的 uImage-e2631.img = 13,328,020 字节 ≈ 12.7MB（未压缩）
+
+差 4 倍。原因：那个 uImage 里**内嵌了 initramfs**（README 明确写了
+initramfs-e2631.cpio.gz 内嵌），不是纯内核。
+
+两条路：
+
+  方案 A（推荐，不动锚点）
+      做正式 OpenWrt（kernel 与 rootfs 分离，不用 initramfs），
+      内核压缩（gzip/lzma）后大概率能进 3.25MB —— 但必须实测确认。
+      这是最安全的做法，因为 cspboot 的两个扫描锚点（0x700000 / 0xA40000）原封不动。
+
+  方案 B（扩分区）
+      把 kernel1 扩大、后续分区后移。
+      **前提**：必须先确认 cspboot 没把 0xA40000 硬编码为 slot1 锚点。
+      若它是顺序扫描（H3600 的描述是"scan"），扩分区可行；
+      若硬编码，扩 kernel1 就会让 slot1 头找不着 → 变砖。
+      → 这个要用备份出来的 bootloader.bin 反汇编确认，别猜。
+
+在没确认之前，**按方案 A 走**，不要动 0x700000 / 0xA40000 这两个地址。
+
+
+【六、可回收空间盘点】
+
+如果要做 OpenWrt，可用空间比想象中大得多：
+
+    尾部未分配                     80.250MB   ← 纯白送
+    国内插件区（UU/DPI/JDXB 等 6 个） 16.125MB   ← 可回收
+    原厂 rootfs（若不用原厂系统）    18.125MB   ← 可回收
+    ------------------------------------------
+    最大可回收                    114.500MB
+
+对比 H3600 的 UBI 只有 57MB —— **E2631 的条件其实比 H3600 更好**。
+128MB flash 只用了 47.75MB，剩下的够放一个 20MB 的 OpenWrt rootfs
+加一个 90MB 的 overlay 还有富余。
+
+保守策略（建议先用这个）：全部原厂分区标 read-only 保留，OpenWrt 只用尾部空闲区。
+激进策略（验证通过后再考虑）：回收插件区 + rootfs 区，扩大 ubi。
+
+
+【七、DTS 分区节点该怎么写（照抄 H3600 到 defcfg，之后自己接）】
+
+前 5 个分区直接抄 H3600 的写法（偏移/长度/read-only 全一致），
+tag 里的 nvmem-layout 也照抄（MAC 在 +0x1e 6 字节，E2631 待实测验证）：
+
+    partitions {
+        compatible = "fixed-partitions";
+        #address-cells = <1>;
+        #size-cells = <1>;
+
+        partition@0 {
+            label = "bootloader";
+            reg = <0x0000000 0x0100000>;
+            read-only;
+        };
+
+        partition@100000 {
+            label = "tag";
+            reg = <0x0100000 0x0100000>;
+            read-only;
+            nvmem-layout {
+                compatible = "fixed-layout";
+                #address-cells = <1>;
+                #size-cells = <1>;
+                /* LAN 口 MAC；WAN 用下一个 —— 偏移 +0x1e 需在 E2631 上验证 */
+                macaddr_tag_1e: macaddr@1e {
+                    compatible = "mac-base";
+                    reg = <0x1e 0x6>;
+                    #nvmem-cell-cells = <1>;
+                };
+            };
+        };
+
+        partition@200000 {
+            label = "wifi";
+            reg = <0x0200000 0x0100000>;
+            read-only;
+        };
+
+        partition@300000 {
+            label = "usercfg";
+            reg = <0x0300000 0x0200000>;
+            read-only;
+        };
+
+        partition@500000 {
+            label = "defcfg";
+            reg = <0x0500000 0x0200000>;
+            read-only;
+        };
+
+        partition@700000 {
+            label = "kernel";
+            reg = <0x0700000 0x0340000>;
+        };
+
+        partition@a40000 {
+            label = "kernel2";          /* cspboot slot1 锚点，不要挪 */
+            reg = <0x0a40000 0x0340000>;
+        };
+
+        partition@d80000 {
+            label = "rootfs";
+            reg = <0x0d80000 0x1220000>;
+        };
+
+        /* 保守方案：原厂插件区 + 未分配区一起做成 ubi，
+           0x8000000 - 0x1FA0000 = 0x6060000 = 96.375MB */
+        partition@1fa0000 {
+            label = "ubi";
+            reg = <0x1fa0000 0x6060000>;
+        };
+    };
+
+（写进 E2631 的 DT 时，记得同时删掉仓库里那个
+  nand@d80000 / zx279128s-denali-nand 节点 —— 那是误写，真机是 SPI NAND 走 spifc@94406000）
+
+
+【八、下一步取证命令（可直接复制到原厂 shell 执行）】
+
+优先级从高到低，全部只读、零风险：
+
+1) 【最重要】看原厂 rootfs 到底挂载成什么文件系统
+       mount
+       cat /proc/mounts
+   → 这一条命令就能判定 rootfs 是 squashfs / ubifs / jffs2，
+     也顺便看出 overlay 机制和 usercfg/status 的用法。信息密度最高。
+
+2) 看 rootfs 分区的头部 magic（判断有无加密/压缩）
+       dd if=/dev/mtd8 bs=1 count=256 2>/dev/null | hexdump -C
+   判定：
+       68 73 71 73  = "hsqs" → squashfs 小端
+       55 42 49 23  = "UBI#"  → UBI 容器
+       85 19        → jffs2
+       全是随机字节 → 可能被加密/压缩
+
+3) 看 tag 分区头部，定位 MAC 和 SN
+       dd if=/dev/mtd2 bs=1 count=256 2>/dev/null | hexdump -C
+
+4) 看外部内核里有没有残留的分区信息
+       cat /proc/cmdline
+       cat /proc/partitions
+
+5) 确认 WiFi 校准数据在 wifi 分区里的位置（做 Wi-Fi 时要用）
+       dd if=/dev/mtd3 bs=1 count=512 2>/dev/null | hexdump -C
+
+6) 备份三件套（见第三节），并拉回本机
+
+
+【九、风险提示（不变）】
+
+  · 备份 tag / wifi / bootloader 之前，不要做任何 flash 写操作。
+  · 不要用 H3600 的 sysupgrade.bin 刷 E2631：
+    board_name 校验会拒；-F 强刷会按 H3600 分区表写到 E2631 的插件/配置区 → 砖。
+  · 不要动 0x700000 / 0xA40000 两个 kernel 槽起始地址，那是 cspboot 的锚点。
+  · 内核加载地址仍用 0x43000000（TFTP 引导时）。
+
+
+================================================================================
+一句话总结：
+    分区表证明了 E2631 与 H3600 是同一套固件框架的产物（前 7MB 完全一致），
+    所以前段 DTS 可以直接抄；差异全在后段 —— H3600 是整槽+UBI，
+    E2631 是组件化分区 + 80MB 没用满。
+    而那个"用不满"恰恰是好事：可回收 114.5MB，条件比 H3600 还好。
+    唯一要小心的是 kernel 槽只有 3.25MB，以及别碰 cspboot 的两个锚点。
+================================================================================

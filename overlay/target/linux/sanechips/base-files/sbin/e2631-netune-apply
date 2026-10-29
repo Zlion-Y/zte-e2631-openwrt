@@ -1,0 +1,17 @@
+#!/bin/sh
+# Re-apply the queue tuning; last writer wins against the driver/fw4 resets
+# that flip rps_cpus back to 1 around link events. Called from the iface
+# hotplug (fast path) and every minute from cron (backstop - the delayed
+# hotplug re-apply still loses when DHCP takes long and fw4 reloads late).
+for ifn in lan1 lan2 lan3 wan; do
+	[ -d "/sys/class/net/$ifn" ] || continue
+	for q in /sys/class/net/$ifn/queues/rx-*; do
+		[ -d "$q" ] || continue
+		echo 2 > "$q/rps_cpus" 2>/dev/null
+		echo 256 > "$q/rps_flow_cnt" 2>/dev/null
+	done
+	for q in /sys/class/net/$ifn/queues/tx-*; do
+		[ -d "$q" ] || continue
+		echo 2 > "$q/xps_cpus" 2>/dev/null
+	done
+done

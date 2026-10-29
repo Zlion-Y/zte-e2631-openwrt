@@ -1,0 +1,48 @@
+From 8aa6f4607 Mon Sep 17 00:00:00 2001
+From: cnjn <unknown>
+Date: Fri, 2 Oct 2026 12:00:00 +0800
+Subject: [PATCH] jffs2: do not reread a whole block after its in-data clean marker
+
+A clean marker as long as a page is bigger than the 1 KiB jffs2 reads first, so
+the scanner used to pull in the rest of the erase block for every empty block:
+about 39 MiB and some sixteen seconds to mount on a slow single-line SPI reader.
+When a block holds nothing but the marker, read only EMPTY_SCAN_SIZE past it and
+let the existing empty-block check decide.
+
+From the same tree, commit 8aa6f4607.
+
+diff --git a/fs/jffs2/scan.c b/fs/jffs2/scan.c
+index fd252d76f..83949de37 100644
+--- a/fs/jffs2/scan.c
++++ b/fs/jffs2/scan.c
+@@ -652,6 +652,19 @@ static int jffs2_scan_eraseblock (struct jffs2_sb_info *c, struct jffs2_eraseblo
+ 
+ 		if (buf_ofs + buf_len < ofs + sizeof(*node)) {
+ 			buf_len = min_t(uint32_t, buf_size, jeb->offset + c->sector_size - ofs);
++			/*
++			 * A clean marker as long as a page ends beyond what was read
++			 * first. When nothing but the marker has been found, read after
++			 * it only as much as is read at the start of any block, and let
++			 * the check below decide whether the block is empty, instead of
++			 * reading all of the block.
++			 */
++			if (c->cleanmarker_size && buf_ofs == jeb->offset &&
++			    ofs == jeb->offset + PAD(c->cleanmarker_size) &&
++			    jeb->used_size == PAD(c->cleanmarker_size) &&
++			    !jeb->dirty_size && !ref_next(jeb->first_node))
++				buf_len = min_t(uint32_t, buf_len,
++						EMPTY_SCAN_SIZE(c->sector_size));
+ 			jffs2_dbg(1, "Fewer than %zd bytes (node header) left to end of buf. Reading 0x%x at 0x%08x\n",
+ 				  sizeof(struct jffs2_unknown_node),
+ 				  buf_len, ofs);
+@@ -692,7 +705,9 @@ static int jffs2_scan_eraseblock (struct jffs2_sb_info *c, struct jffs2_eraseblo
+ 
+ 			/* If we're only checking the beginning of a block with a cleanmarker,
+ 			   bail now */
+-			if (buf_ofs == jeb->offset && jeb->used_size == PAD(c->cleanmarker_size) &&
++			if ((buf_ofs == jeb->offset ||
++			     buf_ofs == jeb->offset + PAD(c->cleanmarker_size)) &&
++			    jeb->used_size == PAD(c->cleanmarker_size) &&
+ 			    c->cleanmarker_size && !jeb->dirty_size && !ref_next(jeb->first_node)) {
+ 				jffs2_dbg(1, "%d bytes at start of block seems clean... assuming all clean\n",
+ 					  EMPTY_SCAN_SIZE(c->sector_size));

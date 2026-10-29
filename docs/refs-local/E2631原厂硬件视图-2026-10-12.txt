@@ -1,0 +1,383 @@
+================================================================================
+E2631 原厂硬件视图 —— 真机设备树 + 原厂内核配置（实证）
+2026-10-12
+================================================================================
+
+本文档回答一个问题：**原厂固件眼里的这块板子，外围到底有什么、挂在哪。**
+
+它不靠推测、不靠跨板拷贝。全部证据来自从运行中的 E2631（192.168.5.3，原厂
+固件）上只读取回的三样东西，外加一个从 kernel1 分区里解出来的同源样本：
+
+  A. /sys/firmware/fdt          6715 B   md5 b5124f77a55298fa58516db76329c4b0
+     —— 内核启动后**实际使用**的设备树（内核会改写它：mem=、chosen）
+  B. dump/kernel1.dtb           6534 B   （从 kernel1 分区解出的追加 DTB）
+     —— 静态样本，用于判断内核改了什么
+  C. vendor_config.gz          21465 B   md5 6018c4847d2455828138a09ca8a4a293
+     —— /proc/config.gz，原厂内核配置，2826 个符号
+        解压后 94757 B / 3478 行，md5 9469c6b9a4419607292dfff7b441541c
+
+本机存放：
+  refs/e2631_vendor_config.gz   refs/e2631_vendor_config.txt
+  refs/e2631_live.dtb           refs/e2631_live_dt_tree.txt
+  refs/h3600_config             refs/cfg_diff_vendor_vs_upstream.txt
+
+复现（tools/tftp_srv.py 必须由 PowerShell 启动，Bash 沙箱收不到入站报文）：
+  设备侧:  cp /proc/config.gz /tmp/e2631_config.gz
+           cp /sys/firmware/fdt /tmp/e2631_live.dtb
+           cd /tmp && tftp -p -l <file> -r <file> 192.168.5.5
+  本机侧:  python tools/cfg_diff.py refs/e2631_vendor_config.txt \
+                    refs/h3600_config refs/cfg_diff_vendor_vs_upstream.txt
+           python tools/fdt_dump.py refs/e2631_live.dtb refs/e2631_live_dt_tree.txt
+
+--------------------------------------------------------------------------------
+0. 结论摘要（每条都有出处）
+--------------------------------------------------------------------------------
+
+  ① **内存 = 256 MiB。** 定案。三重证据：
+     · 真机 /proc/device-tree/memory/reg = `40 00 00 00 10 00 00 00`
+       → base 0x40000000 size 0x10000000 = 256 MiB
+     · 真机 chosen/bootargs 里写着 `mem=256M`
+     · /proc/iomem 的 System RAM = 0x40000000-0x4fffffff
+     ⚠ 那个 `memory@40000000` 节点仍是 `size 0x20000000`（512 MiB），是**未被
+       内核修正的残留**。不要拿它当证据，也不要拿 DTB 里两个 memory 节点
+       "自相矛盾"当成待解之谜 —— 内核按 cmdline 的 mem= 重写了 `memory`，
+       另一个节点没人动。
+
+  ② **启动槽 = 0x700000（槽 A）。** cspboot 把自己的身份写进了 cmdline：
+     `... ; U-Boot V1.0.0 20250325110003 0x700000 0x0 0xaf 0xa3`
+     末段 5 个字段 = bootloader 名 / 版本 / 时间戳 / **启动槽基址** / 三个状态值。
+
+  ③ **网口 = 1 WAN + 3 LAN（4 个千兆口），不是 5 口。**
+     原厂 br0 成员：eth1 eth2 eth3 nbif0 wlan0 wlan5g0 wlan3 wlan5g3
+     eth0 不在 br0 内且是唯一 PROMISC+UP 的上联口 → WAN。
+     ⇒ 板级 DTS 里照抄 H3600 的 lan1..lan4 + wan（5 个 gmac_port）**是错的**。
+
+  ④ **PCIe 复位在厂商设备树里根本没有 GPIO。** 厂商 pcie 节点只有 compatible
+     与 interrupts；没有 reg、没有 reset-gpios/enable-gpios、没有 pinctrl-0。
+     ⇒ 我板级 DTS 里照抄 H3600 的 `<&gpio3 5>` / `<&gpio3 7>` 是**无依据的猜测**，
+     必须标注得更醒目。
+
+  ⑤ **USB 有两个控制器且都启用**：dwc2@0x09000000（SPI 44）与
+     dwc3@0x09100000（SPI 50），厂商树里 status 都是 okay。
+     上游 target 只有 dwc3，且没有 dwc2 驱动 —— 硬件存在，上游驱动缺失。
+
+     注意这只是**厂商固件里的事实描述**，不代表我们要跟着启用。实机经验：
+     访问 USB 控制器会让本板挂起、看门狗反复重启。因此 OpenWrt 侧**三处全关**
+     （DTS 的 &usb 保持 disabled、`env/kernel-config` 关掉 `CONFIG_USB`、
+     设备块不带任何 USB kmod）。厂商内核自己也是这么做的：它的 config.gz 里
+     `CONFIG_USB_SUPPORT=y` 但 `# CONFIG_USB is not set` —— 菜单在、代码不在。
+
+  ⑥ **不需要 reserved-memory。** 真机树的 memory reservations 段是**空的**，
+     厂商树里也没有。H3600 那份"保留顶部 38 MiB 给包处理器"是**它自己板子**的
+     事，与 E2631 无关，不要抄。
+
+  ⑦ **温度传感器存在**（temp@94100034 = crm2 基址 + 0x34，中断 51/90/91），
+     但用的是厂商私有 compatible `zxic,tempsensor` —— 上游无驱动，本项目不驱动。
+
+--------------------------------------------------------------------------------
+1. 真机设备树全量外设清单（权威，来自 /sys/firmware/fdt）
+--------------------------------------------------------------------------------
+
+/ 根:
+  model        = ZTE ZX279128S
+  compatible   = zte,zx279128-smp
+  chosen       : bootargs（见 §0②）、stdout-path = serial0:115200n8
+  memory       : reg 已被内核改成 0x40000000+0x10000000（256 MiB）
+  memory@40000000 : reg 仍是 0x40000000+0x20000000（残留，见 §0①）
+
+/aliases 里原厂登记的路径（这是原厂自己认的节点名，可用来核对我们 SoC dtsi）:
+  i2c0    = /soc/i2c@9a102000        npp  = /soc/npp@921c0000
+  i2c1    = /soc/i2c@9a103000        tm   = /soc/tm@92340000
+  ssp0    = /soc/ssp@9a105000        pp   = /soc/pp@92380000
+  pon     = /soc/pon@92000000        idm  = /soc/idm@921c8000
+  pcie    = /soc/pcie@10000000       gephy = /soc/gephy@9b000000
+  serial0 = /soc/serial@0x94404000   serial1 = /soc/serial@0x94405000
+
+/soc 下 27 个节点，逐条（地址 / 中断 / status / 注释）：
+
+ 节点                        compatible                    地址+长度                中断(SPI)      status
+ ----------------------------------------------------------------------------------------------------------
+ interrupt-controller@00801000  arm,cortex-a9-gic          0x801000+0x1000          -              -
+ timer@00800200              arm,cortex-a9-global-timer     0x800200+0x20            PPI 11         -
+ mg-crm@00804000             arm,cortex-a9-mg-crm           0x804000+0x1000          -              -
+ l2-cache-controller@0x00c00000  arm,pl310-cache            0xC00000+0x1000          -              -
+ watchdog@00800620           arm,cortex-a9-twd-wdt          0x800620+0x20            PPI 14         **okay**
+ iram@200000                 zte,iram                       0x200800+0x1000          -              enable
+ nand@00d80000               denali,denali-nand-dt          0xD80000+0x7C00000   0x14(20)       **okay**
+                                                            +0xD00000+0x80000
+ dwmmc0@08980000             zte,zx288080_sd                0x8980000+0x1000         0x2B(43)       **disable**
+ serial@0x94404000           zte,ZX279127-uart              0x94404000+0x1000        0x0B(11)       okay
+ serial@0x94405000           zte,ZX279127-uart              0x94405000+0x1000        0x0C(12)       okay
+ spifc@94406000              zte,ZX279127-spifc             0x94406000+0x1000        0x0D(13)       okay
+ i2c@9a102000                zte,ZX279127-i2c               0x9A102000+0x40          0x16(22)       okay
+ i2c@9a103000                zte,zx279127-i2c               0x9A103000+0x40          0x17(23)       **disabled**
+ mdio@9a101000               zte,zx279128s-mdio             0x9A101000+0x18          -              okay
+ ssp@9a105000                zte,zx279127-ssp               0x9A105000+0x1000        0x19(25)       okay
+    └ silicon@0              rohm,dh2228fv                  reg=0, 5 MHz             -              （SPI 从设备）
+ tdm@9a106000                zte,ZX279127-tdm               0x9A106000+0x1000        0x1B(27)       okay
+ temp@94100034               zxic,tempsensor                0x94100034+0xC           0x33,0x5A,0x5B  okay
+ pon@92000000                zte,zx279128s-pon              0x92000000+0x400000      0x22(34)       okay
+                                                            +0x94000000+0x100000
+                                                            +0x94100000+0x100000
+                                                            +0x94200000+0x100000
+                                                            +0x9FE00000+0x100000
+ npp@921c0000                zte,zx279128s-npp              0x921C0000+0x8000        0x23,0x26       okay
+                                                            +0x921CC000+0x34000      (35,38)
+ tm@92340000                 zte,zx279128s-tm               0x92340000+0x40000       0x24(36)       okay
+ pp@92380000                 zte,zx279128s-pp               0x92380000+0x40000       0x25(37)       okay
+ idm@921c8000                zte,zx279128s-idm              0x921C8000+0x4000        0x26(38)      **disabled**
+ gephy@9b000000              zte,zx279128s-gephy            0x9B000000+0x100000      0x27..0x2A      okay
+                                                            ×4 (0x9B000000/100000/   (39..42)
+                                                            200000/300000)
+ pcie@10000000               zte,ZX279127-pcie              **无 reg**               0x3F,0x4E,     okay
+                                                                                     0x3B,0x4A
+                                                                                    (63,78,59,74)
+ usb@09000000                zte,zx279127-dwc2              0x9000000+0x10000        0x2C(44)       **okay**
+ usb@09100000                zte,zx279128-dwc3              0x9100000+0x100000       0x32(50)       **okay**
+    └ dwc3@0x09100000       snps,dwc3                      reg 同上                -              dr_mode=host
+ topcrm@94000000             zte,ZX279127-topcrm, syscon    0x94000000+0x1000        -              -
+ lsp0crpm@94400000           zte,ZX279127-lsp0crpm          0x94400000+0x1000        -              -
+ lsp1crpm@9a100000           zte,ZX279127-lsp1crpm          0x9A100000+0x1000        -              -
+
+★ 一个结构性事实：**厂商树里没有以太网 MAC 节点。** /soc 下既没有
+  ethernet@… 也没有 gmac@…。上游 target 把 `pon@92000000` 这个块建模成
+  `gmac: ethernet@92000000 reg=<0x92000000 0x400000>` —— **地址逐字节相同，
+  只是名字不同**（厂商叫 pon，上游叫 gmac）。E2631 是路由器，这个块当以太网
+  MAC 用。这是"同一硬件、两个名字"的又一例，引用时必须说清哪一层。
+
+★ 第二个结构性事实：**厂商树里也没有 LED / 按键 / 任何 GPIO 节点。**
+  这与我们既有的结论一致（TODO-L1 只能物理实测，一条都不能抄）。
+
+--------------------------------------------------------------------------------
+2. 内核把一个节点改掉了（A 与 B 的差）
+--------------------------------------------------------------------------------
+
+把真机树与 kernel1 追加树做结构化对差（节点名清单、status 值）：
+
+  节点清单：完全一致（27 个 soc 子节点，一个不差）
+  status 值：完全一致
+  差异只在三处，都是内核启动时的改写：
+    · memory/reg          128 MiB(0x8000000) → **256 MiB(0x10000000)**
+    · chosen/bootargs     原本没有 → 填入 cspboot 传来的完整 cmdline
+    · 字符串属性格式      内核重新序列化（aliases 等）
+
+⇒ 结论：**追加 DTB 就是生效 DTB**（结构未经修改），可以直接拿它当硬件描述用。
+  唯一必须用真机版本、不能用追加版本的地方是**内存大小**。
+
+--------------------------------------------------------------------------------
+3. 网络（N1 / A1 的直接依据）
+--------------------------------------------------------------------------------
+
+原厂固件运行态（/proc/net/dev、ip -o link、brctl show）:
+
+  eth0    PROMISC UP，唯一有上行流量的口，**不在 br0 内**   → WAN
+  eth1    master br0，NO-CARRIER（没插线）                 → LAN
+  eth2    master br0，UP，有流量                            → LAN
+  eth3    master br0，NO-CARRIER                            → LAN
+  nbif0   master br0，UP，有流量      ← 内部接口（North Bridge IF）
+  sw      UP，有流量                  ← 交换机抽象设备
+  pon     UP，有流量                  ← pon@92000000 那个块
+  idm0 / idm1  UP                     ← idm@921c8000（树里是 disabled，驱动自建）
+  br0     成员 = eth1 eth2 eth3 nbif0 wlan0 wlan5g0 wlan3 wlan5g3
+
+  ⇒ **物理网口 = 1 WAN + 3 LAN = 4 个千兆口。**
+
+  对板级 DTS 的直接影响：
+    · 上游 SoC dtsi 提供 gmac_port0..port4 五个端口，但本板只用 4 个。
+    · **哪几个 port 对应面板上哪几个口，不能猜。** 上游 H3600 的
+      port0..3=LAN(phy10..13) / port4=WAN(phy8) 只是**那块板子**的接线。
+    · 内部 GEPHY 是 4 个（0x9b000000/0x9b100000/0x9b200000/0x9b300000，
+      中断 39..42），与 H3600 逐项相同 —— 因为这是 SoC 固定的，不是板级选择。
+    · E2631 是否需要额外一颗外部 PHY（H3600 的 WAN 用 ZX5201，MDIO 地址 8）
+      **未知**。4 个内部 GEPHY 恰好够 4 个口，所以很可能**不需要**外部 PHY，
+      但这一点没有证据，必须实测（probe 的 mdio 段会列出总线上所有应答地址）。
+
+  ⚠ 打码提醒：原厂 br0 的 bridge id 里带着本机真实 MAC，本文档不记录它。
+
+--------------------------------------------------------------------------------
+4. PCIe（W1）——比上一轮认为的更不确定
+--------------------------------------------------------------------------------
+
+  厂商节点：  pcie@10000000  compatible = zte,ZX279127-pcie
+                             interrupts = <SPI 63, 78, 59, 74>
+                             status = okay
+                             **没有 reg / 没有 reset-gpios / 没有 enable-gpios
+                               / 没有 pinctrl-0**
+
+  上游节点：  pcie0 @0xf000000  (dbi/ctrl/config 窗口齐全)
+                             SPI 63 + pinctrl-0 = <&pcie0_pins>
+              pcie1 @0xf100000
+                             SPI 78 + pinctrl-0 = <&pcie1_pins>
+
+  两件事因此可以确定：
+    · 厂商那 4 个中断里的 63 与 78 **正好等于**上游 pcie0/pcie1 的主中断
+      ⇒ **E2631 与 H3600 一样是两个 PCIe 控制器**，不是单控制器。
+      另外两个（59 / 74）上游 SoC dtsi 未使用，疑为错误或 MSI 中断 —— 未知。
+    · **厂商 LK/内核并不用 GPIO 做 PCIe 复位**（树里没有任何 gpio 属性）。
+      复位要么由 bootloader 做完，要么由厂商驱动硬编码某个 CRM 寄存器。
+
+  ⇒ 我板级 DTS 里现在写的 `reset-gpios = <&gpio3 5>` / `enable-gpios = <&gpio3 7>`
+    是从 H3600 **整段抄来的**，厂商证据**既不支持也不反对**，属纯猜测。
+    处理原则不变（写错会挂控制器，但 RAM 引导重试零成本）：先按现状试，
+    boot 卡在 PCIe 就改回 disabled。但注释必须改成"猜测"而非"H3600 的用法"。
+
+--------------------------------------------------------------------------------
+5. NAND / 存储 —— 有一个长期悬着的疑点，本轮仍未闭合
+--------------------------------------------------------------------------------
+
+  厂商树里 `nand@00d80000` compatible = `denali,denali-nand-dt`，
+  reg = <0xD80000 0x7C00000>, <0xD00000 0x80000>，status = okay。
+
+  · 0xD00000+0x80000 = 0xD80000，所以两段首尾相接：
+      denali_reg  = [0x00D00000, 0x00D80000)   512 KB  控制寄存器
+      nand_data   = [0x00D80000, 0x08800000)   124 MiB 数据窗口
+    124 MiB 不可能是"寄存器"，只能是**把 flash 内容直通映射进 SoC 地址空间**
+    的读窗口。这与"原厂读路径透明解密"的既有结论方向一致（读出去的已经是
+    内核可直接用的字节）。
+  · 但本板实测是 **SPI NAND**（HYF1GQ4UTACAE，走 spifc@94406000），
+    原厂 config 里 `MTD_NAND_ZTE_SPIFC=y` 且 `MTD_NAND_ZTE_SPIFC_DT=y` 也在。
+  · 同一份 config 里 `MTD_NAND_ZTE_DENALI=y` + `MTD_NAND_DENALI_DT=y` **也在**。
+
+  ⇒ 两个驱动都编进去了，树里两个节点都在。**哪个真正接管了 mtd0，本轮没有
+    取得决定性证据。** 对 mainline 移植的影响：**零** —— 我们不用这两个驱动，
+    用 mainline 的 spi-nand 栈，flash 靠 spifc@94406000 认出来。
+    记为"已知但不必解决"，避免以后又被当成新问题重新追一遍。
+
+--------------------------------------------------------------------------------
+6. 原厂内核配置对差要点（refs/cfg_diff_vendor_vs_upstream.txt，1741 行）
+--------------------------------------------------------------------------------
+
+先说清这份对差的**性质**：两边的符号数量差一个数量级 ——
+  原厂 config 2826 个符号（完整 BSP 配置，Linux 4.1.25 / Buildroot 2015.08）
+  上游 h3600_config 526 个符号（**OpenWrt target 的裁剪底稿，不是完整 config**）
+所以"只在一边出现的符号"里绝大多数没有比较意义。有用的是**厂商侧的驱动选型**，
+它告诉我们原厂到底用了哪颗驱动、哪个框架。
+
+★ 对外围有直接参考价值的条目：
+
+  SoC / 时钟 / 定时器
+    CONFIG_ARCH_ZX279128S=y          CONFIG_MACH_ZX279128S=y
+    CONFIG_ZX279128S_ASIC=y          专为本 SoC 编译（279127/279128 均 not set）
+    CONFIG_ARM_ARCH_TIMER=y          用 ARM 架构定时器，**不是** SP804
+    CONFIG_HZ=100                    （上游 fragment 未指定）
+    CONFIG_CLKSRC_OF=y  CONFIG_COMMON_CLK=y  CONFIG_CLKDEV_LOOKUP=y
+    CONFIG_ARM_L1_CACHE_SHIFT=5      (32 B) —— 上游选 6 (64 B)。Cortex-A9 实为 32 B，
+                                     厂商标的值更贴近硬件；仅记录，不据此改上游
+
+  Pin control / GPIO
+    CONFIG_PINCTRL_SINGLE=y          ★ 厂商用 mainline 的 pinctrl-single
+                                       —— 与上游 SoC dtsi 里
+                                       `zte,zx279128s-pinmux", "pinctrl-single"` **一致**
+                                       （上游作者是从厂商树反推的，方向正确）
+    CONFIG_GPIO_ZX=y                 厂商 GPIO 驱动名（上游叫 GPIO_ZX279128S）
+    CONFIG_GPIO_SYSFS=y  CONFIG_GPIO_DEVRES=y
+
+  以太网 / MDIO / PHY
+    CONFIG_ZX_MDIO=y                 厂商 MDIO 驱动
+    CONFIG_ZX_NET_ZERO_COPY=y        CONFIG_ZX_NET_MAX_MTU=2048
+    CONFIG_ZX_TM=y                   （流量管理，上游 target 无、本项目不驱动）
+    CONFIG_DSA 系**厂商侧全部不启用**；上游侧启用了 DSA + QCA8K
+                                     ⇒ H3600 用 DSA 交换机，E2631 不用。
+                                       这是两块板子网络架构的真实差异。
+
+  PCIe
+    厂商：PCIEAER / PCIEPORTBUS / PCI_QUIRKS / PCI_SYSCALL / PCI_REALLOC_ENABLE_AUTO
+    上游：PCIE_DW / PCIE_DW_HOST / PCIE_ZX279128S / PCI_MSI / PCI_ECAM
+    ⇒ 上游把这块控制器建模成 DesignWare，并补了自己的 host 驱动。
+      与 SoC dtsi 里 pcie0/pcie1 的写法一致，无冲突。
+
+  SPI / flash
+    CONFIG_SPI_ZX=y                  厂商 SPI 驱动（上游叫 SPI_ZX279128S_SPIFC）
+    CONFIG_MTD_NAND_ZTE_SPIFC=y      + _DT=y     ← 见 §5
+    CONFIG_MTD_NAND_ZTE_DENALI=y     + DENALI_DT=y ← 见 §5
+    CONFIG_MTD_CMDLINE_PARTS=y       ★ 内核**支持** cmdline 分区，
+                                       但真机 cmdline 里确实**没有** mtdparts=
+                                       ⇒ 这条排除了"偏移来自 cmdline"的可能，
+                                          与我们"分区表编在内核里"的定案一致
+    CONFIG_MTD_OF_PARTS=y            ★ 内核**支持** DT 分区，
+                                       但设备树里确实**没有** partitions 节点
+                                       ⇒ 同样排除，双重确认
+    CONFIG_JFFS2_FS=y  + WRITEBUFFER / RTIME / ZLIB
+    CONFIG_SQUASHFS=y  + XZ / ZLIB / EMBEDDED   （kmodule.img 是 squashfs）
+    CONFIG_MTD_UBI=y  (+ UBI_BLOCK)
+    CONFIG_UBIFS_FS **vendor=n / upstream=y**
+                                       ⇒ 印证"E2631 不用 UBI/UBIFS"，
+                                          与"裸 mtdblock + JFFS2"的结论一致
+
+  网络设备 / 无线
+    CONFIG_WLAN_MTK_7916=y           ★ **MT7916 实锤**（厂商驱动名）
+    CONFIG_WLAN_DUALBAND_USE_SAME_DRIVER=y
+                                       ⇒ 2.4G/5G 共用一颗，与 AX3000 规格一致
+
+  看门狗（解释了一处上游看起来"缺"的东西）
+    vendor: CONFIG_WATCHDOG=y  但  CONFIG_WATCHDOG_CORE=**n**
+    upstream: WATCHDOG_CORE=y
+    ⇒ 厂商用的是**老式**看门狗（无 framework 核心）；
+      而设备树里 watchdog 节点是 `arm,cortex-a9-twd-wdt`（SoC 自带 TWD）。
+      上游 SoC dtsi 里该节点 status = disabled，在板级打开即可。无冲突。
+
+  安全 / 加密
+    CONFIG_CRYPTO_AES=y  CONFIG_CRYPTO=y  CONFIG_CRYPTO_ECB=**n**(vendor)
+    ⇒ 厂商侧**只有软件 AES**，config 里**没有任何 SoC 硬件 crypto 驱动**符号。
+      与"分区级 AES-128-ECB 由原厂内核在 MTD 读路径上以软件方式完成"的既有
+      结论方向一致（若为硬件引擎，必然有一个平台驱动符号）。
+
+  厂商私有框架（**上游完全没有，本项目一律不驱动**）
+    CONFIG_CSPKERNEL_* 共 **113** 个符号全为 y，覆盖：
+      包处理/DPI(APPID)、QoS、IGMP/MLD、LEDKEY 框架、VERINFO、
+      TAGPARAM_MTD、GENERAL_NANDFLASH、SHOW_BOARDINFO、MTD_SKIPBAD 等。
+    其中值得单独记一笔的：
+      CONFIG_CSPKERNEL_VERINFO=y       —— /proc/zte/verinfo/… 的来源
+      CONFIG_CSPKERNEL_TAGPARAM_MTD=y  —— tag 分区参数的来源（与 A1 相关）
+      CONFIG_CSPKERNEL_LEDKEY=y        —— 原厂 LED/按键不走 gpio-leds，
+                                          而走自家的 LEDKEY 框架
+                                          ⇒ **解释了我们为什么在设备树里
+                                             找不到任何 LED 节点**：本来就没有，
+                                             是厂商驱动内部映射的。
+      CONFIG_CSPKERNEL_FW=y            —— 厂商固件/升级框架
+
+--------------------------------------------------------------------------------
+7. 本轮改变了什么（对既有文档与板级 DTS 的更正）
+--------------------------------------------------------------------------------
+
+  [1] 内存 128 MiB → **256 MiB**（板级 DTS 的 TODO-M1 关闭）
+      证据见 §0①，三重。板级 DTS 里的整段 TODO-M1 注释与
+      `reg = <0x40000000 0x08000000>` 一并更正为 0x10000000。
+
+  [2] 网口 5 口 → **4 口（1 WAN + 3 LAN）**（TODO-N1 范围收窄）
+      H3600 的 port0..4 映射不得照抄。哪几个 port 接面板仍是实测项。
+
+  [3] PCIe 注释：把"照抄 H3600 的 reset/enable GPIO"明确定性为**猜测**，
+      并记录"厂商树里 PCIe 无任何 GPIO 属性"这一反证。
+
+  [4] USB：厂商树里 dwc2 与 dwc3 **都启用了**。上游只有 dwc3 驱动，
+      但这**不是**"要不要启用"的依据 —— 实机经验是访问 USB 会挂机并被看门狗
+      反复重启，所以 OpenWrt 侧三处全关（DTS disabled + env/kernel-config
+      关 CONFIG_USB + 不带 USB kmod），与厂商内核 `# CONFIG_USB is not set`
+      的选择一致。**结论是"必须关"，不是"缺驱动"。**
+
+  [5] reserved-memory：**不加**。真机与厂商树的保留区都是空的，
+      H3600 的 38 MiB 保留区是它自己的事。
+
+  [6] 温度传感器：硬件存在（temp@94100034），但 compatible 是厂商私有的
+      `zxic,tempsensor`，上游无驱动 ⇒ 维持"不驱动"，但原因要写对
+      （不是"没有传感器"，是"没有驱动"）。
+
+  [7] LED/按键：厂商树里没有节点，是因为原厂走 CSPKERNEL_LEDKEY 框架。
+      结论不变（只能实测），但**理由更正**。
+
+--------------------------------------------------------------------------------
+8. 仍未闭合（诚实清单，不要当成已解决）
+--------------------------------------------------------------------------------
+
+  · 4 个内部 GEPHY ↔ 面板 4 个口的**对应关系**（哪几个是 LAN、哪个是 WAN）
+    —— 需要实测（probe 的 mdio + net 段）。
+  · E2631 是否有外部 PHY（H3600 的 WAN 用 ZX5201 @ MDIO 8）
+    —— 待 mdio 扫描结果。
+  · PCIe 复位的真实来源（无 GPIO 证据；疑在 CRM 寄存器，未定位）。
+  · `nand@0xD80000`(Denali) 与 `spifc@94406000` 谁真正接管 mtd0 —— 不影响移植，
+    但未闭合（见 §5）。
+  · 温度传感器寄存器语义（不做）。
+  · 两个多余的 PCIe 中断（SPI 59 / 74）的含义。
+
+================================================================================

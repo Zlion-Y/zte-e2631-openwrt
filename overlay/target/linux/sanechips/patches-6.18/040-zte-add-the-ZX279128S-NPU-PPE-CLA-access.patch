@@ -1,0 +1,25 @@
+--- a/drivers/net/ethernet/zte/Kconfig
++++ b/drivers/net/ethernet/zte/Kconfig
+@@ -71,4 +71,15 @@
+ 
+ 	  If unsure, say Y on this board.
+ 
++
++config ZX_NPU_PPE
++	bool "ZTE ZX279128S vendor-native PPE/CLA access"
++	depends on ZX279128S_ETH
++	help
++	  Low-level CLA indirect table access for the vendor-native wired data
++	  plane. The proc interface is inert until zxnpu_ppe.enable=1; the
++	  read/write commands then drive the CLA+0x14/0x18/0x1c window.
++
++	  If unsure, say Y on this board.
++
+ endif # NET_VENDOR_ZTE
+--- a/drivers/net/ethernet/zte/Makefile
++++ b/drivers/net/ethernet/zte/Makefile
+@@ -5,3 +5,4 @@
+ zx279128s-eth-$(CONFIG_ZX_NPU) += zx279128s-npu.o
+ zx279128s-eth-$(CONFIG_ZX_NPU_AUDIT) += zx279128s-npu-audit.o
+ zx279128s-eth-$(CONFIG_ZX_NPU_IDM) += zx279128s-npu-idm.o
++zx279128s-eth-$(CONFIG_ZX_NPU_PPE) += zx279128s-npu-ppe.o

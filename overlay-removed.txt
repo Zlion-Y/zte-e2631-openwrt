@@ -1,0 +1,23 @@
+# 从 overlay/ 里删掉、但可能已经进过别人构建树的老文件（P1-1 机制，zwzzrl 同款）。
+# apply.sh 是「拷贝」不是「同步」：overlay 里删掉的文件，在旧构建树里还在，
+# 于是继续被打进镜像。每行一个相对树根的路径；apply.sh 每次运行时从树里
+# 删除，本来就没有就跳过。# 开头是注释。
+# P0-3: slotfix v1 replaced by the zx279128s-slotpart MTD parser. The fixup
+# read cspboot's bootpara block at 0x40007000, which the zImage decompressor
+# uses as page tables (dumped on hardware) - it never found its signature on
+# a real boot and always fell back to the built-in slot-1 layout.
+target/linux/sanechips/files/arch/arm/mach-zte/zx279128s-slotfix.c
+target/linux/sanechips/patches-6.18/032-ARM-zte-Add-the-ZX279128S-slot-fixup-to-the-mach-objects.patch
+# P1-6 rename: 63_e2631_wan_ssh -> 63_e2631_wan_access (now also opens 80/443)
+target/linux/sanechips/base-files/etc/uci-defaults/63_e2631_wan_ssh
+# npu branch starts from the v1.8.0 data path. These files were added by the
+# ffe-full experiment and must not leak into an npu build: IDM/mac80211 flow
+# injection, its netfilter patch, and the ffe-full-only first-boot defaults.
+target/linux/sanechips/files/drivers/net/ethernet/zte/zx279128s-idm.c
+target/linux/sanechips/patches-6.18/035-net-ethernet-zte-build-the-IDM-engine-into-the-eth-driver.patch
+target/linux/sanechips/patches-6.18/036-net-netfilter-route-wireless-flows-of-hw-offloaded-connections-through-the-fabric.patch
+package/kernel/mac80211/patches/subsys/991-wifi-mac80211-hand-wireless-flowtable-blocks-to-the-ZX279128S-packet-processor.patch
+target/linux/sanechips/base-files/etc/hotplug.d/net/21-e2631-wifi-ft
+target/linux/sanechips/base-files/etc/uci-defaults/64_e2631_ffefull_cleanup
+target/linux/sanechips/base-files/etc/uci-defaults/65_e2631_ipv6_relay
+target/linux/sanechips/base-files/etc/uci-defaults/66_e2631_hw_offload_default_off

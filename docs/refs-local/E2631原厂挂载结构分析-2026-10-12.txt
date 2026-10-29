@@ -1,0 +1,250 @@
+================================================================================
+ZTE ZXHN E2631 原厂存储结构分析（真机 mount + 整片 dump 实测）
+日期：2026-10-12（含 2026-10-12 用户纠正后的修订版）
+证据等级：A 级（真机 mount 输出 + 128MB 整片 dump 二进制实测）
+================================================================================
+
+【零、结论 —— 本文件已修订，修正此前一处方向性错误】
+
+★★ 修正：flash 上**确实有**分区级 AES-128-ECB 加密。★★
+
+本文件前一版（同日）曾写"不存在分区级 AES 透明解密"，依据是"9 个分区都能以 jffs2
+挂载成功"。**该推理是错的**，现撤回：
+
+    jffs2 能挂载，只能证明 **mtdblock 视图**是明文，
+    不能证明 **flash 原始数据**是明文。
+    原厂内核在 MTD/SPI-NAND 读路径上做了透明解密 ——
+    flash 是密文，内核读出来才变明文，jffs2 因此能挂载。
+
+也就是说，README 最初那句"flash 分区带 AES-128-ECB 透明解密"**是对的**，
+是我先把它撤回了两次，方向反了。这条到本文件为止定案。
+
+修订依据（全部为二进制级实测，不是推测）：
+  · 整片 dump `e2631_no_oob.bin` 的 rootfs 段是密文，用 key 解密后是合法 JFFS2；
+  · 同一分区在设备端 `/dev/mtdblock8` 的导出是明文 JFFS2；
+  · 两侧一密一明 ⇒ 中间必有一层透明解密（在内核里）。
+
+★ 第二条（仍然成立）：原厂没用 UBI，用的是裸 mtdblock + jffs2。
+    H3600 = 整槽 A/B + 57MB UBI（现代方案）；E2631 = 14 个裸分区 + jffs2（老式 SDK 方案）。
+    → H3600 的"整槽 + UBI + 双槽 sysupgrade"在 E2631 上一行都用不上。
+
+★ 第三条（仍然成立）：Wi-Fi 分区是明文 jffs2，校准数据可以直接 ls 读。
+
+
+【一、flash 加密状态逐分区实测（128MB 整片 dump）】
+
+样本：`D:/Personal/路由器/巡天/2638/e2631_no_oob.bin`
+      134217728 字节 = 0x08000000 = 128 MiB（已去 OOB，偏移与 mtd 1:1 对齐）
+      md5 = 0a7cae9b6504d6568d2bc4d795e6f7c0
+密钥：AES-128-ECB，key `E263111559d0dfde`（16 字节 ASCII，由内核 zte_token 派生）
+
+分区          偏移        大小        原始头 8 字节        原始熵  解密后熵  判定
+------------ ---------- ---------- ------------------ ------ -------- ----------------------------
+Bootloader   0x0000000  0x0100000  00 00 00 00 00 00  3.04   6.33     明文（含 "ZXIC"@0x84）
+tag          0x0100000  0x0100000  33 33 33 33 9c 01  0.08   3.95     明文（zte 魔法数 0x33333333）
+wifi         0x0200000  0x0100000  ff ff ff ff ff ff  0.00   3.88     明文 JFFS2（343 节点/首1MB）
+usercfg      0x0300000  0x0200000  ff ff ff ff ff ff  0.00   3.88     明文 JFFS2（43 节点）
+defcfg       0x0500000  0x0200000  ff ff ff ff ff ff  0.00   3.88     明文 JFFS2（746 节点）
+kernel1      0x0700000  0x0340000  33 33 33 33 cc cc  7.61   8.00     明文（槽头+uImage）
+kernel2      0x0A40000  0x0340000  20 7c a1 cc 09 2a  8.00   7.90  ★ 加密 → 解密后 JFFS2
+rootfs       0x0D80000  0x1220000  3f c3 4e 4d 96 42  8.00   7.96  ★ 加密 → 解密后 JFFS2
+UUPlugin     0x1FA0000  0x0500000  0a fb b3 a8 66 4a  8.00   7.81  ★ 加密 → 解密后 JFFS2
+owdptsbin    0x24A0000  0x00A0000  df ab 97 71 1c bf  7.97   8.00  ⚠ 高熵，非本密钥
+status       0x2540000  0x0500000  76 70 56 ec fc b6  7.96   8.00  ⚠ 高熵，非本密钥
+DPIPlugin    0x2A40000  0x0300000  0e 33 0f 4a b7 f3  8.00   7.96  ★ 加密 → 解密后 JFFS2
+UNIFIED      0x2D40000  0x0100000  12 17 5a 7f 8a 33  8.00   7.98  ★ 加密 → 解密后 JFFS2
+JDXBPLUGIN   0x2E40000  0x0180000  5d 42 af 99 b3 eb  8.00   7.95  ★ 加密 → 解密后 JFFS2
+
+（"熵"= 64KB 采样窗口的香农熵，0~8。接近 8.00 = 高熵密文；明文/擦除区明显更低。
+  "节点"= 解密后按 4 字节步进统计 0x1985 计数，即 JFFS2 节点 magic。）
+
+汇总：
+  · 加密（主密钥，共 6 个）：kernel2 / rootfs / UUPlugin / DPIPlugin / UNIFIED / JDXBPLUGIN
+    合计 24.375MB。解密后全部是合法 JFFS2。
+  · 高熵、非主密钥（2 个）：owdptsbin（0.625MB）、status（5MB）
+    疑为应用层另一把密钥（uuplugind / owdpts 用户态程序持有），未解。
+  · 明文（6 个）：Bootloader / tag / wifi / usercfg / defcfg / kernel1
+
+
+【二、rootfs 解密正确性的三重实证】
+
+1) 解密后头部与明文分区同族：
+       rootfs 解密后前 16B = 85 19 02 e0 21 03 00 00 75 42 49 96 60 00 00 00
+                          (JFFS2 inode 节点，与明文的 wifi/usercfg/defcfg 同格式)
+2) 全分区覆盖：解密后 18.12MB 内共 **10942 个 0x1985 节点**；
+   前 80/80 个 128KB 擦除块的头 16KB 内都有节点 → 说明是**整分区连续 ECB**，
+   不是"每块重启 IV"那种分块方案（分块方案下只有每块前 16 字节能解对）。
+3) 内容命中：解密后可见 "busybox"@0xF179、"uuplugind"@0x7885C；
+   而在**密文**窗口内搜 "busybox" 无命中（原始数据确实是密文，不是漏看）。
+
+对照：设备端（另一批次 `.1`，rootfs 分区 0x1100000）用 TFTP 从 `/dev/mtdblock8`
+导出的 rootfs，头部 = `85 19 01 e0`，即**明文**。
+→ 同一分区：原始 flash 密文、设备块设备明文 = 内核透明解密层实锤。
+
+
+【三、加密范围与"擦除区"的一个细节】
+
+对加密分区而言，**加密覆盖整个分区长度**（含通常应为擦除态的尾部）：
+
+    rootfs   末 128KB：全 0xFF = False，不同字节值 = 256 种
+    UUPlugin 末 128KB：全 0xFF = False，不同字节值 = 256 种
+    JDXBPLUGIN 末 128KB：全 0xFF = False，不同字节值 = 256 种
+
+说明：内核解密层按整个分区范围工作，密文不是"只有已写数据被加密"。
+（本样本的 rootfs 解密后几乎写满，仅尾 5 字节为 0xFF —— 也说明把它当"有大量擦除尾巴"
+  来估算可用空间是不准的，实际按 DTS 分区长度算即可。）
+
+**工程含义（重要）**：
+  · 要把数据写进这些分区并让**原厂内核**能读，必须**按 AES-128-ECB 重新加密后写入**；
+    直接写明文，原厂内核会解密成垃圾。
+  · 反过来，**mainline / OpenWrt 读这些分区会得到密文**（没有解密层）。
+
+
+【四、原厂挂载结构（真机 mount，A 级）—— 这一节仍然有效】
+
+设备            挂载点              类型          权限   说明
+-------------   -----------------   -----------   ----   --------------------------
+/dev/root       /                   jffs2         ro     原厂根文件系统（mtd8 解密后的视图）
+/dev/loop0      /kmodule            squashfs      ro     内核模块镜像（loop 设备）
+proc            /proc               proc          rw
+tmpfs           /var                tmpfs         rw     40 MB
+tmpfs           /tmp                tmpfs         rw     20 MB
+tmpfs           /tracelog           tmpfs         rw     2 MB
+tmpfs           /DPITMP             tmpfs         rw     60 MB  DPI 缓冲区
+tmpfs           /uadd               tmpfs         rw     1 MB
+tmpfs           /owjdxbplugin/tmp   tmpfs         rw     3 MB
+sysfs           /sys                sysfs         rw
+debugfs         /sys/kernel/debug   debugfs       rw
+tmpfs           /mnt                tmpfs         rw     16 KB
+/dev/mtdblock3  /wlan               jffs2         rw     Wi-Fi 分区（mtd3，明文）
+/dev/mtdblock4  /usercfg            jffs2         rw     用户配置（明文）
+/dev/mtdblock5  /defcfg             jffs2         rw     出厂默认配置（明文）
+/dev/mtdblock9  /UUPlugin           jffs2         rw     国内插件（加密分区）
+/dev/mtdblock10 /owdptsplugin/bin   jffs2         rw     国内插件
+tmpfs           /owdptsplugin/tmp   tmpfs         rw     2 MB
+/dev/mtdblock11 /status             jffs2         rw     状态存储
+/dev/mtdblock12 /DPIPlugin          jffs2         rw     国内插件（加密分区）
+/dev/mtdblock13 /UnifiedStorage     jffs2         rw     统一存储（加密分区）
+/dev/mtdblock14 /owjdxbplugin/bin   jffs2         rw     国内插件（加密分区）
+
+未出现在挂载表的：mtd1 Bootloader / mtd2 tag / mtd6 kernel1 / mtd7 kernel2（mtd8 以 /dev/root 挂 /）
+
+要点重述：
+  · 全部是 /dev/mtdblockN，**没有任何 ubiblock / ubi0** → 原厂不用 UBI。
+  · 根是 jffs2 **ro**，且**没有 overlay**；配置靠 usercfg/defcfg/status/UnifiedStorage 专用分区。
+  · /kmodule 用 loop + squashfs，说明这套 SDK 具备 squashfs 能力，可参考。
+  · tmpfs 上限合计约 128MB（其中 /DPITMP 一个 60MB），在 256MB 机型上是很大开销；
+    OpenWrt 不需要这些，内存反而更宽裕。
+  · **注意**：挂载表里能看到 jffs2，是因为内核已解密；它不能用来判断 flash 的明文/密文。
+
+
+【五、解密的实现位置（为什么 OpenWrt 侧没有这一层）】
+
+原厂：Linux 4.1.25 内核，在 MTD/SPI-NAND 读路径上对加密分区范围做透明解密，
+      密钥来自 `generate_zte_token`（vaddr 0xc000c348）：
+        sprintf(zte_token, "%s%s", "E2631", "edfd0d95511")
+        for i in 0..4: swap(token[5+i], token[15-i])
+        → "E263111559d0dfde"
+      `zte_token` 是 EXPORT_SYMBOL（.bss @ 0xc065a7c0）。
+
+mainline / OpenWrt：没有这个私有层。
+  → 直接读这 6 个分区得到密文，**不可能挂载原厂 rootfs**（要做离线分析必须先解密）。
+
+
+【六、对 OpenWrt 适配的影响（修订版）】
+
+| 项目 | 前一版（错） | 修订后（正确） |
+|---|---|---|
+| 分区加密 | "无分区级加密" | **有：6 个分区 AES-128-ECB（主密钥）+ 2 个另钥高熵** |
+| 需不需要自己实现 AES | — | **不需要**。OpenWrt 直接覆盖这些分区，写入自己的明文 UBI/JFFS2 |
+| 能否直接挂原厂 rootfs | — | **不能**。mainline 无解密层，必须先离线解密 |
+| 与 H3600 的存储方案 | 不适用 | 不适用（仍成立：原厂是裸分区 + jffs2，无 UBI） |
+| sysupgrade | 抄 H3600 platform.sh | **H3600 的 platform.sh 完全不适用**（仍成立） |
+| overlay | 未考虑 | 需二选一：新建 UBI，或用 jffs2 overlay（仍成立） |
+| Wi-Fi 校准数据 | dump 二进制 | **直接 ls /wlan 即可读到**（仍成立，明文分区） |
+| MAC/SN | — | **tag 是明文**，mainline 可直接读（利好） |
+| 双启动（原厂 + OpenWrt 并存） | 未考虑 | **可行，但有硬约束：OpenWrt 的写入区必须避开 6+2 个加密分区**，否则原厂内核会读出垃圾；原厂启动链（bootloader/tag/kernel1-2/wifi 明文）不受影响 |
+
+工作量重心排序（本次修订后仍需重排一点）：
+    1. L2 有线网络（MDIO/GPHY/GMAC）          ← 第一个真里程碑
+    2. L3 PCIe + Wi-Fi                        ← L2C 串行化补丁必带，否则 MT7916 掉卡
+    3. L5 存储层：**设计题 + 离线解密取证**（不需要实现 AES，难度维持"中"）
+    4. L1 双核 SMP / L6 集成 / L7 收尾
+
+**修正说明**：前一版说"L5 从大降到中"，理由是"不存在加密"——理由错了，但结论
+（不需要把 AES 当硬骨头）**恰好仍成立**，因为正确理由是"OpenWrt 不实现这层，直接覆盖分区"。
+这个"结论对、理由错"的情况比单纯结论错更危险，特此标注。
+
+
+【七、现成工具（本机已有，勿重造）】
+
+1) 解密/加密/识别（**已有，2026-08-29 出品**）
+     D:/Personal/路由器/巡天/2638/zte_e2631_fwtool.py
+       info    <img>                      识别各分区明文/密文
+       decrypt <img> <outdir>             导出全部分区（加密的自动解密）
+       encrypt <img> <outdir> <out>       用改过的分区目录重新加密打包整片
+     已做过完整性验证：6 个加密分区"解密→再加密"与原始镜像逐字节一致（ECB 无 IV、无整体校验和）。
+
+2) 逐分区真实性判别（**本次新增**）
+     D:/AI/中兴/OPENWRT/tools/verify_flash_enc.py <img>
+       → 打印每个分区的 原始头 / 原始熵 / 解密后熵 / JFFS2 节点计数 / 判定
+
+3) 运行环境（本机唯一带 pycryptodome 的解释器）
+     C:/Users/28418/.workbuddy/binaries/python/envs/default/Scripts/python.exe
+     （3.13.14 + pycryptodome 3.23.0）。托管 python 3.13.12 **没有** Crypto 模块。
+
+复现命令：
+     "C:/Users/28418/.workbuddy/binaries/python/envs/default/Scripts/python.exe" \
+       "D:/AI/中兴/OPENWRT/tools/verify_flash_enc.py" \
+       "D:/Personal/路由器/巡天/2638/e2631_no_oob.bin"
+
+
+【八、下一步命令（按优先级，只读）】
+
+1) 看 Wi-Fi 分区内容（明文，直接可读）
+       ls -la /wlan
+2) 看国内插件真实身份
+       ls -la /UUPlugin /DPIPlugin /owdptsplugin/bin /owjdxbplugin/bin /UnifiedStorage
+3) 确认根设备与命令行
+       cat /proc/cmdline ; ls -l /dev/root
+4) 备份三件套（tag / wifi / bootloader）再拉回本机
+       dd if=/dev/mtd2 of=/tmp/tag.bin
+       dd if=/dev/mtd3 of=/tmp/wifi.bin
+       dd if=/dev/mtd1 of=/tmp/bootloader.bin
+   ⚠ 设备端无 dd —— 用 `cat /dev/mtdblockN > 文件` 或直接 TFTP 拉（见 EXTRACT_REPORT.txt）
+5) （可选）判定透明解密用的正确对比（**必须用加密分区，不能用 wifi**）：
+       cat /dev/mtd8        | hexdump -C | head    # 走 mtd，密文
+       cat /dev/mtdblock8   | hexdump -C | head    # 走块设备，明文
+   前一版建议用 mtd3(wifi) 对比 —— 那是明文分区，**判不出任何东西**，已作废。
+
+
+【九、修正声明与教训】
+
+本文件修正的此前结论：
+  · 本文件自身前一版："不存在分区级 AES 加密"（撤回）
+  · 《E2631原厂挂载结构分析》前一版第四节"还需精确验证 mtd 层有无透明解密"（已定论：有）
+  · 《E2631适配工作量评估》中"国内特有负担主要是 AES / L5 是唯一硬骨头"的表述（部分保留）
+
+**教训（这是同一个坑的第三次）**：
+  1. `jffs2 能挂载` ≠ `flash 是明文`。存在透明解密层时，块设备视图与物理介质不等价。
+     判断存储加密，**必须看物理介质原始字节**（整片 dump），不能只看运行中的挂载视图。
+  2. 设计"验证命令"时要注意它是否真能区分两种情况：用明文分区（wifi）去对比，
+     无论有无解密层结果都一样，等于没测。
+  3. 本项目已三次在"二手资料/间接推断"上翻车：
+       第一次 NAND 类型（并行 vs SPI）—— 被真机 U-Boot 日志推翻
+       第二次 AES 加密（撤回）        —— 被整片 dump 推翻
+       第三次 AES 加密（再次撤回）    —— 被整片 dump 推翻，方向反了
+     根因相同：**用间接证据替代直接证据，且证据不足时仍下了"定案"级结论。**
+     规则：凡"有没有/是不是"这类事实判断，一律找**直接证据**（原始镜像字节、真机原始输出），
+     找不到就标注"未验证"，不许升级为定案。
+
+================================================================================
+一句话总结：
+    flash 上有 AES：6 个分区用主密钥 `E263111559d0dfde` 做 AES-128-ECB，
+    另 2 个用别的密钥；解密由**原厂内核**在 MTD 读路径透明完成，
+    所以设备上 jffs2 照常挂载、而整片 dump 是密文 —— 两者不矛盾。
+    对 OpenWrt 而言这反而是好消息：不需要实现 AES，直接覆盖这些分区写自己的文件系统；
+    但**不能直接挂原厂 rootfs**（mainline 无解密层），要分析必须先离线解密。
+    6 个明文分区（bootloader/tag/wifi/usercfg/defcfg/kernel1）mainline 可直接读写，
+    SN/MAC 与 Wi-Fi 校准数据都在里头。
+================================================================================

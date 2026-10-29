@@ -1,0 +1,40 @@
+# Build/lint scratch and artifacts produced beside the scripts, never inputs.
+*.log
+*.err
+*.ko
+*.bin
+*.dtb
+payload/
+
+# The serial captures are the primary witness for every "it died at this second"
+# conclusion in docs/, and they are tiny, so they are the one exception above.
+!board/ser-*.log
+
+# The one binary here that is an input rather than a build product: the 532-byte
+# version-header template that packing reads its upgradeKey1/2, product string and
+# slot geometry out of (seed/README.md says where it came from and proves it is
+# byte-equivalent to a full vendor package for `pack`).
+!seed/vendor-verhdr-8b8.bin
+
+# Vendor evidence that must not leave this disk: the 356 MB system harvest, the
+# mtd/ko dumps, the scraped web app, and config18.xml (a vendor config export full
+# of credential fields) plus webcreds.out.txt (a deliberate grep for passwords).
+/board/harvest-H8.txt
+/board/backup/
+/board/web/
+/board/carve/
+/board/config18.xml
+/board/webcreds.out.txt
+/board/wifi-diag.txt
+
+# git-credential helper for GitHub - it exists to hand a token to git, nothing else.
+/host/askpass.bat
+
+# A dependency-only experiment directory (package.json + node_modules for an ssh helper we never
+# used; the real path is plain ssh through out/push-run.mjs). Nothing references it.
+/host/sshcli/
+
+# Local, untracked config read by scripts/env.sh and host/release.mjs: the paths
+# on this machine and the vendor template package. Never commit it - .env.example
+# is the checked-in version.
+/.env

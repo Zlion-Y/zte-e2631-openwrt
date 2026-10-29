@@ -1,0 +1,29 @@
+#!/bin/sh
+# Read-only advisor for the userdata extroot first boot.  Prints what it
+# found and what it would do; never writes, formats or mounts anything.
+# The actual decisions live elsewhere:
+#   /sbin/e2631-userdata-init              (writes, guarded, explicit)
+#   /etc/init.d/e2631-userdata             (activation gate, automatic)
+
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+
+st=$(/sbin/e2631-userdata-status 2>/dev/null)
+echo "$st"
+
+case "$st" in
+	NO_PARTITION)
+		echo "PLAN: no userdata partition on this flash layout; extroot unavailable"
+		;;
+	NO_UBI_ATTACHED)
+		echo "PLAN: partition exists, no UBI attached - it will be attached during preinit on the next boot; if it was never initialized run /sbin/e2631-userdata-init"
+		;;
+	UBI_ATTACHED_NO_USERDATA_VOLUME)
+		echo "PLAN: UBI attached but no volume - run /sbin/e2631-userdata-init"
+		;;
+	VOLUME:*)
+		echo "PLAN: volume has no UBIFS superblock - run /sbin/e2631-userdata-init to format it (all current content will be erased)"
+		;;
+	READY:*)
+		echo "PLAN: formatted volume present - /etc/init.d/e2631-userdata enables the extroot fstab entry; /overlay moves to it on the next boot"
+		;;
+esac

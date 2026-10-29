@@ -1,0 +1,36 @@
+From: cnjn <unknown>
+Subject: [PATCH] libfstools: use an overlay in RAM when the overlay volume cannot be mounted
+
+mount_overlay() returned the mount error and mount_root() ignored it, so a
+volume that JFFS2 refuses to mount (a block whose page ECC does not read back)
+left the system on the read-only root file system: no host name, no network
+configuration and no way to repair it over the network. The pivot below already
+falls back to a RAM overlay; do the same for the mount itself.
+
+Adapted from cnjn/immortalwrt package/system/fstools/patches/203 for the fstools
+snapshot this tree pins (2aa16407fdedb3f1e1b915879f4d6772c5fe896c); his hunk
+carries shared-volume context this tree does not have, so the context here is
+regenerated from that snapshot.
+
+diff --git a/libfstools/overlay.c b/libfstools/overlay.c
+--- a/libfstools/overlay.c
++++ b/libfstools/overlay.c
+@@ -453,8 +453,16 @@ int mount_overlay(struct volume *v)
+ 	}
+ 
+ 	err = overlay_mount_fs(v, overlay_mp);
+-	if (err)
+-		return err;
++	if (err) {
++		/*
++		 * Without an overlay the system would stay on the read-only root
++		 * file system: no host name, no network configuration and no way to
++		 * repair it over the network. Fall back to RAM, as below does when
++		 * the pivot fails, and say so.
++		 */
++		ULOG_ERR("cannot mount the overlay volume, using a temporary overlay in RAM: settings will not survive a reboot\n");
++		return ramoverlay();
++	}
+ 
+ 	/*
+ 	 * Check for extroot config in overlay (rootfs_data) and if present then

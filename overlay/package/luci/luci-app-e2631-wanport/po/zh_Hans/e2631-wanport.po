@@ -1,0 +1,91 @@
+msgid ""
+msgstr ""
+"Content-Type: text/plain; charset=UTF-8\n"
+"Language: zh_Hans\n"
+
+msgid "WAN port"
+msgstr "WAN 口"
+
+msgid "Current state"
+msgstr "当前状态"
+
+msgid "Ports"
+msgstr "端口"
+
+msgid "Port"
+msgstr "端口"
+
+msgid "Role"
+msgstr "角色"
+
+msgid "Link"
+msgstr "链路"
+
+msgid "Bridge"
+msgstr "网桥"
+
+msgid "MAC address"
+msgstr "MAC 地址"
+
+msgid "WAN"
+msgstr "WAN"
+
+msgid "LAN"
+msgstr "LAN"
+
+msgid "up"
+msgstr "已连接"
+
+msgid "down"
+msgstr "未连接"
+
+msgid "no cable"
+msgstr "无网线"
+
+msgid "connected"
+msgstr "已连接"
+
+msgid "connected, %s Mb/s"
+msgstr "已连接，%s Mb/s"
+
+msgid "not in a bridge"
+msgstr "不在网桥里"
+
+msgid "Use as WAN"
+msgstr "设为 WAN 口"
+
+msgid "configured port"
+msgstr "配置的口"
+
+msgid "WAN MAC"
+msgstr "WAN MAC"
+
+msgid "members"
+msgstr "成员"
+
+msgid "No ports found: /sbin/e2631-wanport is not installed on this router."
+msgstr "没找到端口：这台路由器上没装 /sbin/e2631-wanport。"
+
+msgid "Switching the WAN to %s. The uplink drops for a few seconds while the bridge and the WAN interface are moved."
+msgstr "正在把 WAN 切到 %s。网桥和 WAN 接口重建期间上行会中断几秒。"
+
+msgid "The switch could not be started: %s"
+msgstr "没能启动切换：%s"
+
+msgid "LAN and WAN are roles here, not hardware: the WAN port is whichever port the WAN interface is bound to and which is out of the LAN bridge. Nothing is detected or switched automatically — a port becomes the WAN only when you say so. The WAN MAC stays the same across a port change, so the uplink lease and the IPv6 identity of this router survive it."
+msgstr "这里的 LAN / WAN 是角色而不是硬件：WAN 口就是 WAN 接口绑定的、且不在 LAN 网桥里的那个口。路由器不会自动探测、也不会自动切换——只有你指定了才会换。换口时 WAN MAC 保持不变，所以上游的租约和这台路由器的 IPv6 身份都能延续。"
+
+msgid "Changing the WAN port is switched off (enabled = 0). The current layout stays as it is."
+msgstr "已关闭换口功能（enabled = 0），当前布局保持不变。"
+
+msgid "Any of the four wired ports can carry the uplink. This is the same feature the factory calls \"WAN/LAN adaptive\", implemented without touching the switch: a port is a WAN port when the WAN interface is bound to it and it is out of the LAN bridge. The default is the factory layout — the \"wan\" port is the WAN, LAN1..3 are the switch."
+msgstr "四个有线口里的任意一个都可以当上联口。这就是原厂说的「WAN/LAN 自适应」，只是不碰交换芯片：WAN 接口绑到哪个口、那个口又不在 LAN 网桥里，它就是 WAN 口。默认就是原厂布局——「WAN」口当 WAN，LAN1~3 是交换机。"
+
+msgid "Allow changing the WAN port"
+msgstr "允许修改 WAN 口"
+
+msgid "Off: the router keeps its current layout and the buttons on this page are disabled."
+msgstr "关掉后保持当前布局，本页的按钮也不可用。"
+
+msgid "The port that should carry the uplink. Saving applies it: the port leaves the LAN bridge, the WAN interface is bound to it, and the other three ports join the bridge. The uplink drops for a few seconds while that happens."
+msgstr "用来当上联的口。保存后立即生效：该口离开 LAN 网桥、WAN 接口绑到它，另外三个口加入网桥。这个过程中上行会中断几秒。"

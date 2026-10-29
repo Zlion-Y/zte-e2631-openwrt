@@ -1,0 +1,65 @@
+#!/bin/sh
+# rpcd backend for the E2631 board page, speaking the rpcd shell protocol
+# (see luci.zte-mesh for the reference implementation):
+#
+#   ubus call e2631 list   -> this script with $1="list": print the method table
+#   ubus call e2631 <m>    -> $1="call" $2=<m>: print the JSON response
+#
+# Methods:
+#   slots            both firmware slots (straight from fwslot info -j)
+#   check            online update check (e2631-upgrade check output as log)
+#   switch           flip the boot to the OTHER (stock) slot; needs confirm
+#   run              one-click online upgrade, detached; needs confirm
+#
+# fwslot lives in /usr/sbin on this layout (package default), not /sbin:
+# resolve instead of assuming, or the board page shows a read failure.
+
+FW="$(command -v e2631-fwslot 2>/dev/null)"
+[ -n "$FW" ] || FW=/usr/sbin/e2631-fwslot
+
+esc() { # escape a command's output into a JSON string value
+	"$@" 2>&1 | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | awk '{printf "%s\\n", $0}'
+}
+
+needs_confirm() { # reads the ubus call params from stdin
+	input=$(cat)
+	case "$input" in
+	*'"confirm":"yes"'*|*'"confirm": "yes"'*) return 0 ;;
+	*) return 1 ;;
+	esac
+}
+
+case "$1" in
+list)
+	printf '{ "slots": {}, "check": {}, "switch": { "confirm": "str" }, "run": { "confirm": "str" } }\n'
+	;;
+call)
+	case "$2" in
+	slots)
+		exec "$FW" info -j
+		;;
+	check)
+		printf '{"log":"%s"}' "$(esc /sbin/e2631-upgrade check)"
+		;;
+	switch)
+		needs_confirm || { printf '{"ok":false,"error":"not confirmed"}'; exit 0; }
+		out=$("$FW" switch 2>&1)
+		rc=$?
+		o=$(printf '%s' "$out" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | awk '{printf "%s\\n", $0}')
+		printf '{"ok":%s,"rc":%d,"output":"%s"}' \
+			"$([ $rc -eq 0 ] && echo true || echo false)" "$rc" "$o"
+		;;
+	run)
+		needs_confirm || { printf '{"ok":false,"error":"not confirmed"}'; exit 0; }
+		if [ -s /tmp/e2631-upgrade/.running ]; then
+			printf '{"ok":false,"error":"already running"}'
+			exit 0
+		fi
+		mkdir -p /tmp/e2631-upgrade
+		touch /tmp/e2631-upgrade/.running
+		setsid /sbin/e2631-upgrade run > /tmp/e2631-upgrade/run.log 2>&1 &
+		printf '{"ok":true}'
+		;;
+	esac
+	;;
+esac

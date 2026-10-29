@@ -1,0 +1,20 @@
+--- a/mt7915/eeprom.c	2026-10-14 11:27:57.634507082 +0800
++++ b/mt7915/eeprom.c	2026-10-14 11:27:57.650340069 +0800
+@@ -142,6 +142,17 @@
+ 		u32 block_num, i;
+ 		u32 eeprom_blk_size = MT7915_EEPROM_BLOCK_SIZE;
+ 
++		/* E2631: the per-unit calibration of this board lives as a file
++		 * inside the jffs2 "wifi" partition, so neither of_node nor
++		 * nvmem can hand it to mt76_eeprom_init() and we land here with
++		 * ret == 0. The efuse on the chip is blank, so everything read
++		 * below is thrown away and the default bin is used anyway -- but
++		 * the dozen MCU round trips to discover that are exactly where
++		 * probe intermittently stalls on this SoC. Try the file first.
++		 */
++		if (!mt7915_eeprom_load_default(dev) && !mt7915_check_eeprom(dev))
++			return 0;
++
+ 		ret = mt7915_mcu_get_eeprom_free_block(dev, &free_block_num);
+ 		if (ret < 0)
+ 			return ret;

@@ -1,0 +1,47 @@
+Subject: [PATCH 031] pci: gate the 2.5GT/s link speed lift by Vendor:Device
+
+The ZTE ZX279128S root ports come up trained at Gen1 x1: U-Boot/cspboot leaves
+Target Link Speed at 2.5GT/s, and the vendor product only ever runs that link at
+Gen1 -- its own MT7916 main function reports LnkSta=0x1011 (speed 1) for the
+whole life of the product (device/backup/vendor-ep0-config.txt).
+
+This tree's pcie_failed_link_retrain() has no Vendor:Device restriction, so as
+soon as the root port is enumerated it sees LnkCtl2.TLS==2.5GT/s with a higher
+LnkCap.SLS and lifts the restriction:
+
+    pci 0000:00:00.0: removing 2.5GT/s downstream link speed restriction
+
+and the link retrains to Gen2 -- one generation faster than the vendor stack has
+ever run it, on a x1 link. Both failures we have on this board sit in DMA bursts
+(the MT7916 firmware download, and client association).
+
+Upstream later tightened this same helper to a Vendor:Device allow-list, because
+lifting a speed restriction that firmware deliberately installed is not safe in
+general. Backport that gate: ASMedia ASM2824 keeps its behaviour, the ZTE port
+stays at the speed its bootloader trained. No config-space poke and no retrain
+request is involved, which is what makes this different (and safe) compared to
+writing LnkCtl2.TLS at runtime.
+
+--- a/drivers/pci/quirks.c	2026-10-14 15:53:40.619462904 +0800
++++ b/drivers/pci/quirks.c	2026-10-14 15:53:40.764947963 +0800
+@@ -93,6 +93,10 @@
+  */
+ int pcie_failed_link_retrain(struct pci_dev *dev)
+ {
++	static const struct pci_device_id ids[] = {
++		{ PCI_VDEVICE(ASMEDIA, 0x2824) }, /* ASMedia ASM2824 */
++		{}
++	};
+ 	u16 lnksta, lnkctl2, oldlnkctl2;
+ 	int ret = -ENOTTY;
+ 	u32 lnkcap;
+@@ -113,7 +117,8 @@
+ 	pcie_capability_read_word(dev, PCI_EXP_LNKCTL2, &lnkctl2);
+ 	pcie_capability_read_dword(dev, PCI_EXP_LNKCAP, &lnkcap);
+ 	if ((lnkctl2 & PCI_EXP_LNKCTL2_TLS) == PCI_EXP_LNKCTL2_TLS_2_5GT &&
+-	    (lnkcap & PCI_EXP_LNKCAP_SLS) != PCI_EXP_LNKCAP_SLS_2_5GB) {
++	    (lnkcap & PCI_EXP_LNKCAP_SLS) != PCI_EXP_LNKCAP_SLS_2_5GB &&
++	    pci_match_id(ids, dev)) {
+ 		pci_info(dev, "removing 2.5GT/s downstream link speed restriction\n");
+ 		ret = pcie_set_target_speed(dev, PCIE_LNKCAP_SLS2SPEED(lnkcap), false);
+ 		if (ret)

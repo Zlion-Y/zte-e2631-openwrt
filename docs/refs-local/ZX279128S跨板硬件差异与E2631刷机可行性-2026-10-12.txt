@@ -1,0 +1,393 @@
+================================================================================
+ZX279128 家族跨板硬件差异 与「能不能直接把 H3600 固件刷进 E2631」
+生成时间: 2026-10-12
+================================================================================
+
+【证据分级说明】
+本文档区分三级证据, 结论优先采信高等级:
+  A 级 = 真机启动日志 / 设备内 /proc 输出 / OpenWrt PR 原始文件
+  B 级 = 芯片官网、厂商 datasheet
+  C 级 = 第三方拆机文章、论坛转述 (存在批次差异, 仅作参考)
+
+  ※ 本文修正了一处初始判断: E2631 的 NAND 类型。最初依据第三方拆机文章
+    (acwifi, C 级) 判为并行 NAND, 后经你仓库 README 中的真机 U-Boot 日志
+    (A 级) 核实为 SPI NAND。以 A 级为准, 详见 §2.3。
+
+
+【0. 结论(修正后)】
+
+不能直接刷, 但差一点点 —— 而且是"改一份 DTS"的那种差。
+
+  X  sysupgrade.bin 直刷:   必失败, 且会砖。
+  X  initramfs 直刷:        不写 flash 不会砖, 但会在内存初始化后崩 (DTB 声明 512MB)。
+  O  正确路径:              在 H3600 那个 target 里加一个 E2631 的 device,
+                            自己写板级 DTS, 编译出 E2631 的镜像。
+
+关键变化: E2631 的存储 (SPI NAND, 与你 H3600 同系列同容量) 和串口
+(0x94404000 ZTE 定制 PL011, periphid 0x001feffe) 与 H3600 完全对得上,
+所以在 H3600 已跑通的 sanechips target 基础上做适配, 是"改 DTS + 加一个
+device 定义"量级的活, 不是写驱动的活。
+
+真正的硬阻塞只剩一条: 内存 512MB vs 256MB。
+其余全部是"需要重新适配"或"需要重新实测"。
+
+
+【1. 先修正两个前提】
+
+1.1 E2631 到底是 S 还是 R?
+    - 第三方拆机图 (C 级) 读到丝印 ZX279128R
+    - 但你仓库的真机 U-Boot 日志 (A 级) 打印: "CPU : ZX279128S@A9,1000MHZ"
+    - sanechips 官网 (B 级): 「ZX279128R 为 ZX279128S 的同晶圆、同封装尺寸芯片,
+      可以作为路由器 SoC 芯片」; 差异在于 S 版引 PON SerDes 接光 PHY (如 GN25L95)
+    -> 结论: 同一块 die, ZTE 的 U-Boot 代码共用, 自报为 S。
+       对移植无实质影响 —— 外设基址、时钟、PHY 全部按 S 处理即可。
+
+1.2 E2631 的真实 NAND (修正)
+    你 README 里 2026-08-31 上板实测的 U-Boot 日志 (A 级):
+        Boot SPI NAND
+        SPI NAND
+        NAND:  manuid=1,15
+        Manu ID: 0x01, Chip ID: 0x15 (AMD SPI NAND HYF1GQ4UTACAE 128MiB 3,3V)
+        128 MiB
+    -> E2631 用的是 SPI NAND, 型号 HYF1GQ4UTACAE, 128MiB。
+    H3600 用的是 (Medium 原文 + DTS 注释, A 级):
+        HeYangTek HYF1GQ4UDACAE (WSON8), manuid=0xc9, devid=0x21, 128 MB
+    两者型号只差一个字母 (U**T**ACAE vs U**D**ACAE), 同系列同容量,
+    都走 spifc@94406000 控制器。
+    -> NAND 不再是阻塞项。但坏块标志策略要留意 (见 §3.3)。
+
+
+【2. E2631 实测硬件 (A 级: U-Boot + Linux 6.18.38 日志)】
+
+2.1 已实测确认
+    SoC        ZTE ZX279128S, 双核 Cortex-A9 rev1 @1000MHz (CPU part 414fc091)
+    CPU 特性   half thumb fastmult edsp thumbee tls
+               -> 无 VFP / 无 NEON / 无硬件除法 => 用户态必须软浮点（arm EABI5 / armel）
+               2026-10-12 用本机原厂 4.1.25 固件复测 = `half fastmult edsp tls`：
+               同样无 vfp/vfpv3/neon/idiv*，差异仅 thumb/thumbee，
+               且已由原厂 /proc/config.gz 证实是 `# CONFIG_ARM_THUMB(E) is not set`（内核配置差异）。
+               独立佐证：原厂 /bin/busybox 的 ELF e_flags = 0x05000202（含 SOFT_FLOAT 位）、
+               加载器 /lib/ld-uClibc-0.9.33.2.so。
+               注意：硬约束是"软浮点"，ISA 层级是 ARMv7-A，**不是 armv5**。
+               附：原厂内核 CONFIG_SMP=y / NR_CPUS=2，是 SMP 内核（第二核在原厂侧本来就在跑）。
+    内存       256 MiB DDR3-1333 (U-Boot 报 256 MiB; ddr init rate 1333 Mbps)
+               Linux 侧: Normal zone [0x40000000-0x4fffffff], Total pages 65536
+    存储       128MB SPI NAND (AMD/Spansion HYF1GQ4UTACAE)
+    串口       0x94404000, ZTE 定制 PL011 (earlycon 用 zteuart, periphid 0x001feffe)
+               ttyAMA0 @ irq 25 / ttyAMA1 @ irq 26
+    L2C-310    CACHE_ID 0x410000c9, AUX_CTRL 0x46030001, 16 ways, 256 kB
+    定时器     arm_global_timer @500MHz, sched_clock 64-bit
+    GIC        "PPI11 is secure or misconfigured" (出现两次 -> DT 编码有问题, 见 §3.4)
+    SMP        实际只起了 1 个核 (nr_cpu_ids=1, "Brought up 1 node, 1 CPU")
+    Bootloader U-Boot 2013.04 (Sep 25 2024), Board: ZTE zx279128sevb
+               cspboot, boot mode 密码 5cE080@fyBD (上电按 1 进入)
+               product_vid = 63 -> vid=63-E1630  (E2631/E1630 同硬件不同运营商版)
+
+2.2 E2631 当前 mainline 进度 (你自己仓库, 2026-08-31 实测)
+    已通: 内核 6.18.38 启动 -> earlycon -> ttyAMA0 console -> initramfs -> busybox shell
+          (init 内跑过 iptables -t mangle -L、ip rule fwmark、/proc/net/ip_tables_targets,
+           确认 TPROXY/REDIRECT/MASQUERADE 目标齐全, 软浮点探针 1234.5*0.25+1 x4 = 6.1504 正确)
+
+    未通 (日志里完全没有出现, DT 里全是 status="disabled"):
+          - 以太网 (无 gmac / mdio 任何输出)
+          - PCIe (无 pcie 输出) -> 也就没有 Wi-Fi
+          - NAND / MTD (无 spifc / mtd 输出) -> 无持久化
+          - GPIO 驱动
+          - 第二个 CPU 核
+          - 时钟是 fixed-clock 占位 (日志 "clk: Disabling unused clocks")
+
+    => E2631 侧目前是"内核 + 串口 + 用户态"通了, 外设全空;
+       H3600 侧是"外设全通, 等上游化"。两边正好互补。
+
+
+【3. 与 H3600 的逐项差异 (按"能不能直接搬"分类)】
+
+3.1 【完全一致 — 直接可用】
+    UART        0x94404000 / 0x94405000, periphid 0x001feffe, 115200n8
+    GPIO        0x94407000 + 0x40*n (n=0..5), 每组 16 线
+    SPI-FC      0x94406000       (SPI NAND 控制器)
+    GMAC        0x92000000 0x400000
+    MDIO        0x9a101000 0x18  <- 地址完全一样
+    PCIe0       DBI 0x0f000000 / ctrl 0x09500000
+    PCIe1       DBI 0x0f100000 / ctrl 0x09600000
+    CRM 时钟    0x94000000(topcrm) 0x94100000(crm2) 0x94400000(lsp0) 0x9a100000(lsp1)
+    pinmux      0x94200000
+    L2C-310     0x00c00000 / GIC 0x00801000 / SCU 0x00800000 / 全局定时器 0x00800200
+    NAND 介质   都是 128MB SPI NAND, 同系列
+    U-Boot      都是 cspboot (密码不同, 你的已实测)
+
+3.2 【硬阻塞 — 内存】
+    H3600 : 512 MB DDR3   memory@40000000 reg = <0x40000000 0x20000000>
+                          reserved-memory pp@5da00000 reg = <0x5da00000 0x2600000>
+                          initramfs 入口 0x48008000
+    E2631 : 256 MB DDR3   (真机实测; DT 已改为 <0x40000000 0x10000000>)
+
+    为什么直接刷必崩:
+      (a) H3600 的 DTB 声明 512MB, 内核对 0x50000000~0x5FFFFFFF 建页并纳入管理,
+          而 E2631 这段物理不存在 -> 一旦分配即访存错误。
+      (b) H3600 的 PP 保留区在 0x5da00000 (38MB), E2631 上该地址越界,
+          内核仍会按 no-map 建立保留区并把 DMA 从中排除。
+      (c) H3600 的 initramfs 入口 0x48008000 是"512MB 机器, 内核放 RAM 中段,
+          避开 U-Boot 在 0x41000000/0x41800000 的收包缓冲"这个策略选出来的。
+          它在 256MB 机器上物理合法, 但不是最优。
+
+    => 这一条决定了"H3600 的镜像不能原样跑"。但改一行 memory 节点即可。
+
+3.3 【需要重新适配 — 但机制相同】
+    (a) NAND 坏块标志
+        H3600 的 PR 里有 patch 027:
+          "mtd/spinand/heyangtek: Reserve both bad-block marker"
+        针对的是 HeYangTek 的芯片。E2631 的芯片 U-Boot 报成
+        "AMD SPI NAND HYF1GQ4UTACAE", Manu ID 0x01 (Spansion/Cypress 的 manuid)
+        vs H3600 的 manuid 0xc9。
+        -> 若坏块标志所在扇区不同, 第三块 marker 的符号表 (AMD/Spansion vs HeYangTek)
+           要按 E2631 实际芯片选。这是必须先真机读 ID 确认的点 (见 §5.1)。
+
+    (b) Wi-Fi
+        H3600 : MT7915D, 单颗双频并发, 主接口 pcie0 + HIF2 挂 pcie1
+                DEVICE_PACKAGES = kmod-mt7915e kmod-mt7915-firmware
+        E2631 : MT7916AN(基带) + MT7976DN(射频) = Filogic 630
+                2.4G 2x2@40MHz 574Mbps / 5G 2x2(3T3R 天线)@160MHz 2402Mbps
+        -> 驱动同为 mt7915e (mt76 里 MT7916 由 mt7915e 驱动支持, 属同一驱动)
+           需改的只有: firmware 文件名 (MT7916_*.bin) + 校准数据来源 + reset gpio
+
+    (c) 以太网端口拓扑
+        H3600 : 5 口 = 4 LAN(SoC 内置 PHY, internal, MDIO 10/11/12/13)
+                      + 1 WAN(外置 Sanechips ZX5201, gmii, 地址 8, SerDes 应答在 9)
+                需要 pinmux ext_phy_pins
+        E2631 : 4 口全部由 SoC 内置 PHY 提供 (最左边是 WAN), 无外置 PHY / 无 switch
+        -> E2631 不需要 ZX5201 驱动与 ext_phy_pins, 但要把 4 个内置 PHY 的角色
+           重新分配 (哪个是 wan)。
+        ※ E2631 当前 DT 里那个 gephy@9b000000 (4 块 0x100000) 节点,
+          在 H3600 的 SoC dtsi 里**并不存在** —— H3600 是把内置 PHY 直接挂 mdio。
+          以 H3600 写法为准: 删掉 gephy 节点。
+
+    (d) 分区表
+        H3600 (SPI-NAND 128MB): bootloader 1M / tag 1M / wifi 1M / usercfg 2M /
+               defcfg 2M / kernel 4M@0x700000 / slot0_gap 27M / trailer 1M@0x2600000 /
+               stock 32M@0x2700000 / ubi 57M@0x4700000
+        E2631 : 原厂是双槽 A/B, 起点长度都不同 (必须先 cat /proc/mtd 实测)
+        -> 直接刷会覆盖 E2631 原厂区间。
+
+    (e) MAC 地址来源
+        H3600 : tag 分区偏移 0x1e 读 6 字节 (WAN 用下一个)
+        E2631 : 位置未确认, 在原厂 config 里
+
+3.4 【DTS 层面的具体 bug / 待补项】(从上面的实测日志直接看出)
+
+    (a) L2C-310 AUX_CTRL 缺 shared-override  ← 最该马上修的一条
+        E2631 实测: AUX_CTRL 0x46030001
+        H3600 原厂: AUX_CTRL 0x76430001
+        差异位: bit22 (shared-override) 与 bit28/29 (prefetch)
+        H3600 的 DTS 注释原文:
+          「Without shared-override the PL310 turns normal non-cacheable
+            shared accesses (dma_alloc_coherent buffers) into cacheable ones,
+            so devices and CPUs see stale data.」
+        -> E2631 的 DT 必须补: arm,shared-override; prefetch-data = <1>;
+           prefetch-instr = <1>; arm,double-linefill = <1>;
+           并把 arm,double-linefill-incr = <0>;
+           否则一上 DMA (以太网 / PCIe Wi-Fi) 就出现缓存一致性故障。
+
+    (b) L2C 设备读与缓存维护的串行化 (PCIe 必需)
+        H3600 PR patch 004/005: 给 pl310 加 zte,l2c-io-read-lock。
+        根因: 一次尚未完成的 PCIe 读若与 L2 维护/sync 操作重叠, 本 SoC 会死锁
+        (原厂内核用一个锁把两者串起来)。
+        -> E2631 上 PCIe / Wi-Fi 时必带, 否则出现 mt7916 MCU 超时掉卡。
+
+    (c) GIC/"PPI11 is secure or misconfigured"
+        E2631 DT: timer@800200 的 interrupts = <1 11 0x104>
+        H3600 DT:                interrupts = <GIC_PPI 11 0x301>
+        类型 1=PPI, 0x104 = level-low, 0x301 = edge-rising, IRQ_TYPE_LEVEL_LOW 等。
+        内核两次报 PPI11 secure/misconfigured, 说明该 PPI 的描述与硬件不符。
+        -> 按 H3600 的 <GIC_PPI 11 0x301> 改。
+
+    (d) 第二核
+        E2631 当前 cpus 只有 cpu@0, 但 compatible 已写 zte,zx279128-smp。
+        -> 抄 H3600 的 platsmp-zx279128s.c (173 行) + patch 007
+           (ARM: zte: Add ZX279128S platform and CPU hotplug support)。
+           这是把"单核"上限抬上去的唯一办法。
+
+    (e) 时钟
+        E2631 现在是 fixed-clock 占位 (25M/100M/500M)。
+        -> 换成 H3600 的真实 CRM 驱动 clk-zx279128s.c (459 行) + patch 008/009,
+           以及 dt-bindings/clock/zte,zx279128s-crm.h。
+           注意 E2631 DT 里 periphclk 自己都写了注释"to be calibrated on hardware"。
+
+3.5 【只能物理实测 — 无法从代码推导】
+    LED 与按键 GPIO。H3600 那 11 个 LED + 4 个按键是按"逐个 GPIO 点亮看面板"
+    实测出来的, 不是猜的。E2631 面板布局不同 (无电话口, 无 broadband 灯),
+    必须自己测。按键要坚持用 gpio-keys-polled —— H3600 实测走 irq 模式会
+    RCU stall 死锁 (根因是未验证的 GPIO IRQ chip)。
+
+
+【4. 直接刷会怎样 —— 逐条】
+
+4.1 刷 sysupgrade.bin (网页 / 命令行)
+    (1) OpenWrt sysupgrade 校验 board_name, H3600 镜像是 zte,zxhn-h3600,
+        E2631 是 zte,...-e2631, 直接拒绝。
+    (2) 即使 -F 强刷, 它按 H3600 分区表把 UBI 写到 0x4700000 长 57MB,
+        E2631 128MB flash 上那是原厂 B 槽 + 配置区, 一写就废。
+    (3) 原厂 cspboot 的槽头/CRC 被破坏后, 原厂固件回不去。
+    => 会砖, 且不是"再刷回原厂"能救的那种。
+
+4.2 走 initramfs (TFTP 灌内存, 不写 flash)
+    不砖, 但跑不起来:
+    - DTB 声明 512MB, PP 保留区落越界 -> 内存管理初始化后崩。
+    - Wi-Fi firmware 是 MT7915 的。
+    唯一价值: 能看到 earlycon 输出, 证明 UART/时钟/串口链路可用。
+    => 可以做, 当作一次探路, 但预期进不去系统。
+
+4.3 真正该做的
+    在 sanechips target 里加 Device/zte_zxhn-e2631, 编译 E2631 的 initramfs,
+    TFTP 引导验证, 通过后再刷 sysupgrade 到 B 槽。
+
+
+【5. 上机前先取证 (你今天就能做, 零风险)】
+
+你有 192.168.5.22 的 telnet shell (admin/admin), 以及 U-Boot boot mode 密码
+5cE080@fyBD。下面这些结果能把剩余的不确定项全部落定:
+
+5.1 NAND (决定坏块标志策略, 是 §3.3a 的唯一未知)
+      cat /proc/mtd
+      dmesg | grep -iE 'nand|spi|mtd|ubi'
+      # 更权威的做法是清空写保护后读 U-Boot 那两行:
+      #   NAND:  manuid=1,15
+      #   Manu ID: 0x01, Chip ID: 0x15 (AMD SPI NAND HYF1GQ4UTACAE 128MiB)
+      # 你 README 里已经有了, 直接引用即可; 确认 E2631 这批是否同一颗
+
+5.2 内存与 SoC (确认 256MB, 确认核数)
+      dmesg | grep -iE 'Memory:|DRAM|BogoMIPS'
+      cat /proc/cpuinfo
+      cat /proc/device-tree/model; echo; cat /proc/device-tree/compatible; echo
+
+5.3 原厂分区表 (写 DTS 必用)
+      cat /proc/mtd              # 拿 label / size / offset
+      cat /proc/cmdline
+
+5.4 网口与 PHY (确定是 4 个内置 PHY 还是别的)
+      ls /sys/class/net/
+      for i in /sys/class/net/*/address; do echo "$i: $(cat $i)"; done
+      ls /sys/class/mdio_bus/*/ 2>/dev/null
+      ethtool eth0 2>/dev/null | head -20
+
+5.5 Wi-Fi (确认 MT7916 + 看 PCIe 上的 ID)
+      lsmod | grep -iE 'mt79|mt76'
+      dmesg | grep -iE 'mt79|pcie|pci '
+      ls /sys/bus/pci/devices/ 2>/dev/null
+      cat /sys/bus/pci/devices/*/vendor /sys/bus/pci/devices/*/device 2>/dev/null
+
+5.6 L2C 与 bootloader 密码(顺手白捡)
+      dmesg | grep -i 'L2C-310'
+      # 从 flash dump 出 bootloader 分区后:
+      grep -abo '4A746281E9135F96E0777E658C08015ECEF42440' bootloader.bin
+      # 命中即说明与 H3600 共用同一套 cspboot 密码表(你的 5cE080@fyBD 已是可用入口)
+
+
+【6. 可复用的全部资产 (SoC 级, 与板卡无关)】
+
+  OpenWrt sanechips target (PR #25469) 的 27 个补丁:
+    001 amba-pl011 UART (ZTE 定制 PL011)          <- 直接要
+    004/005 L2C-310 设备读与缓存维护串行化          <- PCIe 必需
+    006/007 ARM zte 平台 + CPU hotplug(第二核)     <- 直接要
+    008/009 CRM 时钟 clk-zx279128s.c (459 行)      <- 直接要
+    010/011 GPIO 驱动                              <- 直接要
+    012/013 pinctrl-single + syscon
+    014/015 PCIe host (dwc) 333 行                 <- 直接要
+    016/017 MDIO 158 行                            <- 直接要
+    018 ZX5201 PHY                                 <- E2631 不需要(除非 WAN 外置)
+    019/020 以太网 switch 354 行                    <- 直接要
+    021/022 SPI flash 控制器                        <- 直接要
+    023/024 USB DWC3
+    025 SoC 描述 zx279128s.dtsi (397 行)            <- 直接抄
+    026 H3600 板级 DTS (361 行)                     <- 当模板抄结构
+    027 heyangtek 双坏块标志                        <- 按 §3.3a 决定
+
+  files/ 下的驱动源码 (可直接放进去):
+    arch/arm/mach-zte/platsmp-zx279128s.c            173 行
+    arch/arm/mach-zte/zx279128s.c                     19 行
+    drivers/clk/zte/clk-zx279128s.c                  459 行
+    drivers/gpio/gpio-zx279128s.c                     78 行
+    drivers/net/ethernet/zte/zx279128s-main.c       1502 行
+    drivers/net/ethernet/zte/zx279128s-ppe.c         803 行
+    drivers/net/ethernet/zte/zx279128s-switch.c      354 行
+    drivers/net/ethernet/zte/zx279128s-eth.h         385 行
+    drivers/net/mdio/mdio-zx279128s.c                158 行
+    drivers/net/phy/sanechips.c                      153 行
+    drivers/pci/controller/dwc/pcie-zx279128s.c      333 行
+    drivers/spi/spi-zx279128s-spifc.c                353 行
+    include/dt-bindings/clock/zte,zx279128s-crm.h     55 行
+
+  image/Makefile 的构建原语:
+    Build/zte-slot-marker
+        cspboot 只引导以 32 字节槽标记开头的内核:
+        33 33 33 33 CC CC CC CC 88 88 88 88 DD DD DD DD + 16 个 FF
+    Build/uImage-ramboot
+        TFTP 引导用, 装址 0x48008000。
+        该地址是"512MB 机器、内核放 RAM 中段、避开 U-Boot 在
+        0x41000000/0x41800000 的收包缓冲"选出来的; 在 E2631 的 256MB 上
+        **物理依然合法**(0x48008000 < 0x50000000), 不需要"重算"。
+        2026-10-12 定档: E2631 仍用 0x40008000（本板 cspboot 从 flash 引导
+        内核时用的就是它, 也是 Device/Default 的 KERNEL_LOADADDR）;
+        0x48008000 留作"TFTP 引导静默卡死"时的第一备选, 一行可切。
+
+  base-files/lib/upgrade/platform.sh (231 行, 双槽 sysupgrade)
+  config-6.18 (526 行)
+
+  SoC 级 dtsi (zx279128s.dtsi) 已有节点:
+     cpus(cortex-a9 x2) / scu / gic / global-timer / twd-timer / twd-wdt(disabled)
+     l2cc(pl310 + zte,l2c-io-read-lock) / iram(mmio-sram + zte,zx279128s-smp-sram)
+     topcrm / crm2 / lsp0crpm / lsp1crpm / pinmux
+     serial0 / serial1 / spifc / gpio0..5 / mdio / usb(dwc3) / pcie0 / pcie1
+     gmac + gmac_port0..4 (5 个端口节点, 默认 disabled)
+     reboot(syscon-reboot, sysctrl 0x94000000 offset 0x44 mask 0x1 value 0x1)
+
+
+【7. 建议推进顺序】
+
+  1. §5 取证 (今天, 零风险)
+     重点: /proc/mtd 拿 E2631 原厂分区表; dmesg 确认 NAND ID 与 L2C AUX_CTRL
+
+  2. 起 OpenWrt 构建 (Linux/WSL 或 GitHub Actions)
+     直接编译 H3600 的 initramfs, 先在 E2631 上 TFTP 灌内存跑一次
+     -> 预期停在内存/PP 初始化, 但要拿到 earlycon 输出, 确认链路
+
+  3. 加 Device/zte_zxhn-e2631, 写板级 DTS
+     顺序: 串口 -> CRM 时钟 -> GPIO -> MDIO+内置PHY -> GMAC 通网
+           -> PCIe + mt7915e(MT7916 firmware) -> NAND 持久化 -> sysupgrade 进 B 槽
+     每轮只改一个子系统, 用串口 log 迭代。
+     DTS 具体清单:
+       - memory: reg = <0x40000000 0x10000000>            (256MB)
+       - reserved-memory: PP 保留按 E2631 实测重算, 不许越界
+       - l2cc: arm,shared-override + prefetch + zte,l2c-io-read-lock
+       - timer: interrupts = <GIC_PPI 11 0x301>
+       - 删 gephy@9b000000, 改为 mdio 下挂 4 个内置 PHY
+       - gmac: 4 个 port 分配 lan1..lan3 + wan
+       - pcie0/pcie1: 打开 + 实测 reset/enable gpios
+       - spifc: 打开 + E2631 原厂分区表 + 正确坏块标志处理
+       - 删掉 fixed-clock 占位, 改用 CRM 时钟
+       - LED/按键: 物理实测
+
+  4. 全程纪律
+     - 不写 flash 直到 TFTP 跑通
+     - 只在非活动槽测试
+     - userland 用 soft-float / armel（arm EABI5；**不是** armv5，见 §2.1 注）
+
+
+【8. 三条不会因为移植进步而改变的硬约束】
+
+  1. SoC 无 AES 硬加速 —— 社区在同类平台上实测 mihomo 单核 ~165Mbps 封顶。
+  2. 无 VFP / 无 NEON / 无硬件除法 (你的 init 日志已实测 Features 列表证实;
+     2026-10-12 又用原厂 4.1.25 固件复测一次 = `half fastmult edsp tls`，
+     且原厂 /proc/config.gz 逐字写着 `# CONFIG_VFP is not set`；
+     原厂 busybox ELF e_flags = 0x05000202 带 SOFT_FLOAT 位),
+     用户态必须 soft-float / arm EABI5（ISA 是 ARMv7-A，**不必**退回 armv5）。
+  3. flash 分区 AES-128-ECB 透明解密 (密钥由 zte_token 派生) ——
+     只要动 NAND 上的原厂持久化数据就绕不开。
+
+================================================================================
+一句话收尾:
+  同芯片家族里, E2631 和 H3600 的硬件相似度比预期高得多 —— 内存以外
+  (512 vs 256MB) 没有第二处硬阻塞, NAND/串口/外设基址全部对得上。
+  所以答案不是"能不能刷", 而是"把 H3600 那套 target 拿来, 补一份
+  E2631 的板级 DTS 重新编译"。直接刷原镜像不行。
+================================================================================

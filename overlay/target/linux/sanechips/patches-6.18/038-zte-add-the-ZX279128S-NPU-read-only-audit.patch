@@ -1,0 +1,26 @@
+--- a/drivers/net/ethernet/zte/Kconfig
++++ b/drivers/net/ethernet/zte/Kconfig
+@@ -47,4 +47,16 @@
+ 
+ 	  If unsure, say Y on this board.
+ 
++
++config ZX_NPU_AUDIT
++	bool "ZTE ZX279128S npu read-only register audit"
++	depends on ZX279128S_ETH
++	help
++	  Maps the NPP/IDM/TM/PP accelerator windows and exposes a proc file
++	  that reads a small documented set of registers only when userspace
++	  writes "run". It never writes a register. For P1 register-diff
++	  validation on the npu branch.
++
++	  If unsure, say Y on this board.
++
+ endif # NET_VENDOR_ZTE
+--- a/drivers/net/ethernet/zte/Makefile
++++ b/drivers/net/ethernet/zte/Makefile
+@@ -3,3 +3,4 @@
+ zx279128s-eth-y := zx279128s-main.o zx279128s-ppe.o zx279128s-switch.o
+ zx279128s-eth-$(CONFIG_ZX_FFE) += zx279128s-ffe.o
+ zx279128s-eth-$(CONFIG_ZX_NPU) += zx279128s-npu.o
++zx279128s-eth-$(CONFIG_ZX_NPU_AUDIT) += zx279128s-npu-audit.o

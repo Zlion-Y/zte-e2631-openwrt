@@ -1,0 +1,73 @@
+#!/bin/sh
+# Hardware probe for the E2631 port: everything the board device tree had to
+# guess at, measured from the running system and printed to stdout.
+# Read-only; it never writes flash. Run it over the network on first boot:
+#
+#   /sbin/e2631-probe 2>&1 | tee /tmp/probe.txt
+#
+# Keep it until every line has been checked against zx279128s-zte-zxhn-e2631.dts.
+
+echo "=== cmdline (root= should be the squashfs row: mtdblock7 with today's table) ==="
+cat /proc/cmdline
+
+echo "=== mtd table: numbering, sizes, bad blocks and ECC counters ==="
+cat /proc/mtd
+for d in /sys/class/mtd/mtd*; do
+	# /sys/class/mtd also holds the read-only twins (mtdNro); they have no attrs
+	# and only add noise here.
+	case "${d##*/}" in
+	mtd[0-9]|mtd[0-9][0-9]) ;;
+	*) continue ;;
+	esac
+	printf '%-6s %-14s offset=%-10s size=%-10s erasesize=%-8s bad=%-3s ecc_fail=%-3s corrected=%s\n' \
+		"${d##*/}" "$(cat $d/name)" "$(cat $d/offset 2>/dev/null)" "$(cat $d/size)" "$(cat $d/erasesize)" \
+		"$(cat $d/bad_blocks 2>/dev/null)" "$(cat $d/ecc_failures 2>/dev/null)" \
+		"$(cat $d/corrected_bits 2>/dev/null)"
+done
+
+echo "=== mounts: the overlay should be the jffs2 row (mtdblock9 with today's table) ==="
+grep -E 'jffs2|squashfs|overlay' /proc/mounts
+
+echo "=== mdio: which PHY addresses answered (board file guesses 0xa..0xd) ==="
+ls /sys/bus/mdio_bus/devices 2>/dev/null
+for f in /sys/bus/mdio_bus/devices/*/*id*; do [ -e "$f" ] && echo "  $f = $(cat $f)"; done 2>/dev/null
+
+echo "=== netdevs and their PHYs ==="
+for d in /sys/class/net/*; do
+	n=${d##*/}
+	[ -e "$d/phydev" ] && echo "  $n phy=$(basename $(readlink $d/phydev)) state=$(cat $d/operstate) mac=$(cat $d/address)"
+done
+ip -o link 2>/dev/null
+
+echo "=== pci: does the Wi-Fi chip enumerate (MediaTek vendor 0x14c3) ==="
+for d in /sys/bus/pci/devices/*; do
+	[ -r "$d/vendor" ] || continue
+	echo "  ${d##*/} $(cat $d/vendor):$(cat $d/device) irq=$(cat $d/irq) driver=$(basename $(readlink $d/driver 2>/dev/null) 2>/dev/null)"
+done
+ls /lib/firmware/mediatek 2>&1
+
+echo "=== modules actually loaded (mt7915e needs firmware to have arrived first) ==="
+lsmod
+
+echo "=== gpio chips (LEDs claim &gpio2 8 / &gpio0 8 / &gpio3 12, keys &gpio1 2 and 4) ==="
+for c in /sys/class/gpio/gpiochip*; do
+	[ -d "$c" ] || continue
+	echo "  ${c##*/} base=$(cat $c/base) ngpio=$(cat $c/ngpio) label=$(cat $c/label)"
+done
+ls /sys/class/leds 2>/dev/null
+
+echo "=== bound devices of this target's own drivers (a driver with no device under it
+    never probed: that is how the first boot lost the PCIe PHYs and syscon-reboot,
+    both children of a CLK_OF_DECLARE clock provider that of_platform_populate skips)"
+for d in /sys/bus/platform/drivers/*/; do
+	name=${d##*/}; name=${name%/}
+	case "$name" in zx*|zte*|syscon*|ramoops|gpio*|leds*|mdio*) ;; *) continue ;; esac
+	echo "  $name: $(for x in ${d}*; do [ -e "$x" ] && echo -n "${x##*/} "; done)"
+done
+echo "  /sys/class/phy: $(ls /sys/class/phy 2>&1)"
+echo "  deferred: $(cat /sys/kernel/debug/devices_deferred 2>/dev/null || echo '(no debugfs)')"
+
+echo "=== kernel log: flash, wifi, vfp, errors ==="
+dmesg | grep -i -E 'spinand|nand|jffs2|squashfs|mtd|mdio|phy|gmac|pcie|vfp|neon|error|warn|fail'
+
+echo "=== done ==="

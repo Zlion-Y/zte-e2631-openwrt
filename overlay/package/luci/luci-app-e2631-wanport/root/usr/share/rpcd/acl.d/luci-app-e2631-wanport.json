@@ -1,0 +1,17 @@
+{
+	"luci-app-e2631-wanport": {
+		"description": "Grant access to the WAN port selection (WAN/LAN adaptive)",
+		"read": {
+			"ubus": {
+				"e2631-wanport": [ "status" ]
+			},
+			"uci": [ "e2631_ports" ]
+		},
+		"write": {
+			"ubus": {
+				"e2631-wanport": [ "set_port", "redetect", "reload" ]
+			},
+			"uci": [ "e2631_ports" ]
+		}
+	}
+}

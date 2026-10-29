@@ -1,0 +1,352 @@
+================================================================================
+H3600（国外版）OpenWrt 镜像体积 · 以及 E2631 能否"改包 + 原厂 supgrade 直接刷"
+日期：2026-10-12
+证据等级：A 级（镜像/tar 实名实测 + 本机官方升级包逐字段解析 + 真机分区表）
+================================================================================
+
+【零、两个结论先给】
+
+结论 1 —— 国外那版（H3600）有多小：
+    系统整体 8,263,950 B = 7.88 MiB（squashfs-sysupgrade.bin）
+    内存启动版 7,910,188 B = 7.54 MiB（initramfs.uImage）
+    → 比 E2631 官方升级包（20.25 MiB）小了 60%。
+
+结论 2 —— 能不能像 cnjn 那样"改包 + 原厂 supgrade 刷入"：
+    **机制上能，而且这台机器比 SR1010 条件更好。**
+    门禁链（魔数/CRC/key/版本门/位图/uboot 校验）逐条可控，且 **8B8 没有版本门**；
+    校验失败是 A/B 回退、不是砖；本机已有这个平台的重封工具链 + 24 步全链模拟器。
+
+    但**前置条件**是：必须先有"E2631 自己的 OpenWrt"。
+    H3600 那份镜像 **不能拿去改**（见第三节：内存/Wi-Fi/网口全不同）。
+
+    ★ 2026-10-12 更正：**本文件旧版声称的"内核超 1.69%、必须先裁 57KB"已作废。**
+      那是把"官方包自己选定的 kernel 段尺寸（0x33FDCC，正好等于 kernel1 分区长）"
+      误当成了硬件上限。真机 versionstates 实测：**槽跨度 28 MiB 才是可写空间上限**；
+      OpenWrt 全包 7.88 MiB ⇒ 余量约 20 MiB，**内核不需要裁**。详见第三节。
+
+
+【一、H3600（国外版）镜像体积 —— 实测字节数】
+
+来源：https://openwrt.style.dev/h3600/
+主机：sanechips/generic，profile zte_zxhn-h3600，构建 r36668+5-d9f8ecc394
+取数方式：HTTP HEAD 拿 Content-Length；sysupgrade 再按 tar 结构逐条读条目头
+
+| 产物 | 字节数 | MiB | 说明 |
+|---|---|---|---|
+| initramfs.uImage | 7,910,188 | **7.54** | TFTP 内存启动，不写 flash |
+| squashfs-sysupgrade.bin | 8,263,950 | **7.88** | 正式安装 + 后续 sysupgrade |
+| └ 内含 kernel（32B 槽标记 + uImage） | 3,464,972 | 3.3045 | tar 条目 sysupgrade-zte_zxhn-h3600/kernel |
+| └ 内含 root（squashfs rootfs） | 4,788,224 | 4.566 | tar 条目 sysupgrade-zte_zxhn-h3600/root |
+| └ CONTROL + tar 头 + append-metadata 余量 | ≈ 24,586 | ≈0.023 | 反算 |
+| 参考：设备 flash | 134,217,728 | 128 | SPI-NAND |
+| 参考：官方给的 UBI 空间 | — | 57 | PR 里 rootfs_data/UBI 大小 |
+| 参考：页面自述可装额外包 | — | ≈15 | overlay 余量 |
+
+关于内核上限（H3600 自己的 image/Makefile）：
+    KERNEL_SIZE := 4096k        # 构建时 check-size 强制
+    KERNEL := kernel-bin | append-dtb | uImage none | zte-slot-marker | check-size
+    → H3600 允许内核 4 MiB，实际用了 3.3045 MiB，还剩 0.7 MiB。
+    → 注意 `uImage none` 指 uImage 外层不压缩；压缩在内层 zImage 里（配置项决定 gzip/lzma/xz）。
+
+
+【二、E2631 官方升级包的几何 —— 本机实测】
+
+样本（本机已有）：
+    D:/AI/中兴/AX3000/zxhne2631_hv100_fv1008b88000_firmware-20260916183918.bin
+    D:/AI/中兴/AX3000/zxhne2631_hv100_fv1007b58000_firmware-20251027210306.bin
+解析工具：tools/parse_zte_pkg.py（本次新增）
+
+| 字段 | 8B8 包 | 7B5 包 |
+|---|---|---|
+| 文件大小 | 21,234,196 B = **20.25 MiB** | 22,413,844 B = **21.38 MiB** |
+| 版本串 | V1.0.0.8B8.8000 | V1.0.0.7B5.8000 |
+| key 对 | 0x1351 / 0x5211（spec 13515211） | 同 |
+| BitVidMap (+0x1B6) | 0x0F | 0x07 |
+| 第二版本串 (+0x110) | V1.1.1 | V1.0.0 |
+| +0x19E 版本门串 | 全 0xFF（新格式，1.0.9 版本门必挂——本机不是 1.0.9，无影响） | 同 |
+| **kernel 段** | data_off 0x000234，size **0x33FDCC = 3,407,308 B** | 同 size，CRC 不同 |
+| **rootfs 段** | data_off 0x340214，段长 **0x1100000 = 17.00 MiB** | 段长 **0x1220000 = 18.12 MiB** |
+| 槽 A 描述 | base 0x700000，span 0x01C00000（**28 MiB**） | 同 |
+| 槽 B 描述 | base 0x2300000，span 0x01C00000（28 MiB） | 同 |
+| 外层头 CRC(0xB8) | 0xECDEC1BB = 实算一致 ✓ | 一致 ✓ |
+| 全 verhdr CRC(0x210) | 0x9B3E3C07 = 实算一致 ✓ | 一致 ✓ |
+| 备注 | **与 SR6105_V1.0.0.8B8.8000.bin 完全相同**（同 size 同 CRC）——印证报告 §9.6「SR6105/6107 包 = E2631 固件本体」 | |
+
+包结构（实测推出的精确布局）：
+    [0x000 .. 0x214)   外层头（四魔数 + verhdr 0x200）
+    [0x214 .. 0x234)   0x20 过渡
+    [0x234 .. 0x340000)  kernel 段（= uImage 本体，3,407,308 B）
+    [0x340000 .. 0x340214)  第二段头 0x214
+    [0x340214 .. EOF)   rootfs 段（密文）
+    （0x234 + 0x33FDCC = 0x340000；0x340000 + 0x214 = 0x340214 —— 完全自洽）
+
+**关键：包内 kernel 段 = 设备 kernel1 分区 [0x20:] 的原样内容**
+    · 设备 kernel1 头 32B = `33 33 33 33 cc cc cc cc 88 88 88 88 dd dd dd dd ff ×16`（32 字节槽标记）
+    · 包内 kernel 段头 8B = `27 05 19 56 fe 15 fd 32` = uImage 魔数
+    · 逐字节比对：`包K段 == kernel1[0x20:]` → **True**
+    ⇒ 包里的 kernel 段**不含那 32 字节槽标记**；标记留在分区里，只覆盖 uImage 部分。
+
+**关键：包内 rootfs 段是密文，解密后 = 设备上运行的明文 rootfs**
+    · 包 rootfs 段密文 md5 = c2cd8e3e40dcbbaec600205ec6505fed
+    · AES-128-ECB(key `E263111559d0dfde`) 解密后 md5 = **835653325cafa1c73d52e2baadd8d973**
+    · 设备 /dev/mtdblock8 dump 的 md5 = **835653325cafa1c73d52e2baadd8d973**
+    · 头 8 字节均为 `85 19 01 e0`（JFFS2）
+    ⇒ **逐字节相同**。这一条同时三证：key 正确、包内 rootfs 是密文、设备读出来是明文（内核透明解密）。
+      （与《E2631原厂挂载结构分析》的结论完全一致，此处是独立的第三条证据。）
+
+
+【三、★★ 更正：真正的尺寸上限是"槽跨度 28 MiB"，不是官方包的 kernel 段大小 ★★】
+
+本文件旧版把 kernel1 分区长（0x340000 = 3.25 MiB）当成了"E2631 的内核上限"，
+据此算出"H3600 内核超 1.69%、必须先裁 57KB"。**这个结论作废，它是把包的声明当成了硬件限制。**
+
+真机 versionstates 实测（192.168.5.3，2026-10-12，原文见第六节）：
+    curverheader_lowstart      : 0x00700000     ← 槽 A 起点
+    curverheader_lowendstart   : 0x02300000     ← 槽 A 终点
+    curverheader_highstart     : 0x02300000     ← 槽 B 起点
+    curverheader_highendStart  : 0x03f00000     ← 槽 B 终点（槽尾）
+    ⇒ 槽 A / 槽 B 各 0x1C00000 = **28 MiB**，合计 56 MiB
+    ⇒ **可写空间上限 = 28 MiB/槽 —— 这才是硬件约束。**
+
+那 3.25 MiB 是什么？—— 它是**官方固件自己**在槽内的布局（记住：槽是容器，里面怎么切是包说了算）：
+    官方把槽切成：kernel1 @ 槽内 +0x000000（3.25 MiB）
+                + kernel2 @ 槽内 +0x340000（3.25 MiB，6B5 代没有这一条）
+                + rootfs  @ 槽内 +0x680000
+    官方包 verhdr 的 kernel extent size = 0x33FDCC = 0x340000 − 0x234，
+    —— 即"官方选了正好铺满 kernel1 分区的大小"。**这是官方的一个选择，不是平台给的限制。**
+
+尺寸账（重算）：
+| 项 | 字节数 | MiB |
+|---|---|---|
+| OpenWrt 全包（squashfs-sysupgrade） | 8,263,950 | 7.88 |
+| └ kernel（32B 槽标记 + uImage） | 3,464,972 | 3.30 |
+| └ rootfs（squashfs） | 4,788,224 | 4.57 |
+| **单个槽的可写空间** | **29,360,128** | **28.00** |
+| ⇒ 余量 | 21,096,178 | **20.12** |
+
+⇒ **内核、rootfs 都不需要裁。** 全包只占一槽的 28%，剩下 20 MiB 够做 overlay。
+
+与"包声明"有关的边界（不是尺寸，是锚点）：
+    · **槽起点 0x700000 / 0x2300000 是可依赖的固定锚点**（versionstates 实测值）；
+    · 但**槽内**的版本头落点是**变动的**：本机实测槽 A 版本头在 0x1C60000（槽内偏移 0x1560000），
+      槽 B 版本头在 0x3CA0000（槽内偏移 0x19A0000）—— **同机两槽偏移不同**，
+      说明槽内布局（含版本头位置）随**该槽内那份固件的包声明**变化。
+    ⇒ 这就是"写入落点由包声明"的直接实证：槽起点固定，槽内随便声明。
+
+
+【四、cnjn 在 SR1010 上到底做了什么（读帖实录）】
+
+帖子：恩山 thread-8486503，作者 cnjn，2026-08-23 首发，2026-10-12 12:37 最后编辑
+设备：中兴星云MAX SR1010（ZXSLC，ZX279133，5×2.5G，512M 内存，128M NAND）
+产物：ImmortalWrt 25.12 + Linux 6.18，`sr1010-owrt.bin`
+      sha256 b8ca0baabb16fe8b19c662ac58a229c8624103d3b1645419c0ce3623635e6a6a
+      仓库 github.com/cnjn/immortalwrt（分支 sr1010-zx279133）
+      内核/驱动 github.com/cnjn/linux-mainline-zte-zxslc-sr1010
+
+他的关键做法（逐条）：
+    1. **把 OpenWrt 打成原厂升级包格式** —— "同一个 .bin，原厂网页的升级页面能直接刷，
+       LuCI 的升级页面和 sysupgrade 也能刷"。刷法：原厂网页
+       `http://192.168.5.1/supgrade.html` 上传 → 重启 → 192.168.5.1，root 空密码。
+    2. **用第二个固件槽** —— 原厂本来就有两个固件槽，U-Boot 启动序号最大的有效槽。
+    3. **OpenWrt 配置放原厂 /Plugin 分区** 的 `.owrt` 子目录里，原厂文件原样留着；
+       OpenWrt 恢复出厂只清自己那个目录。复用了原厂 Plugin 分区又得 40M 空间。
+    4. **回原厂：`zte-fwslot switch` + reboot** —— 只重写那个槽的版本头，固件本身不动。
+       LuCI 里"系统 → 固件槽位"也有按钮。
+    5. **原厂 → OpenWrt 目前要在原厂网页再刷一次。** 原厂自带的 `fw_flashing -v switch`
+       有 bug（不擦除、写进去是新旧按位与、序号没变大、校验也错，却提示成功）—— 他明确说"别用它"。
+    6. **改了 U-Boot 一条指令**：原厂 U-Boot 加载内核时先在堆里拷一份，有约 8MB 上限；
+       他只改了 OpenWrt 槽里那份 U-Boot，原厂槽里的不动。
+    7. 槽位 41MB；Tailscale（除 dae 外最大的包）放不下所以没带。
+    8. 坑：JFFS2 在这块 Winbond W25N01KV 上写完重挂会 ECC 错（清除标记写进 OOB 第 0 页，
+       同页二次编程）→ 改成不往 OOB 写清除标记；顺手把 SPI 从 25MHz 单线提到 50MHz 四线。
+
+移植本身（对照你的处境）：
+    · 他也是"对着原厂内核模块一点点读，把网络/交换/闪存驱动按主线写法重写" —— 同一套方法论。
+    · ZX279133 是 **Cortex-A53**；你手上的 E2631 是 **ZX279128S / Cortex-A9**，**驱动不能互换**。
+      能直接参考的是 H3600 PR 那套 `zx279128s-*`（精确同 SoC）。
+    · 他的 UART 逆向成果（periphid 0x001feffe）你这边可以直接受益。
+
+
+【五、E2631 照做的门禁对照表 —— 全部可控】
+
+（门禁定义来自本机《中兴研究全量整理报告_2026-10-06.md》第三/四篇，
+  该报告是这个平台逐字节反汇编的产物，非推测）
+
+| 门 | 层级 | E2631(8B8) 现状 | 应对 | 难度 |
+|---|---|---|---|---|
+| 四魔数 99999999/44444444/55555555/AAAAAAAA | cspd+uboot | 固定 | 照抄 | 无 |
+| 外层头 CRC @0xB8 | cspd+uboot | zlib CRC32(buf[0x14:0xB8]) | 重算 | 易 |
+| 全 verhdr CRC @0x210 | cspd | CRC32(buf[0x14:0x210]) | 重算 | 易 |
+| kernel / rootfs 段 CRC | cspd+uboot | 段 CRC（rootfs 对**密文**算） | 重算 | 易 |
+| **key 门（cspd）** | cspd | 本机 13515211 账面 | 保持 0x1351/0x5211 **或** key1=0 万能 | 易 |
+| **版本门 pdtCheckFirmware** | cspd | **8B8 +0x54C = NULL（全量扫描证实无注册者）= 无版本门** | **无需处理** ✓ | 无 |
+| AllVidBitMap | cspd | flag 默认关 | — | 无 |
+| VerFileByVidCheck | cspd | 表 {31,63,51,76}；E2631 vid=63 ∈ 表 idx1 | 位图带 bit1；官方 0x0F 本就够 | 易 |
+| BootVerCheck | cspd | 8B8 默认关 | — | 无 |
+| CheckFileIntegrality | cspd | web 上传路径 | — | 无 |
+| **uboot verify_header key 门** | uboot | 硬编码 need；**pkg key1 ∈ {0,0xFFFF} 即 bypass** | key0 包可通过 | 易 |
+| 开机 search_firmware 失败 | uboot | — | **A/B 回退，不是砖** | 安全网 ✓ |
+
+**而且这套流程在这个平台上已经是"已解决"的**：本机报告 §6 记录了完整的重封工具链
+（`tools/zpk.py` 解析/校验/retarget、`patch_key238.py` 改 key、`make_7b5_8b8_e2633.py`）
+和 **24 步全链模拟器**（`sim_109_web_flash.py` / `sim_8b1_web_flash.py`，事件
+1 FileCheck → 2 GeneralCheck → 3 flash，设备前提内嵌）。
+
+**还有一条间接实证**：`D:/AI/中兴/e2631-flash-6b5.sh` v1.3.6 在真机（192.168.5.3）上
+走通了「下载官方 6B5 包 → `fw_flashing -f` 强刷备用槽 → `boot_flashing` 换引导 → reboot」
+全流程。→ **原厂包格式在这台机器上确实能被接受并启动**。cnjn 做的事，本质只是
+把这个包的载荷换成 OpenWrt。
+
+
+【五·五、四条主张逐条核实（2026-10-12 真机补测）】
+
+主张 1「包这么小，直接做成网页刷机就行」—— ✅ **成立**
+    实测 df -k（192.168.5.3，本次）：
+        /var  tmpfs  40960 KB  → 可用 40808 KB = **39.9 MB**
+        /tmp  tmpfs  20480 KB  → 可用 20480 KB = **20.0 MB**
+    web supgrade 落地区 = /var/tmp/fw.bin（报告 §5.2），要求 /var ≥ 包大小。
+    官方包 20.25–26.9 MB 都能过 ⇒ OpenWrt 7.88 MB 占用不到 20%。
+    ⇒ 「网页上传有大小限制」确有其事，但那个限制（≈40 MB tmpfs）对 7.88 MB 毫无压力。
+
+主张 2「分区/落点不是写死的，在升级包中声明就行」—— ✅ **成立**（下面是证据）
+    包 verhdr 自带完整几何（报告 §3.2 逐字段反汇编定案）：
+        +0x2C  extent#1(kernel) = {type, flash_dst, size, data_off, crc}
+        +0x40  rootfs flash_dst / +0x44 data_off / +0x48 CRC
+        +0x4C  槽 A 描述 {base, span, 0, 块对齐}
+        +0x5C  槽 B 描述 {base, span, 0, 块对齐}
+    真机 versionstates 实测的槽范围 [0x700000,0x2300000) + [0x2300000,0x3F00000)
+    **与包内声明逐字段一致** ⇒ 机器认的就是包里的声明。
+    ⇒ 旧版"内核 3.25 MB 上限"是自缚 —— 那是**官方那个包**的声明值，你自己的包可以声明别的布局。
+    边界：槽**起点**（0x700000 / 0x2300000）是可依赖的固定锚点；槽**内**布局随便声明。
+
+主张 3「拿别人构建的源码适配自己机器，然后刷进去」—— ✅ **成立，就是 cnjn 那条路**
+    H3600 源码（openwrt `sanechips` target）+ E2631 板级 DTS → 编译 → 打成原厂 verhdr 包
+    （重算 0xB8 / 0x210 / kernel / rootfs 四道 CRC）→ web 上传。
+    web 通道与 fw_flashing 是**同一个刷写器**（报告 §5.1 终案：cspd 拉起 /var/fw_flashing），
+    所以"web 能刷"和"telnet 能刷"是同一件事的两个入口。
+    门禁：8B8/7B5 代**无版本门**（+0x54C = NULL）+ key 门可控（保持 13515211，或 key1 清零万能）。
+
+主张 4「想回原厂就在 OpenWrt 里破坏 OpenWrt 的槽头，自动退回原厂」—— ✅ **机制成立**
+    versionstates 本身就有这套字段：curverIsBad / backverIsBad / backverphyaddr / backverheaderaddr。
+    报告 §4.6.1：cspboot 的 zteboot_search_firmware 扫 MTD 找候选头，
+    **校验对象 = 槽头 0x200 字节（= 包 verhdr 原样）**；校验不过 → 选另一个槽 → **回退不是砖**。
+    ⇒ 破坏 OpenWrt 槽那 0x200 字节版本头（魔数四连 / CRC 任一），重启即回退原厂槽。
+      触发若一次不生效，按报告 §5.2 / §7.4：**断电重上电 2~3 次触发 A/B 回退**，
+      或串口 bootmenu（bootmode 密码 `5cE080@fyBD`）指定旧槽。
+    更"优雅"的等效做法（cnjn 用的就是它，SR1010 上叫 `zte-fwslot switch`）：
+      **不破坏，只把当前槽的序号（serial）改小**，让另一个槽被选中 —— 只重写版本头，固件本体不动。
+      E2631 上是否有同名命令待确认，但改槽头 serial 字段的思路直接可移植。
+    ⚠ 稳妥前提：**OpenWrt 只写一个槽**，另一个槽保留原厂（第五节"用第二个固件槽"）。
+
+
+【六、剩下的真实障碍与待实测项】
+
+障碍 1 —— ~~内核超 1.69%~~ **本条已作废**（见第三节更正）
+    真正的约束是**槽跨度 28 MiB**；OpenWrt 全包 7.88 MiB，余量约 20 MiB。
+    **内核不需要裁**，打包时按自己的 extent 声明排布即可。
+
+障碍 2 —— 硬件不同，DTS 必须重写（所以不能拿 H3600 的镜像直接改）
+    | 项 | H3600（国外） | E2631 |
+    |---|---|---|
+    | 内存 | 512MB（DTB 有 reserved-memory pp@0x5da00000 38MB；RAM 启动址 0x48008000） | **256MB**（mem=256M，iomem 0x40000000–0x4fffffff） |
+    | Wi-Fi | MT7915D（驱动 mt7915e） | **MT7916 + MT7976**（同驱动族，固件/校准不同；校准在 mtd3 /wlan，明文 jffs2） |
+    | 网口 | 4×GbE LAN 内置 PHY + 1×GbE WAN **外置 ZX5201**（MDIO 8，pinmux ext_phy_pins） | **4 口全内置**（无外置 PHY） |
+    | LED/按键 | 逐条物理实测得出 | 另行实测 |
+    ⇒ H3600 那份镜像**只能当参考实现 + 驱动来源**，要刷的是"你自己为 E2631 编的 OpenWrt"。
+      DTB 里的 reserved-memory 0x5da00000 在 256MB 机器上物理不存在，直接搬必崩。
+
+障碍 3 —— ~~槽 B 与国内插件分区的声明范围重叠~~  【已作废，2026-10-12 实测推翻】
+    ★★ 本条整段撤回 ★★
+    原因：/proc/mtd **只给分区名和尺寸、不给偏移**；我当年把"按表内顺序累加尺寸"当成偏移，
+          据此算出插件区 0x1FA0000–0x2FC0000 并称其与槽 B 重叠 —— 这是假坐标。
+    实测（内容比对 + **内核内建分区表**，见《E2631分区真实落点定案-2026-10-12.txt》第2版）：
+        kernel1 = 0x00700000（槽 A 起点）｜kernel2 = 0x02300000（槽 B 起点）
+        kernel1/kernel2 内核表声明各 **28 MiB**（= 两个槽），rootfs 表内为 (0,0) 占位符
+        rootfs  = 0x00A40000（槽 A + 0x340000，是槽内组件，非独立分区）
+        插件区（内核表真值）：UNIFIED 0x6E00000｜UUPlugin 0x6F00000｜DPIPlugin 0x7400000
+                              ｜JDXBPLUGIN 0x7700000｜owdptsbin 0x7900000｜status 0x7A00000
+        插件区整体 = 0x6E00000–0x7F00000（17MB 预留，占 16.125MB）
+        其中 UNIFIED@0x6E00000、UUPlugin@0x6F00000、owdptsbin@0x7900000 已用真机字节比对命中。
+    且 0xE40000↔0x2A40000、0x1240000↔0x2E40000、0x13C0000↔0x2FC0000 三对**逐字节相同**
+    （偏移差恒为槽跨距 0x1C00000）⇒ 那些"按尺寸累加算出的插件地址"里住的其实是**槽 B 的 rootfs**。
+    ⇒ 结论：**槽 B 与插件分区零交集**，写槽 B 不需要再探插件边界。
+      槽 B 整段 28MiB 可按槽布局使用；插件区在 0x6E00000 之后，互不干扰。
+
+另外要验证（很可能不是问题）：**cspboot 的内核加载上限**
+    cnjn 在 SR1010 上碰到 ~8MB 堆拷贝上限，改了一条指令绕开。
+    E2631 的 cspboot 是否同限制**未知**。好消息：3.47MB 远小于 8MB，很可能根本不触发。
+    但不能假设 —— 上真机前先用 initramfs 内存启动探一次。
+
+
+【七、给 E2631 的执行顺序（建议）】
+
+    0. 【零风险】确认写落点：真机上跑一次官方包 fw_flashing，盯 g_upgrade_startaddr
+    1. L1 双核 SMP（抄 platsmp-zx279128s.c +173 行）
+    2. L2 有线网络（MDIO + GPHY 接线，MDIO 地址 0x9a101000 与 H3600 完全一致）
+    3. L3 PCIe + Wi-Fi（**004/005 补丁必带**，否则 MT7916 必掉卡；校准数据从 mtd3 取）
+    4. 出 initramfs → TFTP 内存启动验证（**不写 flash，无砖风险**）
+    5. 打包进 28 MiB 槽（**不需要裁内核**；见第三节更正 —— 3.25MB 只是官方包自己的选择）
+    6. 打成原厂包：改 verhdr（版本串/位图/key）+ 重算 0xB8 / 0x210 / kernel / rootfs 四道 CRC
+       （rootfs 段若要明文给 OpenWrt 用，段 CRC 就算明文；这是与官方包唯一的结构差异）
+    7. 过一遍 24 步全链模拟器（sim_*.py）
+    8. 真机 web supgrade / fw_flashing（此时 TTL 级：校验失败回退旧槽，不是砖）
+
+**一句话**：这条路 cnjn 已经走通一次，你这台的条件更好（8B8 无版本门、槽跨度 28 MiB、余量 ~20 MiB、
+校验失败可回退、重封工具链现成）；真正要先啃的是"E2631 自己的移植"，
+而不是"能不能刷进去"。
+    ★ 2026-10-12 夜 勘误：本行旧文本残留"内核裁 57KB"，与第六节障碍 1 的**作废**结论自相矛盾，已删。
+      凡本文件出现"裁内核 / 1.69% / 0x340000 是上限"一律**以第六节为准（作废）**。
+
+
+【八、本轮新增工具】
+
+| 工具 | 用途 |
+|---|---|
+| tools/parse_zte_pkg.py | 解析 ZTE 旧代升级包 verhdr：magic/key/版本串/kernel 段/rootfs 段/槽几何/双 CRC 自校验 |
+| tools/dl.js / dlpart.js / dlrange.js | Node 下载（整文件 / 分块 / Range），用于绕开本机 curl 不可达 + 长连接被杀 |
+| tools/verify_flash_enc.py | 逐分区判别 flash 明文/密文（上一轮新增） |
+
+复现：
+    C:/Users/28418/.workbuddy/binaries/python/envs/default/Scripts/python.exe \
+      D:/AI/中兴/OPENWRT/tools/parse_zte_pkg.py <官方包.bin>
+
+
+【九、证据与假设声明】
+
+实测（A 级，本轮直接取证）：
+    · H3600 两个镜像的 Content-Length；sysupgrade tar 内 kernel/root 条目大小
+    · E2631 8B8 / 7B5 官方包的 verhdr 全字段、kernel/rootfs 段偏移与大小、双 CRC 自校验通过
+    · 包内 kernel 段 == kernel1[0x20:] 逐字节相同
+    · 解密(包内 rootfs 段) md5 == 设备 mtd8 dump md5 == 835653325cafa1c73d52e2baadd8d973
+    · ~~槽几何与插件分区重叠（由两份数据交叉比对得出）~~ ← **已作废（假坐标，见下）**
+
+【2026-10-12 补测 · 真机 192.168.5.3】
+    · `cat /proc/zte/verinfo/versionstates` 全文：槽 A/B 起止（各 28 MiB）、
+      curverheaderaddr=0x1C60000、backverheaderaddr=0x3CA0000、curUpgradeKey=0x1351/0x5211、
+      curverSerialNumber=0x10、backverSerialNumber=0x0f、curverIsBad=0、backverIsBad=0
+      ⇒ **槽几何与包 verhdr 声明逐字段一致**（本文件第三节的主证据）
+    · `cat /proc/zte/verinfo/softVersion` = V1.0.0.7B5.8000（.3 当前跑 7B5）
+    · `df -k`：/var 可用 40808 KB、/tmp 可用 20480 KB（主张 1 的主证据）
+
+【2026-10-12 补测 · 分区真实落点（推翻"重叠"）】
+    · 方法：/dev/mtdblockN 的应用视图 ↔ /dev/mtdblock0 原始整片 内容比对
+      （明文直比；rootfs 用 AES-128-ECB 加密复现，key E263111559d0dfde）
+    · kernel1@0x700000（槽头+uImage）｜rootfs@0xA40000（E(mtd8@0)=flash@0xA40000，
+      D(flash@0xA40000)=mtd8@0）｜kernel2@0x2300000（mtd7@0x100000=flash@0x2400000）
+      ｜UUPlugin@0x6F00000（mtd9@0x300000=flash@0x7200000）
+      ｜owdptsbin@0x7900000（mtd10@0=flash@0x7900000）｜defcfg@0x500000（明文直比）
+    · 镜像配对：0xE40000=0x2A40000、0x1240000=0x2E40000、0x13C0000=0x2FC0000
+      （偏移差恒为 0x1C00000）⇒ 旧的"插件声明地址"里其实是槽 B 的 rootfs
+    · 插件区实测在 flash 尾部 0x6F00000–0x7EE00000（16.125MB），与两槽零交集
+    · 旁证：rootfs 0xA40000 + 0x1220000 = 0x1C60000 = versionstates.curverheaderaddr（该处确有版本头）
+    · 详见《E2631分区真实落点定案-2026-10-12.txt》
+
+推断（B 级，需实测确认）：
+    · fw_flashing 在 E2631 上的实际写入落点（报告 §5.2 的 g_upgrade_startaddr 观测法可定案）
+    · cspboot 在 E2631 上的内核加载上限（其存在性在 SR1010 上已证，本机未验）
+    · web supgrade 的 CheckFileIntegrality 在 8B8 上是否真查（报告对 1.0.9/8B1 有结论，8B8 未单列）
+
+未验证 / 未声称：
+    · 没有声称"E2631 上刷 OpenWrt 包一定能过任何一道门" —— 门禁是逐条静态反汇编的结论，
+      仍需真机实证；本文件只声称"每一条都有已知的应对手段"。
+================================================================================

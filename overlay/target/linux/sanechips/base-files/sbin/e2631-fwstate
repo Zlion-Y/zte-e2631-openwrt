@@ -1,0 +1,66 @@
+#!/bin/sh
+# Sample the MT7916's own firmware-state register without a driver in the way.
+#
+#   e2631-fwstate [rounds]     watch it while nothing else touches the card
+#
+# Why this exists: every failure we have ends in the same place -- mt76's
+# mt7915_firmware_state() polls MT_TOP_MISC for FW_STATE==RDY and gives up after
+# 1000 ms. Either the chip is slower than that (then a longer wait fixes it), or
+# it never gets there (then the timeout is innocent), or MMIO stops answering at
+# all (then the bus is wedged and no driver change will help). Those three look
+# identical from dmesg and completely different from the register.
+#
+# MT_TOP_MISC is 0x180600f0, which is behind the chip's layer-1 remap: write the
+# window number to BAR0+0xfe260, then read BAR0+0xe0000+0x0f0. FW_STATE is
+# bits[2:0]: 0 INITIAL, 1 FW_DOWNLOAD, 2 NORMAL_OPERATION, 3 NORMAL_TRX, 7 RDY.
+#
+# Requires CONFIG_DEVMEM with IO_STRICT_DEVMEM off; this image's busybox has no
+# devmem applet, so the access is done with dd on /dev/mem.
+#
+# STATUS: cannot run in any image we can currently build. The shipped kernel config
+# reads "# CONFIG_DEVMEM is not set" (out/gen1/config-6.18:2314) even though both
+# fragments ask for CONFIG_DEVMEM=y, so /dev/mem is simply not there. Use the regprobe
+# module instead (build/wsl/build-regprobe.sh): it does the same rmw from inside the
+# kernel, and it also sets Memory Space Enable first, which this script does not - on a
+# cold card Command is 0x0140 and every MMIO read then returns 0xffffffff, which looks
+# exactly like a dead link.
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+ROUNDS=${1:-30}
+DEV=${DEV:-0000:01:00.0}
+L1REG=0xfe260
+WINBASE=0xe0000
+TOP_WINDOW=0x1806
+MISC_OFS=0x0f0
+
+[ -e /dev/mem ] || { echo "fwstate: no /dev/mem (CONFIG_DEVMEM?)" >&2; exit 1; }
+CFG=/sys/bus/pci/devices/$DEV/config
+[ -r "$CFG" ] || { echo "fwstate: no $CFG" >&2; exit 1; }
+
+# BAR0 straight out of config space: offset 0x10, 4 bytes, little endian.
+bar0() {
+  busybox dd if=$CFG bs=1 skip=16 count=4 2>/dev/null |
+    busybox hexdump -v -e '1/4 "0x%08x\n"'
+}
+BAR0=$(bar0)
+REMAP=$((BAR0 + L1REG))
+MISC=$((BAR0 + WINBASE + MISC_OFS))
+echo "BAR0=$BAR0 remap=0x$(printf %x $REMAP) misc=0x$(printf %x $MISC)"
+
+rd32() {
+  busybox dd if=/dev/mem bs=1 skip="$1" count=4 2>/dev/null |
+    busybox hexdump -v -e '1/4 "0x%08x\n"'
+}
+wr32() {
+  a=$(( $2 % 256 )); b=$(( $2 / 256 % 256 )); c=$(( $2 / 65536 % 256 )); d=$(( $2 / 16777216 ))
+  printf "\\$(printf '%03o' $a)\\$(printf '%03o' $b)\\$(printf '%03o' $c)\\$(printf '%03o' $d)" |
+    busybox dd of=/dev/mem bs=1 seek="$1" count=4 conv=notrunc 2>/dev/null
+}
+i=0
+while [ $i -lt $ROUNDS ]; do
+  i=$((i + 1))
+  wr32 "$REMAP" "$TOP_WINDOW"
+  v=$(rd32 "$MISC")
+  n=$(( v ))
+  echo "up=$(cut -d. -f1 /proc/uptime) misc=$v FW_STATE=$(( n & 7 ))"
+  sleep 1
+done

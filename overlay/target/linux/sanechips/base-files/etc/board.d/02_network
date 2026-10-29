@@ -1,0 +1,22 @@
+#!/bin/sh
+
+. /lib/functions/uci-defaults.sh
+
+board_config_update
+
+board=$(board_name)
+
+case "$board" in
+zte,zxhn-e2631)
+	# Panel wiring read off the vendor system (/proc/capability/ethernetmac):
+	# the WAN uplink is on its own internal PHY, the three LAN ports follow.
+	ucidef_set_interfaces_lan_wan "lan1 lan2 lan3" "wan"
+	;;
+*)
+	ucidef_set_interfaces_lan_wan "lan1 lan2 lan3 lan4" "wan"
+	;;
+esac
+
+board_config_flush
+
+exit 0

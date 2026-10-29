@@ -1,0 +1,346 @@
+================================================================================
+E2631 外围驱动矩阵（把所有外围先驱动起来）
+2026-10-12   路线已定：② 原厂包重打包（cnjn 式）；本文只管"外围就位"
+关联：E2631适配开工路线-2026-10-12.txt / E2631分区真实落点定案-2026-10-12.txt
+================================================================================
+
+【0】结论（先给）
+
+  外围分三层，别混着说：
+
+    第 1 层 · SoC 级、驱动已内建、板级零依赖  → 12 项，DTS 写一行 status="okay" 就完事
+    第 2 层 · SoC 级、驱动已内建、但缺板级信息 →  4 项，只能真机实测（网口/PCIe）
+    第 3 层 · 驱动是模块或上游没有             →  2 项可用（LED/按键）+ 一批不驱动
+
+  ★ USB 是唯一的例外，而且是**主动硬禁用**（实机经验，非推测）：
+    碰到 USB 控制器会挂，硬件看门狗随后反复重启，机器进不了可探测状态。
+    禁用落在三处，缺一不可：板级 DTS 的 `&usb` 保持 disabled、
+    `overlay/env/kernel-config` 把 `CONFIG_USB` 关掉（对齐厂商内核自己那份
+    `# CONFIG_USB is not set`）、设备块不带任何 USB kmod。
+    **不要**因为"顺手"再打开；详见【5.1】。
+
+  一句话：**上游 sanechips target 已经把 SoC 驱动全做完了（全 =y），
+  所以"驱动起来"这件事里，没有一项需要写驱动。**
+  需要做的只有两件事：
+      (a) 板级 DTS 把该 enable 的 enable 掉 —— 本文 + 板级 DTS 修订；
+      (b) 把只能在真机上量的 4 个数拿回来 —— probe 脚本已扩好采集项。
+
+  与"分区/插件放哪"完全解耦：外围是 RAM 里跑的事，不碰 flash。插件区
+  （28M 槽内 vs 47M 空闲区）后面再定，不影响本文任何一条。
+
+
+【1】权威来源（本文所有地址/中断的出处，禁止再用转述）
+
+  S1  SoC 描述：rfc_soc.dtsi
+      = 上游 ghahramani/openwrt @ pr-zte-zxhn-h3600 里
+        target/linux/sanechips/dts/zte/zx279128s.dtsi 的同一份（本机副本在
+        C:\Users\28418\Documents\Qoder\2026-10-12\29cbb8ee\.recon\rfc_soc.dtsi）。
+      板级 DTS 用 #include "zte/zx279128s.dtsi" 继承它 —— 所以下面"继承"
+      一栏的节点，板级文件**不需要重写寄存器**，只要 status + 板级属性。
+
+  S2  板级参考：rfc_board.dts（= H3600 板级，.recon\rfc_board.dts）
+      同 SoC，是"板级怎么写"的模板；但**它的 GPIO/PHY 是 H3600 的，不是 E2631 的**。
+
+  S3  厂商完整外设视图：f670l_vendor.dts（同 SoC，.recon\f670l_vendor.dts）
+      给出 H3600 上游文件里**没有**的那批节点（i2c/temp/ssp/tdm/gephy/denali nand…），
+      用来判断"哪些外设真实存在但不需要驱动"。
+
+  S4  内核构建配置：h3600_config（= 该 target 的 config-6.18，.recon\h3600_config）
+      决定"=y / =m / 无"。本文"驱动"一栏直接引用它。
+      ⚠ 它只有 **526 个符号**，是 OpenWrt target 的**裁剪底稿**，不是完整内核配置；
+      拿它做"某符号不存在"的判断时要留余地（很多符号靠 defconfig 默认，不在这份里）。
+
+  S5  ★★ **本板真机设备树**（最高权威，2026-10-12 新增）
+      /sys/firmware/fdt（6715 B，md5 b5124f77a55298fa58516db76329c4b0）
+      本机：refs/e2631_live.dtb + 解码树 refs/e2631_live_dt_tree.txt
+      这是**这块 E2631 板子跑原厂固件时内核实际使用的**设备树。已结构比对确认：
+      它与 kernel1 分区里的追加 DTB 节点清单/status **完全一致**，内核启动只改写了
+      两处（memory 按 cmdline 的 mem= 重写、chosen/bootargs 填入）。凡本文与 S5 冲突，
+      **以 S5 为准**；凡 S5 里没有的（LED/按键/GPIO），就是真的没有，只能实测。
+
+  S6  ★ **原厂内核配置**（/proc/config.gz，2026-10-12 新增）
+      21465 B（解压 94757 B / 3478 行，2826 个符号）
+      本机：refs/e2631_vendor_config.gz + refs/e2631_vendor_config.txt
+      Linux 4.1.25 / Buildroot 2015.08.1，厂商完整 BSP 配置。
+      对差结果：refs/cfg_diff_vendor_vs_upstream.txt（由 tools/cfg_diff.py 生成）。
+      它给出的是**原厂究竟用了哪颗驱动**（驱动名可能与上游不同），比 h3600_config
+      更接近"这块板子上真正跑的是什么"。
+
+
+【2】外围清单总表（按外设一行一项）
+
+  记号：  [就绪]=第1层  [待测]=第2层  [补配]=第3层  [不用]=无实用价值
+          "继承"= 寄存器/中断来自 S1，板级不重写
+
+  ┌────┬─────────────────┬──────────────┬─────────┬──────┬──────────────────────┐
+  │ 状态│ 外设            │ 地址 / 中断  │ 驱动    │ DTS  │ 缺什么               │
+  ├────┼─────────────────┼──────────────┼─────────┼──────┼──────────────────────┤
+  │就绪 │ UART0 (console) │94404000 / 11 │内建 y   │继承✓ │ 无（已 okay）        │
+  │就绪 │ UART1           │94405000 / 12 │内建 y   │继承✓ │ 无（已 okay）        │
+  │就绪 │ SPI-NAND spifc  │94406000 / 13 │内建 y   │继承✓ │ 频率(TODO-F1)        │
+  │就绪 │ GPIO bank 0..5  │94407000+40n  │内建 y   │继承✓ │ 哪个脚接什么(待测)    │
+  │就绪 │ pinctrl pinmux  │94200000      │内建 y   │继承✓ │ 无                   │
+  │就绪 │ 时钟/复位 RCC   │94000000      │内建 y   │继承✓ │ 无                   │
+  │就绪 │   └ lsp0crpm   │94400000      │内建 y   │继承✓ │ 无                   │
+  │就绪 │   └ lsp1crpm   │9a100000      │内建 y   │继承✓ │ 无                   │
+  │就绪 │   └ crm2       │94100000      │内建 y   │继承✓ │ 无                   │
+  │就绪 │ SCU/GIC/全局定时│800000/801000 │内建 y   │继承✓ │ 无                   │
+  │就绪 │ L2C-310         │0c00000       │内建 y   │继承✓ │ 无                   │
+  │就绪 │ TWD timer       │800600 PPI13  │内建 y   │继承✓ │ 无                   │
+  │就绪 │ SMP SRAM        │200800        │内建 y   │继承✓ │ 无（第二核）         │
+  │就绪 │ syscon-reboot   │94000000+44   │内建 y   │继承✓ │ 无（reset 可用）     │
+  ├────┼─────────────────┼──────────────┼─────────┼──────┼──────────────────────┤
+  │待测 │ MDIO 控制器     │9a101000+18   │内建 y   │已写✓ │ **PHY 地址表** (N1)  │
+  │待测 │ GMAC（本板 4 口）│92000000/36   │内建 y   │已写✓ │ port↔PHY↔面板 (N1)   │
+  │待测 │   └ MAC 来源    │ flash tag?   │内建 y   │缺     │ **MAC 偏移** (A1)    │
+  │待测 │ PCIe0 (WiFi 主) │0f000000 / 63 │内建 y   │已写✓ │ **reset 脚** (W1)    │
+  │待测 │ PCIe1 (WiFi HIF2)│0f100000 / 78│内建 y   │已写✓ │ 同上 (W1)            │
+  ├────┼─────────────────┼──────────────┼─────────┼──────┼──────────────────────┤
+  │补配 │ LED (gpio-leds) │板级 GPIO     │**模块 m**│缺     │ **LED 脚** (L1)      │
+  │补配 │ 按键(gpio-keys) │板级 GPIO     │**模块 m**│缺     │ **按键脚** (L1)      │
+  ├────┼─────────────────┼──────────────┼─────────┼──────┼──────────────────────┤
+  │不用 │ 温度 temp       │94100034      │上游无   │——    │ 硬件确在，上游无驱动 │
+  │不用 │ I2C0/I2C1       │9a102000/3000 │上游无   │——    │ 板上无 I2C 器件      │
+  │不用 │ SSP(SPI)        │9a105000      │上游无   │——    │ 唯一挂着 ROHM 假器件 │
+  │不用 │ TDM (电话)      │9a106000      │上游无   │——    │ 无 FXS 口            │
+  │不用 │ MMC/SD          │08980000      │上游无   │——    │ 厂商自己 disable     │
+  │不用 │ Denali NAND     │0d80000       │上游无   │——    │ 本机用 SPI-NAND      │
+  │不用 │ dwc2 (USB2)     │09000000 / 44 │上游无   │——    │ 原厂启用，上游无胶水 │
+  │不用 │ USB (dwc2/dwc3) │0900/09100000 │模块 m   │禁用  │ **硬禁用：会挂机**   │
+  │不用 │ 包处理器 npp/tm/pp│921c0000…    │随 gmac  │——    │ 不是独立节点         │
+  └────┴─────────────────┴──────────────┴─────────┴──────┴──────────────────────┘
+
+
+【3】第 1 层：就绪的 12 项（DTS 已 enable / 继承，无需动作）
+
+  这一层全部来自 S1，寄存器窗口、中断号、时钟都由 dtsi 提供，板级只要
+  "status = okay"。当前板级 DTS 已经覆盖：serial0、serial1、spifc、（mdio/gmac 见第 2 层）。
+
+  剩下"已继承但未显式 enable"的，多数本来就是 always-on（GIC/L2C/SCU/timer），
+  无需 status。真正值得显式确认的只有两个：
+
+   · syscon-reboot（topcrm + 0x44）：dtsi 里已在 / 根下声明，OpenWrt 的
+     reboot 走它。**这一条意味着 soft reboot 可用**，在真机迭代时比断电省事。
+   · SMP SRAM（200800）：dtsi 已声明 smp-sram 子节点，第二核靠它起来。
+
+  结论：第 1 层**不需要任何新增工作**。它不是"待办"，是"已办"。
+
+
+【4】第 2 层：待测的 4 项 —— 本轮唯一真正的活
+
+  4.1 MDIO / GPHY（TODO-N1）
+      SoC 侧确定：MDIO 控制器 0x9a101000（厂商与上游地址一致）；
+      四个内部 GbPHY 块 0x9b000000 / 0x9b100000 / 0x9b200000 / 0x9b300000，
+      中断 GIC_SPI 39/40/41/42（厂商 f670l_vendor.dts 里 gephy 节点是 okay）。
+      未知：**PHY 挂在哪几个 MDIO 地址上**。
+      上游 H3600 用 8(WAN) + 10/11/12/13(LAN)；E2631 是"4 LAN + 1 WAN"的
+      同型网关，大概率相同，但**未验证，不许当事实**。
+      拿法：probe-e2631.sh 的 `mdio` 段会**绕过设备树**直接读 MDIO 控制器寄存器，
+      扫 0..31 号地址的 ID1/ID2/BMSR，输出 phy_id，与 0x84b95011(ZX5201) 比对。
+
+  4.2 GMAC + 5 口交换（TODO-N1 延续）
+      确定：gmac @0x92000000 +0x400000，GIC_SPI 36，驱动 CONFIG_ZX279128S_ETH=y。
+      dtsi 定义 5 个 port 子节点。未知：**panel LAN1..LAN4/WAN 对应 port@几**，
+      以及哪个 port 走外部 PHY（gmii）而非内部 GEPHY。
+      拿法：MDIO 扫出地址后，用 H3600 的映射（port0..3→内部 PHY，port4→WAN）
+      先试；再插网线看 `ethtool`/`ip -s link` 哪个口有 carrier，逐个定死。
+
+  4.3 MAC 地址来源（TODO-A1）
+      H3600 从 flash "tag" 分区（0x100000）偏移 0x1e 取 6 字节，WAN 用下一个。
+      E2631 的 tag 分区存在（0x100000 +0x100000，明文），**但偏移未验证**。
+      拿法：probe 脚本 dump tag 头部，肉眼找 MAC（ZTE OUI）或对照机身贴纸。
+      在拿到之前：接口一律随机本地管理地址（RAM 阶段可接受，**不可出正式版**）。
+
+  4.4 PCIe0 / PCIe1 → MT7916（TODO-W1）
+      确定（来自 S1，两个控制器都完整定义好了）：
+        pcie0  dbi 0x0f000000(+4000) ctrl 0x09500000(+1000) cfg 0x1c000000(+200000)
+               GIC_SPI 63  outbound 0x10000000  dma-ranges 0x43000000→0x40000000
+               pinctrl = pcie0_pins
+        pcie1  dbi 0x0f100000(+4000) ctrl 0x09600000(+1000) cfg 0x2c000000(+200000)
+               GIC_SPI 78  outbound 0x20000000
+               pinctrl = pcie1_pins
+      驱动 CONFIG_PCIE_ZX279128S=y + PCIE_DW_HOST=y，已内建。
+      未知：**reset-gpios / enable-gpios**。H3600 用 <&gpio3 5> / <&gpio3 7>，
+      两个控制器共用同一对（MT7915 挂两条 link 后面）。
+      ⚠ 与 LED 不同：**PCIe 的 reset 脚如果猜错，不是"灯乱闪"，而是控制器挂死**
+        （H3600 作者原话：not a clean failure）。所以这一项在真机上要给回退路径。
+      拿法：先用 H3600 的 gpio3 5/7 试一次；boot 若卡在 PCIe，立刻把
+      &pcie0/&pcie1 改回 disabled 重来（RAM 引导，零 flash 风险）。
+      MT7916 的校准数据偏移另算（在 wifi 分区 / 0x200000，厂商明文）。
+
+
+【5】第 3 层：需要额外配置的 2 项
+
+  5.1 USB —— **不驱动，硬禁用**（曾经列为"补配"，已改）
+      SoC 上有两个控制器：dwc3 @0x09100000（GIC_SPI 50）与 dwc2 @0x09000000
+      （GIC_SPI 44），厂商设备树里两个都是 status=okay。本板**必须都不碰**。
+
+      依据（实机经验，最高优先级）：一旦访问 USB 控制器，系统挂起，硬件看门狗
+      把机器反复重启 —— 进不了可探测状态。所以这不是"优先级低、以后再开"，
+      而是"绝不打开"。
+
+      禁用落在**三处独立开关**，任一单独都够，但三处都做，因为各自堵一条复活路：
+        (1) 板级 DTS：`&usb` 保持继承来的 `disabled` ⇒ 不会注册平台设备；
+        (2) `overlay/env/kernel-config`：`# CONFIG_USB is not set`
+            ⇒ 内核里根本没有 USB 主机核心，模块也就无从编出。
+            这一条与**厂商内核自己的选择一致**（原厂 config.gz：
+            `CONFIG_USB_SUPPORT=y` + `# CONFIG_USB is not set`），
+            也回到 OpenWrt **generic 基础配置的默认**（generic 里 USB 本来就是关的，
+            是 sanechips target 为 H3600 打开的）。
+            合并顺序依据：include/target.mk 的 LINUX_KCONFIG_LIST 最后一项是
+            `$(TOPDIR)/env/kernel-config`，经 scripts/kconfig.pl 最后合并、完全覆盖。
+        (3) 设备块不带 USB kmod ⇒ 运行时没人能 bind
+            （H3600 靠 DEVICE_PACKAGES 里的 kmod-usb3 才装，我们没有）。
+
+      ⚠ 副作用：`env/kernel-config` 是**整棵构建树全局**的，不是按设备分的。
+        本脚手架只编 E2631，所以无碍；但**若同一棵树里去编 H3600，会在它的
+        USB 包上失败**（kmod-usb3 / kmod-usb-dwc3-generic-plat）。
+        target 的 `FEATURES:=… usb …` 只是元数据，不会把配置顶回来
+        （include/target.mk 里 `FEATURES += usb` 是由 CONFIG_USB* 反推的）。
+
+      TODO-U1 **撤销**，不是延后：面板区到底有没有 USB 口，已不值一问 ——
+      就算有，本板也不能把控制器点起来。真要改，前提是"先有一个被证明不挂的
+      内核"，而不是改设备树。
+
+  5.2 LED / 按键（TODO-L1）
+      驱动 **CONFIG_LEDS_GPIO=m**、按键用 gpio-keys-polled（GPIO 驱动不支持中断）。
+      未知：**全部 GPIO 编号**。这是纯板级走线，**H3600 的值（gpio2 6/7、gpio3 0/1/2 …
+      一个都不能抄**——两块板的外形不同，LED 走线必然不同。
+      拿法：probe-e2631.sh 的 `gpio` 段 = **逐脚点亮 + 人工看面板**，
+      这正是 H3600 作者唯一认可的方法。拿到编号前，板级 DTS 的 leds/keys 保持 disabled。
+
+  5.3 内核 config 需要补的包（seed/e2631.config）
+      · CONFIG_PACKAGE_kmod-leds-gpio=y      （LED）
+      · CONFIG_PACKAGE_kmod-input-gpio-keys-polled=y （按键）
+      · CONFIG_PACKAGE_lspci=y / kmod-pciutils 类 （PCIe 采集）
+      · CONFIG_PACKAGE_ethtool=y             （网口 carrier 判定）
+      · CONFIG_PACKAGE_kmod-thermal… / lm-sensors 视需要
+      ✗ 无 USB 相关包：kmod-usb-dwc3 / kmod-usb-storage / usbutils **一律不要**
+        （见 5.1；镜像里连 USB 采集工具都不放，免得诱导谁去打开控制器）
+      说明：这些是**采集与点亮**用品，不是刷写路径的一部分，可随 stage-1 一起进 RAM 镜像。
+
+
+【6】第 4 类：厂商有、上游没有、本机不需要（明确不驱动，省得反复纠结）
+
+   · 温度传感器 temp@94100034（厂商 zxic,tempsensor）
+   · I2C0/I2C1 @9a102000 / 9a103000（板上无 I2C 从器件）
+   · SSP/SPI @9a105000（唯一从器件是 ROHM dh2228fv 占位）
+   · TDM @9a106000（无语音口）
+   · MMC/SD @8980000（厂商自己 status=disable）
+   · Denali NAND @0d80000（本机实际存储是 SPI-NAND，Denali 是虚设）
+   · dwc2 USB2 @09000000（上游 dtsi 里根本没有这个节点；config 里也没有 DWC2 驱动）
+   · dwc3 USB3 @09100000 —— **主动禁用**，与上面各项"不跟"性质不同：
+     它硬件存在、上游驱动齐全，唯一原因是**会挂机**（见 5.1）。
+     三处开关全关，且镜像里不放任何 USB 包。
+   · 包处理器 npp@921c0000 / tm@92340000 / pp@92380000 / idm@921c8000
+     （厂商把它们当独立 mtd/driver 看；上游 gmac 驱动**内部**处理数据面，
+      不作为设备树节点出现，所以也不列为"待驱动"）
+
+  结论：**这 9 项一行都不用写**。前 8 项是"厂商内核有、我们不跟"，
+  第 9 项（dwc3）是"能用但必须关"。
+
+
+【7】真机采集覆盖（probe-e2631.sh 现有 + 本轮新增）
+
+  已有：
+    mdio      绕过设备树直读 MDIO 寄存器，扫 32 个 PHY 地址   → 定 4.1
+    flash     128 MiB 签名扫描 + 槽头字段解码                → 已离线定案，保留复核
+    gpio      六行长控制器 list + **逐脚点亮**（人工看面板）  → 定 5.2
+    identity  cmdline / memory / devicetree / cpuinfo         → 定内存(TODO-M1)
+
+  本轮新增（见 tools/probe-e2631.sh 的 probe_pcie / probe_usb / probe_buses）：
+    pcie      lspci -nn + /sys/bus/pci/devices 全量 + 两个控制器的 link 状态
+              → 直接答"PCIe 起没起、MT7916 在不在、vendor:device 是多少"
+    usb       lsusb + /sys/bus/usb/devices  → **保留为反向对照**：正常必须为空。
+              若这里出现任何东西，说明有 USB 模块被意外打进镜像 —— 那是缺陷信号，
+              不是采集结果。USB 本身已禁用（见 5.1），**不要**把它当待办去"补齐"。
+    buses     温度/RTC/watchdog/中断统计                     → 外围健康度一眼看全
+    net       ip -s link + ethtool 每口 carrier 快照          → 定 4.2 面板映射
+
+
+【8】下一步（与开工路线【5】的 6 步对齐）
+
+  第 1 步  本文件 + 板级 DTS 修订 + probe 扩展 → commit 到 e2631-openwrt
+  第 2 步  CI 跑 dts job（秒级）确认 DTS 能编过
+  第 3 步  CI 出 initramfs.uImage，TFTP 0x43000000 引导（RAM，零风险）
+  第 4 步  shell 里跑 probe-e2631.sh，一次收齐 N1/A1/L1/W1/M1（U1 已撤销）
+  第 5 步  用实测值回填 DTS → 第二版；这一步做完，"外围全起来"即达成
+  第 6 步  回到路线 ②（原厂包重打包）处理持久化
+
+  里程碑（引导日志里逐条看）：
+    earlycon / console [ttyAMA0] enabled          → UART 层
+    SMP: Total of 2 processors activated           → 第二核
+    l2c: ... CACHE_ID 0x410000c9                    → 外缓存
+    spi-zx279128s-spifc ... probe successful, mtd0=128MiB → flash
+    ZX279128S_MDIO / mdio_bus 注册                  → 网口前哨
+    pcie ... link up / lspci 出现 14c3:xxxx         → WiFi 前哨
+    shell 提示符                                    → 外围采集开始
+
+
+【9】待复核 / 未决（别当成已定论）
+
+  ① **VFP / 用户态 ABI —— 已定案（2026-10-12），原"待复核"撤销**
+
+     **结论：无 VFP、无 NEON ⇒ 用户态必须软浮点（arm EABI5 / armel）。旧记录是对的，
+     本矩阵初稿的推理是错的。**
+
+     ✗ 初稿错误推理：拿 `h3600_config` 里的 `CONFIG_VFP=y`+`CONFIG_VFPv3=y` 去反推
+       "原厂可能启用了 VFP ⇒ 用户态也许能用 armv7 hard-float"。
+       错在**混淆了两个不同的内核**：`h3600_config` 是**我们上游 target 的内核配置**
+       （我们自己的东西），它只能证明"内核愿意保存/恢复 VFP 上下文"，
+       **既不能证明原厂内核开了 VFP，也不能决定用户态 ABI**。教训记牢：
+       **"某个 config 里有某开关"≠"目标设备上跑着的内核有那个开关"。**
+
+     ✓ 三条独立证据（同一条结论，来源互不相干）：
+
+       (a) 原厂内核配置（`/proc/config.gz`，21,465 B / 3,478 行，真机直接解压读出）：
+               # CONFIG_VFP is not set          ← 明确关掉，不是"未显示"
+               # CONFIG_ARM_THUMB is not set
+               # CONFIG_ARM_THUMBEE is not set
+               # CONFIG_THUMB2_KERNEL is not set
+               CONFIG_AEABI=y
+               CONFIG_SMP=y   CONFIG_NR_CPUS=2
+
+       (b) 原厂用户态 ELF 的 ABI 标志（`busybox hexdump -C -n 48 /bin/busybox`）：
+               偏移 0x24 e_flags = **0x05000202**
+               0x05000000 = EF_ARM_EABI_VER5 ；0x00000200 = **EF_ARM_ABI_FLOAT_SOFT** ；
+               0x00000002 = EF_ARM_HASENTRY
+               ⇒ 软浮点是**写死在二进制 ABI 标志位**里的，不是推断。
+
+       (c) 动态加载器与 libc：
+               /lib/ld-uClibc-0.9.33.2.so  →  /lib/ld-uClibc.so.0
+               /proc/version: Linux 4.1.25 #2 **SMP** (gcc 4.9.3 / Buildroot 2015.08.1)
+
+     ✓ 两次 `/proc/cpuinfo` Features 行交叉印证（同一颗 SoC、两套内核）：
+         原厂 4.1.25（2026-10-12，本机）        : `half fastmult edsp tls`
+         项目 mainline 6.18.38（2026-08-31 实测）: `half thumb fastmult edsp thumbee tls`
+       两行**都无 vfp / vfpv3 / neon / idiva / idivt**。
+       差异只在 thumb / thumbee —— 已由 (a) 证实那是 `CONFIG_ARM_THUMB(E)` 编译开关，
+       **属内核配置差异，与硬件能力无关**（原厂内核是手工裁剪过的）。
+
+     ⚠ 顺带纠正本矩阵及多份旧文档里的写法 "armv5 软浮点"：**混了两件事**。
+       · 硬约束只有一条：**软浮点**。
+       · ISA 层级本机是 **ARMv7-A**（MIDR 0x414FC091 = ARM / variant 4 / part 0xC09 / rev 1），
+         `-march=armv5te` 只是**兼容性选择**，不是必须。
+       本 target（`CPU_TYPE:=cortex-a9`，FEATURES 无 `fpu`）本来就出 ARMv7 soft-float，正合要求。
+       也**不需要**为了让包能跑而去"选 armv5 目标"。
+
+     ⚠ 提醒后手：我们自己的内核（`h3600_config` 有 `CONFIG_VFP=y`）启动后，
+       `/proc/cpuinfo` 的 Features 行**会显示 vfp / vfpv3** —— 那是**内核暴露的 HWCAP**，
+       **不代表用户态 ABI 变硬浮点**。以后别再拿这一行去判断 ABI，要读 ELF e_flags 第 0x200 位。
+
+     ○ 仍然存疑（不影响任何决定）：**硅片本身是否有 VFP 单元**。
+       Features 行与 config 都只反映内核侧；Cortex-A9 的 VFPv3-D16 是可选实现项，
+       无法从上面三条证据判定。免费的一次性判据：stage-1 我们的镜像（CONFIG_VFP=y）
+       启动后若 Features 行出现 `vfp vfpv3`，则硅片有。**列入 stage-1 收数项，不单独花成本。**
+
+  ② **reserved-memory（PP 区）**
+     H3600 板级把顶部 38 MiB（@0x5da00000）保留给包处理器（no-map）。
+     E2631 内存只有 256 MiB 且我们不跑厂商 PP 驱动，**是否需要类似保留区未定**。
+     暂不加；等 ethernet 驱动 DMA 跑起来看有没有踩踏，再决定。
+
+  ③ **插件/overlay 落点**
+     按用户决定，**后置**。28 MiB 槽内 vs 47 MiB 空闲区（0x3F00000–0x6E00000）
+     两案都不影响本文任何一条外围结论。
+
+================================================================================

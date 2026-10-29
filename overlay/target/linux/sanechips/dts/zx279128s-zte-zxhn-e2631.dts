@@ -1,0 +1,554 @@
+// SPDX-License-Identifier: GPL-2.0-only OR BSD-2-Clause
+/*
+ * ZTE ZXHN E2631 (a.k.a. 巡天 AX3000): dual-band Wi-Fi 6 router on the
+ * Sanechips ZX279128(S/R) SoC, 256 MiB DDR, 128 MiB SPI NAND, one WAN and
+ * three LAN ports, all served by the four integrated GbE PHYs.
+ *
+ * Hardware facts below were read off a live board (2026-10-13) and are marked
+ * with where they came from. Values still needing confirmation on first boot
+ * are called out in comments - do not treat them as measured.
+ */
+
+/dts-v1/;
+
+#include "zte/zx279128s.dtsi"
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/input/input.h>
+#include <dt-bindings/leds/common.h>
+
+/ {
+	model = "ZTE ZXHN E2631";
+	compatible = "zte,zxhn-e2631", "zte,zx279128s";
+
+	aliases {
+		ethernet0 = &gmac;
+		serial0 = &serial0;
+		serial1 = &serial1;
+		led-boot = &led_red;
+		led-failsafe = &led_red;
+		led-running = &led_green;
+		led-upgrade = &led_blue;
+	};
+
+	chosen {
+		stdout-path = "serial0:115200n8";
+	};
+
+	memory@40000000 {
+		device_type = "memory";
+		/* /proc/capability/boardtype: totalram 256M; vendor cmdline mem=256M */
+		reg = <0x40000000 0x10000000>;
+	};
+
+
+	leds {
+		compatible = "gpio-leds";
+
+		/*
+		 * One tri-colour lamp, three channels, on flat GPIO 8 / 40 / 60
+		 * (/proc/zte/ledkey_m/led LedId 0x32 / 0x64 / 0x128; flat =
+		 * controller*16 + line, six banks of 16 lines, bases 512..592 confirmed in
+		 * our own kernel).
+		 *
+		 * The colours were measured, not inferred: each channel was blinked on its
+		 * own for twelve seconds with this image running while the panel was
+		 * watched. 40 came out green, 60 a warm yellow-green (the red die, with the
+		 * strong green bleeding through the diffuser), 8 cyan-blue:
+		 *
+		 *   flat 40 = green    flat 60 = red    flat 8 = blue
+		 *
+		 * All three are active-low. Writing brightness=1 to the green channel left
+		 * the panel dark, and the other two lit while the LED class held them low,
+		 * which also matches the sibling H3600 (eleven LEDs, all active-low). The
+		 * vendor's CurrentOnOff column is its own logical state, not a pin level -
+		 * and levels cannot be read back to check, because reading these bank
+		 * registers from the vendor system hangs the SoC and the watchdog reboots
+		 * the box (measured 2026-10-13).
+		 *
+		 * What the stock firmware does with them, from its manual:
+		 *   red   solid = up but no internet,  blinking = booting or faulty
+		 *   green solid = internet up,         blinking = WPS/MESH key pressed
+		 *   blue  solid = MESH satellite, weak signal
+		 *   all three blinking = software upgrade
+		 * The aliases below keep the boot/fault meaning intact, and differ where it
+		 * is useful: procd runs a slow heartbeat on green once the system is up
+		 * (stock shows solid green) and an upgrade blinks blue alone instead of all
+		 * three, so the two systems are tellable at a glance.
+		 */
+		led_red: led-red {
+			color = <LED_COLOR_ID_RED>;
+			function = LED_FUNCTION_STATUS;
+			gpios = <&gpio3 12 GPIO_ACTIVE_LOW>;
+			default-state = "off";
+		};
+
+		led_green: led-green {
+			color = <LED_COLOR_ID_GREEN>;
+			function = LED_FUNCTION_WAN_ONLINE;
+			gpios = <&gpio2 8 GPIO_ACTIVE_LOW>;
+			default-state = "off";
+		};
+
+		led_blue: led-blue {
+			color = <LED_COLOR_ID_BLUE>;
+			function = LED_FUNCTION_STATUS;
+			gpios = <&gpio0 8 GPIO_ACTIVE_LOW>;
+			default-state = "off";
+		};
+	};
+
+	keys {
+		/* Polled on purpose: the ZTE GPIO IRQ chip is unvalidated on this
+		 * family and a gpio-keys irq-mode probe locked the H3600 up.
+		 * Vendor key table (/proc/zte/ledkey_m/key): flat GPIO 18 and 20.
+		 */
+		compatible = "gpio-keys-polled";
+		poll-interval = <50>;
+
+		key-reset {
+			label = "reset";
+			gpios = <&gpio1 2 GPIO_ACTIVE_LOW>;
+			linux,code = <KEY_RESTART>;
+		};
+
+		key-wps {
+			label = "wps";
+			gpios = <&gpio1 4 GPIO_ACTIVE_LOW>;
+			linux,code = <KEY_WPS_BUTTON>;
+		};
+	};
+
+	/*
+	 * npu-branch scaffold. No reg, no clocks, no interrupts: the driver
+	 * only exposes /proc/zx-npu/status until the vendor-native data path is
+	 * brought up. Keeping it resource-free means it cannot conflict with
+	 * the existing gmac/PPE driver on the same image.
+	 */
+	npu_scaffold: npu-scaffold {
+		compatible = "zte,zx279128s-npu-scaffold";
+		status = "okay";
+	};
+
+	/* P1 read-only audit; maps fixed windows, never writes a register. */
+	npu_audit: npu-audit {
+		compatible = "zte,zx279128s-npu-audit";
+		status = "okay";
+	};
+
+	/* Vendor-native IDM fabric engine; disabled until enable=1 + ifup. */
+	npu_idm: npu-idm {
+		compatible = "zte,zx279128s-npu-idm";
+		status = "okay";
+	};
+
+	/* PPE/CLA low-level table access; read/write opt-in. */
+	npu_ppe: npu-ppe {
+		compatible = "zte,zx279128s-npu-ppe";
+		status = "okay";
+	};
+};
+
+/*
+ * Port mapping read from the running vendor system,
+ * /proc/capability/ethernetmac (PhyMnf "ZTE" on all four => no external PHY,
+ * unlike the H3600 which hangs its WAN off a ZX5201 at MDIO address 8):
+ *
+ *   eth0 -> switch port 3   not in br0, PROMISC uplink  = WAN
+ *   eth1 -> switch port 2   in br0                      = LAN
+ *   eth2 -> switch port 1   in br0                      = LAN
+ *   eth3 -> switch port 0   in br0                      = LAN
+ *
+ * The MDIO addresses of the four integrated PHYs are taken from the H3600
+ * board file (0xa..0xd) and are UNVERIFIED on this board. Confirm on first
+ * boot from our own kernel - "ls /sys/bus/mdio_bus/devices" must show
+ * 0-000a..0-000d, and each must report the sanechips GbPHY id - before this
+ * ships. Never probe MDIO by poking the controller under the vendor system:
+ * writing CMD/STATUS there reset the board within seconds.
+ */
+&gmac {
+	status = "okay";
+};
+
+/*
+ * The gmac driver takes each port's MAC from its own node (it calls
+ * of_get_mac_address() per port, zx279128s-main.c:1236) and nothing referenced
+ * the nvmem cell below, so without these four lines every port boots with a new
+ * random locally-administered address.
+ *
+ * The cell is the same one the vendor uses: tag + 0x1e read out of a dump of
+ * that partition is f8:73:1a:d3:ef:a8, and on the running vendor system that one
+ * address is what br0, eth0 and eth1..eth3 all report. The vendor therefore uses
+ * a single MAC for every port; the upstream H3600 board file hands base+0 to the
+ * LAN ports and base+1 to the WAN, and that is what is done here, because two
+ * interfaces on one bridge with one address is a recipe for a flapping network.
+ */
+&gmac_port0 {
+	label = "lan3";
+	phy-handle = <&phy10>;
+	phy-mode = "internal";
+	nvmem-cells = <&macaddr_tag_1e 0>;
+	nvmem-cell-names = "mac-address";
+	status = "okay";
+};
+
+&gmac_port1 {
+	label = "lan2";
+	phy-handle = <&phy11>;
+	phy-mode = "internal";
+	nvmem-cells = <&macaddr_tag_1e 0>;
+	nvmem-cell-names = "mac-address";
+	status = "okay";
+};
+
+&gmac_port2 {
+	label = "lan1";
+	phy-handle = <&phy12>;
+	phy-mode = "internal";
+	nvmem-cells = <&macaddr_tag_1e 0>;
+	nvmem-cell-names = "mac-address";
+	status = "okay";
+};
+
+&gmac_port3 {
+	label = "wan";
+	phy-handle = <&phy13>;
+	phy-mode = "internal";
+	nvmem-cells = <&macaddr_tag_1e 1>;
+	nvmem-cell-names = "mac-address";
+	status = "okay";
+};
+
+/* Only four ports are wired on this board; the SoC offers a fifth. */
+&gmac_port4 {
+	status = "disabled";
+};
+
+/*
+ * The SoC include ships both UARTs with status = "disabled", and the aliases +
+ * chosen/stdout-path above do NOT enable them - they only name them. Without
+ * these two lines there is no ttyAMA0 at all, so the forced
+ * "console=ttyAMA0,115200n8" points at a device that never exists and the
+ * kernel goes silent the moment U-Boot says "Starting kernel ..." (measured:
+ * the first boot printed nothing on the TTL pin and logged
+ * "Warning: unable to open an initial console"). The carrier firmware for this
+ * family enables both as well.
+ */
+&serial0 {
+	status = "okay";
+};
+
+&serial1 {
+	status = "okay";
+};
+
+&mdio {
+	status = "okay";
+
+	phy10: ethernet-phy@a {
+		reg = <10>;
+	};
+
+	phy11: ethernet-phy@b {
+		reg = <11>;
+	};
+
+	phy12: ethernet-phy@c {
+		reg = <12>;
+	};
+
+	phy13: ethernet-phy@d {
+		reg = <13>;
+	};
+};
+
+/*
+ * MT7916 dual-band Wi-Fi 6 (vendor lsmod: mt7916, out of tree; the calibration
+ * file in the "wifi" partition starts with 16 79 = chip id 0x7916 and is the
+ * only file there, 0x30000 bytes, mounted by the vendor at /wlan).
+ *
+ * One package behind both PCIe controllers, as on the H3600, whose vendor
+ * driver is the same MediaTek code family. The H3600 board file names the two
+ * board lines - reset on &gpio3 5 (active low) and enable on &gpio3 7 (active
+ * high) - and drives them once, from pcie0 only, because they reset the whole
+ * MT7915/MT7916 rather than one link. host_init's order is: reset asserted 100
+ * ms, released, then enable asserted, 200 ms, before the PHY is initialised.
+ * Without enable the chip stays powered down, so a missing endpoint looks
+ * exactly like a PHY bring-up failure; try that line first.
+ */
+&pcie0 {
+	reset-gpios = <&gpio3 5 GPIO_ACTIVE_LOW>;
+	enable-gpios = <&gpio3 7 GPIO_ACTIVE_HIGH>;
+	phys = <&crm1_pcie0_phy>;
+	phy-names = "pcie";
+	status = "okay";
+};
+
+&pcie1 {
+	phys = <&crm1_pcie1_phy>;
+	phy-names = "pcie";
+	status = "okay";
+};
+
+/*
+ * Why the two PCIe PHYs and the reboot node live here and not where the SoC
+ * include puts them - measured on the first boot of this board:
+ *
+ * clk-zx279128s.c registers "zte,zx279128s-topcrm" with CLK_OF_DECLARE, so
+ * of_clk_init() claims /soc/clock-controller@94000000 during early boot and
+ * marks it OF_POPULATED. of_platform_bus_create() bails on an OF_POPULATED node
+ * *before* descending, so no struct device is ever created for topcrm and none of
+ * its children are instantiated. Observed consequence:
+ *
+ *   /sys/bus/platform/drivers/zx279128s-pcie-phy  -> no device, /sys/class/phy empty
+ *   /sys/kernel/debug/devices_deferred -> f000000.pcie "failed to get pcie phy"
+ *                                          f100000.pcie "failed to get pcie phy"
+ *   /sys/bus/platform/drivers/syscon-reboot       -> no device, so no restart handler
+ *
+ * i.e. no Wi-Fi and no way to reboot in software. The same trick is used upstream
+ * for other ZTE SoCs: give the block a second handle that /soc can populate. The
+ * syscon driver binds it ("syscon"), the bus walk descends ("simple-mfd"), and
+ * both drivers here find their register range through their parent device's node
+ * (syscon_node_to_regmap(dev->parent->of_node)), which is this one.
+ *
+ * /soc carries no label in the SoC file, so this merges by path instead.
+ */
+/ {
+	soc {
+		crm1: syscon@94000000 {
+			compatible = "syscon", "simple-mfd";
+			reg = <0x94000000 0x1000>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			reboot {
+				compatible = "syscon-reboot";
+				offset = <0x44>;
+				mask = <0x1>;
+				value = <0x1>;
+			};
+
+			crm1_pcie0_phy: phy@0 {
+				compatible = "zte,zx279128s-pcie-phy";
+				reg = <0>;
+				#phy-cells = <0>;
+			};
+
+			crm1_pcie1_phy: phy@1 {
+				compatible = "zte,zx279128s-pcie-phy";
+				reg = <1>;
+				#phy-cells = <0>;
+			};
+		};
+	};
+};
+
+/* No USB on this board: the vendor kernel ships "# CONFIG USB is not set" and
+ * on some E2631 units the controller is not populated at all - probing it
+ * hangs the SoC and the watchdog reboots. Leave both nodes disabled.
+ */
+&usb {
+	status = "disabled";
+};
+
+&spifc {
+	status = "okay";
+
+	flash@0 {
+		compatible = "spi-nand";
+		reg = <0>;
+		spi-max-frequency = <50000000>;
+		spi-rx-bus-width = <2>;
+		spi-tx-bus-width = <1>;
+
+		/* HYF1GQ4UTACAE: 128 MiB, 2 KiB pages, 128 KiB erase blocks */
+		partitions {
+			/*
+			 * zx279128s-slotpart (v1.4): this table is the SLOT-1
+			 * layout, and cspboot picks the boot slot by version
+			 * header serial - the two systems swap in place. The
+			 * parser reads both slot headers at parse time and, on
+			 * a slot-0 boot, moves rootfs and slot1-header into
+			 * slot 0 (same row count, same labels, so root=
+			 * keeps pointing at the same mtdblock). Every failure
+			 * keeps this table. See
+			 * files/drivers/mtd/parsers/zx279128s-slotpart.c.
+			 */
+			compatible = "zte,zx279128s-slotpart";
+			#address-cells = <1>;
+			#size-cells = <1>;
+
+			/* slot geometry the parser re-derives the boot slot
+			 * from; bases are the two whole-system windows, the
+			 * deltas are inside-slot: rootfs at +0x400000 (forced
+			 * by cspboot's ceil(kSize/erasesize) lookup), the
+			 * version header at +0x1400000.
+			 */
+			zte,slot0 = <0x00700000 0x01c00000>;
+			zte,slot1 = <0x02300000 0x01c00000>;
+			zte,fs-delta = <0x00400000>;
+			zte,hdr-delta = <0x01400000>;
+
+			partition@0 {
+				label = "bootloader";
+				reg = <0x0000000 0x0100000>;
+				read-only;
+			};
+
+			partition@100000 {
+				label = "tag";
+				reg = <0x0100000 0x0100000>;
+				read-only;
+
+				nvmem-layout {
+					compatible = "fixed-layout";
+					#address-cells = <1>;
+					#size-cells = <1>;
+
+					/* LAN MAC; WAN uses the next one (H3600 convention,
+					 * verify against the vendor web UI before shipping)
+					 */
+					macaddr_tag_1e: macaddr@1e {
+						compatible = "mac-base";
+						reg = <0x1e 0x6>;
+						#nvmem-cell-cells = <1>;
+					};
+				};
+			};
+
+			partition@200000 {
+				label = "wifi";
+				reg = <0x0200000 0x0100000>;
+			};
+
+			partition@300000 {
+				label = "usercfg";
+				reg = <0x0300000 0x0200000>;
+				read-only;
+			};
+
+			partition@500000 {
+				label = "defcfg";
+				reg = <0x0500000 0x0200000>;
+				read-only;
+			};
+
+			/*
+			 * The system lives in two whole-image slots, declared by every
+			 * official upgrade package (header +0x4c/+0x5c) and confirmed by
+			 * /proc/zte/verinfo/versionstates: 0x700000..0x2300000 and
+			 * 0x2300000..0x3f00000, 28 MiB each. Slot 0 keeps the vendor
+			 * system; OpenWrt is installed into slot 1, so that
+			 * "e2631-fwslot switch" can boot the vendor side again without
+			 * rewriting a byte of it.
+			 *
+			 * rootfs and slot1-header are windows into slot1, the same way the
+			 * vendor table overlaps "rootfs" inside "kernel1". They stay flat on
+			 * purpose: mainline ofpart only looks for sub-partitions when the
+			 * partition node itself carries "compatible = fixed-partitions", and
+			 * then their offsets are relative. One flat table keeps every address
+			 * an absolute flash offset, which is also what e2631-fwslot matches
+			 * against /sys/class/mtd/mtdN/offset.
+			 *
+			 * Inside slot 1 our package is laid out as
+			 *   +0x000000  32-byte slot marker
+			 *   +0x000020  kernel (plaintext legacy uImage, load 0x40008000),
+			 *                padded to fill the region up to +0x400000
+			 *   +0x400000  squashfs, then free space up to +0x1400000
+			 *   +0x1400000 the 512-byte version header block
+			 *
+			 * +0x400000 is not a free choice. cspboot locates the rootfs as
+			 * "slot + ceil(declared kernel size / 128k)" and ignores the header's
+			 * own rootfs offset (proved on the serial console: a kernel of
+			 * 0x34bdf8 made it read slot+0x360000, rejected the CRC and fell back
+			 * to slot 0). The packer therefore declares the padded kernel extent
+			 * 0x3fffe0, whose rounded-up value is exactly +0x400000, which is also
+			 * why KERNEL_SIZE is capped at 4096k: a kernel that outgrows this
+			 * region must fail the build, not move the rootfs under the table.
+			 *
+			 * The 16 MiB rootfs window is what the web UI costs: with LuCI in the
+			 * image the squashfs is around 8 MiB, and the kernel splits the erase
+			 * blocks behind it off as the writable "rootfs_data" (measured on the
+			 * first boot: "1 squashfs-split partitions found on MTD device
+			 * rootfs"), so the overlay is whatever is left of this window - about
+			 * 8 MiB. There is deliberately no "rootfs_data" partition here:
+			 * declaring one would only add a second partition of that name, which
+			 * fstools silently prefers over the split. The version header block
+			 * has to sit outside the window for the same reason: the header's
+			 * rootfs checksum covers +0x400000..+0x400000+rSize, so the overlay
+			 * must never be in it - with the first image it was, and the very
+			 * first config save made the slot unreadable to the bootloader.
+			 *
+			 * The space behind the header block (+0x1420000 to the end of the
+			 * slot, ~11.9 MiB) is left unpartitioned on purpose: it is reachable
+			 * through "slot1", and the packer pads it, so nothing can write it by
+			 * accident. Making "rootfs" reach it instead would put the version
+			 * header inside the overlay.
+			 *
+			 * Those fixed addresses hold only while no erase block of
+			 * [slot start, +0x1400000) is bad; e2631-fwslot checks that and
+			 * refuses to write when it is not.
+			 */
+			partition@700000 {
+				label = "slot0";
+				/* Deliberately not read-only: switching back to the stock
+				 * firmware rewrites the version header inside this slot, and
+				 * "read-only" masks MTD_WRITEABLE off the partition, which
+				 * would make that impossible. e2631-fwslot refuses to flash
+				 * into slot 0 instead.
+				 */
+				reg = <0x00700000 0x01c00000>;
+			};
+
+			partition@2300000 {
+				label = "slot1";
+				reg = <0x02300000 0x01c00000>;
+			};
+
+			partition@2700000 {
+				/* squashfs at its start, overlay after it: see above */
+				label = "rootfs";
+				reg = <0x02700000 0x01000000>;
+			};
+
+			partition@3700000 {
+				label = "slot1-header";
+				reg = <0x03700000 0x00020000>;
+				read-only;
+			};
+
+			/* Independent 47 MiB NAND data area, behind both image
+			 * slots. Safe by three independent lines of evidence
+			 * (2026-10-24): every official upgrade package from
+			 * V1.0.0.4B4 (2023) through V1.0.0.8B8 (2026) carries
+			 * the same slot table and the stock upgrader only ever
+			 * erases 0x2300000..0x3f00000; the stock kernel's own
+			 * /proc/mtd declares nothing beyond 0x2fc0000; and the
+			 * full programmer dump shows 0x3cc0000..0x72c0000
+			 * erased on this unit (the first used block beyond the
+			 * window is at 0x72c0000). Used as an optional UBI/
+			 * UBIFS extroot for /overlay - the activation gate in
+			 * /etc/init.d/e2631-userdata only lets a volume that
+			 * already carries a UBIFS superblock take over.
+			 */
+			partition@3f00000 {
+				label = "userdata";
+				reg = <0x03f00000 0x02f00000>;
+			};
+
+			/* Vendor plugin area: 0x6e00000..0x7f00000 on this board. Left
+			 * alone; it is AES-128-ECB at rest and only readable through the
+			 * vendor kernel.
+			 */
+		};
+	};
+};
+
+/* Serialize PL310 cache maintenance with protected PCIe MMIO reads; the
+ * option and the DTS flag both come from the base tree (patch 004/005,
+ * CONFIG_CACHE_L2X0_IO_LOCK=y is already in the target config).  Confirmed
+ * live by tigaotg: "L2C: serializing device reads with maintenance
+ * operations" on the console.
+ */
+&l2cc {
+	zte,l2c-io-read-lock;
+};
