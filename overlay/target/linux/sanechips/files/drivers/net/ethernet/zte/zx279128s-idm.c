@@ -344,8 +344,7 @@ static int zx_idm_rx_ring(struct zx_idm *idm, int budget)
 					static atomic_t dbg_n = ATOMIC_INIT(0);
 
 					if (atomic_inc_return(&dbg_n) <= 12)
-						pr_info("idm-tx len=%u chan=%u proto=%04x da=%pM sa=%pM vdev=%s
-",
+						pr_info("idm-tx len=%u chan=%u proto=%04x da=%pM sa=%pM vdev=%s\n",
 							len, chan, ntohs(skb->protocol),
 							eth_hdr(skb)->h_dest, eth_hdr(skb)->h_source,
 							w->dev->name);
