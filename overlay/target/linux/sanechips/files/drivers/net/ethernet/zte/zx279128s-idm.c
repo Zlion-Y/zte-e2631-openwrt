@@ -70,7 +70,8 @@
 #define ZX_IDM_CFG24		0x24	/* = 31 */
 #define ZX_IDM_CFG40		0x40	/* ring alignment mark (0 when aligned) */
 #define ZX_IDM_KICK		0x44	/* write: (new tx desc) << 16; read low16: tx done */
-#define ZX_IDM_RXBUF		0x48	/* RX buffer submission port (bus addr) */
+#define ZX_IDM_RXBUF		0x48	/* RX buffer submission command port */
+#define ZX_IDM_RX_SUBMIT_CMD	0x00010000	/* vendor: one command per buffer */
 #define ZX_IDM_RXDONE		0x4c	/* read: completed rx count, low 16, read-clear */
 
 /*
@@ -190,17 +191,22 @@ static void *zx_idm_buf_ptr(struct zx_idm *idm, u32 pos)
 	return idm->bufs + pos * ZX_IDM_BUF_SIZE;
 }
 
-/* Submit one filled buffer to the engine: descriptor word 0 in the shared
- * ring AND the bus address through the IDM+0x48 port.  The engine walks its
- * internal ring in submission order, so the buffer's slot in the ring array
- * is also its slot in the skb table.
+/* Submit one filled buffer to the engine: the buffer bus address goes into
+ * the shared descriptor, then IDM+0x48 takes a SUBMISSION COMMAND, not an
+ * address.  The vendor's pon_npp_idm_init stores the skb data pointer into
+ * descriptor word 0 and writes the constant 0x10000 (= 1 << 16) to +0x48 for
+ * every buffer it hands over (disasm at plat 0x67b0: mov ip,#65536 then
+ * str ip,[idm+0x48]).  Writing the bus address there instead delivered no
+ * data at all: the hardware still completed descriptors, so every delivered
+ * frame was stale DMA memory (da=00:00:00:00:00:00 proto=0000 in the
+ * 0.6 frame log) and the radio blackholed every offloaded downlink.
  */
 static void zx_idm_rx_submit(struct zx_idm *idm, u32 pos, dma_addr_t bus)
 {
 	idm->rx[pos].w0 = cpu_to_le32(bus);
 	idm->rx[pos].w1 = 0;
 	wmb();
-	writel(bus, idm->base + ZX_IDM_RXBUF);
+	writel(ZX_IDM_RX_SUBMIT_CMD, idm->base + ZX_IDM_RXBUF);
 	idm->rx_submit++;
 }
 
