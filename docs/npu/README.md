@@ -21,6 +21,8 @@
 | [13-npu-0.8 构建记录](13-build-npu-0.8-2026-10-29.md) | MT7916 G3.2：CR 探针、WFDMA 22 写计划、patch 命令/固件头 |
 | [14-G3.3 Andes MCU 计划](14-G3.3-andes-mcu-plan-2026-10-29.md) | 命令消息 24B 头、三条 patch 命令；§6 解码：MCU TX=AndesSendCmdMsg 队列+tasklet、fw 子表五槽、环寄存器 4 连寄存器布局 |
 | [15-npu-0.9 构建记录](15-build-npu-0.9-2026-10-29.md) | Andes 三条 patch 命令的字节级编码器（`ctl` 写 `mcu`） |
+| [16-zwzzrl 上游采纳](16-zwzzrl-上游采纳-2026-10-30.md) | 九轮真机取证：0x388000=MLD 表、CLA 无 v6 哈希、trap-DMAC 根因、sbrg 套件并入 |
+| [17-npu-1.0 行为核对与风险审计](17-npu-1.0-行为核对与风险审计-2026-10-30.md) | 原厂 5.3 活体只读采集 vs zxnpu 实现 9 项对照；重启/变砖风险清单 |
 | [register-diff CSV](../../re/npu/register-diff-e2631-vs-zx279133.csv) | 机器可读差异表（block/item/e2631/reference/status/action/evidence） |
 
 ## 当前状态

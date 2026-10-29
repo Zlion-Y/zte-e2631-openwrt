@@ -41,6 +41,20 @@
  * Everything that writes is behind zxnpu_ppe.enable=1 and documented as an
  * experiment; the checks that matter (poly readout, hash, entry readback)
  * are read-only.
+ *
+ * SBRG indirect table (PP+0x388000) — the IPv6 multicast (MLD) table on this
+ * SoC, per the zwzzrl fork's real-device forensics rounds 5-9 (origin/main
+ * 008eeaf; the older "unicast forwarding" reading was wrong). Adopted with
+ * attribution from that work, which verified on hardware: the key is
+ * sip[16]+dip[16]+vlan(u16le) hashed byte-reversed with CRC-16/CCITT (init 0,
+ * table in tm.ko .rodata:0x108), truncated to ten bits; the slot picks from
+ * vendor reg 29 (PP+0x388184, mask 3); the entry is 48 bytes = 4 blocks of 3
+ * words written word-0-last, after reading all four tables at the entry's
+ * four block indices the way the vendor's MLD add does. Their pitfall is
+ * kept as a warning: the selector address is absolute (PP+0x388184), a
+ * double-added base lands outside the 4 MiB PP window and the access oopses.
+ * "sbrg h" is pure computation plus one register read; every table access
+ * stays behind enable=1.
  */
 
 #include <linux/bits.h>
@@ -61,7 +75,12 @@
 #include <linux/uaccess.h>
 
 #define ZXNPU_PP_BASE		0x92380000
-#define ZXNPU_PP_SIZE		0x40000
+/* The vendor maps the full 4 MiB PP window; SBRG at +0x388000 is invisible
+ * with the 0x40000 mapping this module used before, and an access past the
+ * window end faults the CPU (zwzzrl hit exactly that with a double-added
+ * base), so the mapping is the window the stock driver uses.
+ */
+#define ZXNPU_PP_SIZE		0x400000
 #define ZXNPU_CLA_OFF		0xC000
 #define ZXNPU_CLA_CMD		0x14
 #define ZXNPU_CLA_STATUS	0x18
@@ -85,6 +104,18 @@
 static const u32 zxnpu_hash_polys[4] = {
 	0x04c11db7, 0x1edc6f41, 0xf4acfb13, 0x32583499,
 };
+
+/* SBRG indirect table: same command/status/data layout as the CLA window,
+ * offset 0x388000 into the PP block.  Vendor reg 29 (the table selector)
+ * sits at +0x184 *absolute* in the PP window — adding ZXNPU_SBRG_OFF again
+ * walks the access out of the mapped window.
+ */
+#define ZXNPU_SBRG_OFF		0x388000
+#define ZXNPU_SBRG_SEL		0x184
+#define ZXNPU_SBRG_WORDS	3
+#define ZXNPU_SBRG_EWORDS	12	/* 48-byte entry = 4 blocks of 3 */
+#define ZXNPU_SBRG_KEY_LEN	34	/* sip[16] + dip[16] + vlan u16le */
+#define ZXNPU_SBRG_HASH_MASK	0x3ff
 
 static bool zxnpu_ppe_enable;
 module_param_named(enable, zxnpu_ppe_enable, bool, 0644);
@@ -277,6 +308,196 @@ static int zxnpu_entry_write(struct zxnpu_ppe *ppe, u32 slot, const u32 w[15])
 	return zxnpu_cla_write(ppe, table, index, w, 15);
 }
 
+/* ---- SBRG (IPv6 multicast table), adopted from zwzzrl origin/main 008eeaf,
+ * real-device verified on their v9c build (rounds 5-9). ---- */
+
+static int zxnpu_parse_hex(const char *s, u8 *out, int len);
+
+static int zxnpu_sbrg_wait(struct zxnpu_ppe *ppe)
+{
+	u32 value;
+
+	return readl_poll_timeout(ppe->pp + ZXNPU_SBRG_OFF + ZXNPU_CLA_STATUS,
+				  value, value & BIT(0), 10, 1000);
+}
+
+/* One indirect access on the SBRG window: read is start bit set and returns
+ * three data words; a write latches the entry when word 0 arrives, so word 0
+ * goes last.  The vendor polls the status word before the data words and for
+ * completion afterwards.
+ */
+static int zxnpu_sbrg_xfer(struct zxnpu_ppe *ppe, u32 table, u32 index,
+			   bool read, u32 *w)
+{
+	int i, ret;
+
+	ret = zxnpu_sbrg_wait(ppe);
+	if (ret)
+		return ret;
+	writel(index | table << ZXNPU_CLA_TABLE_SHIFT |
+	       (read ? ZXNPU_CLA_READ : 0),
+	       ppe->pp + ZXNPU_SBRG_OFF + ZXNPU_CLA_CMD);
+	if (!read) {
+		for (i = ZXNPU_SBRG_WORDS - 1; i >= 0; i--)
+			writel(w[i], ppe->pp + ZXNPU_SBRG_OFF +
+			       ZXNPU_CLA_DATA + 4 * i);
+	}
+	for (i = 0; i < 64 && (readl(ppe->pp + ZXNPU_SBRG_OFF +
+				     ZXNPU_CLA_STATUS) & BIT(0)); i++)
+		;
+	ret = zxnpu_sbrg_wait(ppe);
+	if (ret)
+		return ret;
+	if (read) {
+		for (i = 0; i < ZXNPU_SBRG_WORDS; i++)
+			w[i] = readl(ppe->pp + ZXNPU_SBRG_OFF +
+				     ZXNPU_CLA_DATA + 4 * i);
+	}
+	return 0;
+}
+
+/* tm.ko sbrg_hash(): the 34-byte key is fed backwards through CRC-16/CCITT
+ * with init 0; ten bits are kept.
+ */
+static u16 zxnpu_sbrg_hash(const u8 *key, int len)
+{
+	u16 crc = 0;
+	int i;
+
+	while (len--) {
+		crc ^= (u16)key[len] << 8;
+		for (i = 0; i < 8; i++)
+			crc = (crc & 0x8000) ? (crc << 1) ^ 0x1021 : crc << 1;
+	}
+	return crc & ZXNPU_SBRG_HASH_MASK;
+}
+
+/* sbrg_get_table_sel() returns vendor reg 29; the vendor's arithmetic only
+ * tells selector value 1 apart from everything else.
+ */
+static u32 zxnpu_sbrg_slot(u16 hash, u32 sel)
+{
+	if (sel == 1)
+		return ((hash & 0x7f) << 2) | 0x200;
+	return ((hash << 2) & 0xff) | 0x300;
+}
+
+static u64 zxnpu_sbrg_le64(const u8 *p)
+{
+	u64 v = 0;
+	int i;
+
+	for (i = 7; i >= 0; i--)
+		v = (v << 8) | p[i];
+	return v;
+}
+
+/* The 384-bit little-endian entry bit stream (verified against the vendor
+ * code on random records): bits 0..2 valid/age/mode, 3..14 vlan, 15..78 dip
+ * bytes 8..15, 96..103 egress port mask, 104..167 dip bytes 0..7, 192..255
+ * sip bytes 8..15, 288..351 sip bytes 0..7; words 8 and 11 stay zero.
+ */
+static void zxnpu_sbrg_entry(const u8 *sip, const u8 *dip, u32 vlan,
+			     u32 pt_mask, u32 w[ZXNPU_SBRG_EWORDS])
+{
+	u64 dip_hi = zxnpu_sbrg_le64(dip + 8);
+	u64 dip_lo = zxnpu_sbrg_le64(dip);
+	u64 sip_lo = zxnpu_sbrg_le64(sip);
+	u64 sip_hi = zxnpu_sbrg_le64(sip + 8);
+
+	memset(w, 0, ZXNPU_SBRG_EWORDS * sizeof(u32));
+	w[0] = 1 | BIT(2) | ((vlan & 0xfff) << 3) | ((dip_hi & 0x1ffff) << 15);
+	w[1] = (dip_hi >> 17) & 0xffffffff;
+	w[2] = (dip_hi >> 49) & 0x7fff;
+	w[3] = (pt_mask & 0xff) | ((dip_lo & 0xffffff) << 8);
+	w[4] = (dip_lo >> 24) & 0xffffffff;
+	w[5] = (dip_lo >> 56) & 0xff;
+	w[6] = sip_hi & 0xffffffff;
+	w[7] = (sip_hi >> 32) & 0xffffffff;
+	w[9] = sip_lo & 0xffffffff;
+	w[10] = (sip_lo >> 32) & 0xffffffff;
+}
+
+/* "sbrg h|a|d <sip 32 hex> <dip 32 hex> <vlan> [pt]": h computes and prints
+ * (one register read, no table access); a/d add/delete the entry the vendor
+ * way — read all four tables at the entry's four blocks, then write table 0
+ * word-0-last.  a/d are behind enable=1.
+ */
+static void zxnpu_sbrg_cmd(struct zxnpu_ppe *ppe, const char *args, bool write)
+{
+	u8 sip[16], dip[16], key[ZXNPU_SBRG_KEY_LEN];
+	u32 words[ZXNPU_SBRG_EWORDS], v[ZXNPU_SBRG_WORDS] = {};
+	u32 vlan = 1, pt = 0xff, hash, sel, index;
+	char how = 0, s_sip[40], s_dip[40];
+	int i, b, t, ret;
+
+	if (sscanf(args, " %c %39s %39s %u %u", &how, s_sip, s_dip, &vlan,
+		   &pt) < 4) {
+		zxnpu_ppe_out(ppe, "usage: sbrg h|a|d <sip 32hex> <dip 32hex> <vlan> [pt]\n");
+		return;
+	}
+	if (zxnpu_parse_hex(s_sip, sip, 16) || zxnpu_parse_hex(s_dip, dip, 16)) {
+		zxnpu_ppe_out(ppe, "bad address (need 32 hex digits each)\n");
+		return;
+	}
+	memcpy(key, sip, 16);
+	memcpy(key + 16, dip, 16);
+	key[32] = vlan & 0xff;
+	key[33] = (vlan >> 8) & 0xff;
+	hash = zxnpu_sbrg_hash(key, sizeof(key));
+	sel = readl(ppe->pp + ZXNPU_SBRG_OFF + ZXNPU_SBRG_SEL) & 3;
+	index = zxnpu_sbrg_slot(hash, sel);
+	zxnpu_sbrg_entry(sip, dip, vlan, pt, words);
+	zxnpu_ppe_out(ppe, "sbrg: vlan %u hash %#x sel %u slot %#x\n",
+		      vlan, hash, sel, index);
+	for (i = 0; i < ZXNPU_SBRG_EWORDS; i += 3)
+		zxnpu_ppe_out(ppe, "sbrg:   w%02d %08x %08x %08x\n", i,
+			      words[i], words[i + 1], words[i + 2]);
+	if (how != 'a' && how != 'd')
+		return;
+	if (!write) {
+		zxnpu_ppe_out(ppe, "sbrg: %c needs zxnpu_ppe.enable=1\n", how);
+		return;
+	}
+	if (how == 'd')
+		memset(words, 0, sizeof(words));
+	if (index + 3 >= 0x1000) {
+		zxnpu_ppe_out(ppe, "sbrg: slot %#x out of table\n", index);
+		return;
+	}
+	for (t = 0; t < 4; t++)
+		for (b = 0; b < 4; b++)
+			zxnpu_sbrg_xfer(ppe, t, index + b, true, v);
+	for (b = 0; b < 4; b++) {
+		ret = zxnpu_sbrg_xfer(ppe, 0, index + b, false, &words[3 * b]);
+		if (ret) {
+			zxnpu_ppe_out(ppe, "sbrg: write slot %#x: no completion (%d)\n",
+				      index + b, ret);
+			return;
+		}
+	}
+	zxnpu_ppe_out(ppe, "sbrg: %s slots %#x..%#x done\n",
+		      how == 'd' ? "delete" : "add", index, index + 3);
+}
+
+static void zxnpu_sbrg_read(struct zxnpu_ppe *ppe, const char *args)
+{
+	u32 v[ZXNPU_SBRG_WORDS] = {};
+	unsigned int table, index;
+
+	if (sscanf(args, "%u %u", &table, &index) != 2 || table > 3 ||
+	    index >= 0x1000) {
+		zxnpu_ppe_out(ppe, "usage: sbrg read <table 0..3> <index 0..0xfff>\n");
+		return;
+	}
+	if (zxnpu_sbrg_xfer(ppe, table, index, true, v))
+		zxnpu_ppe_out(ppe, "sbrg: read table %u index %#x: no completion\n",
+			      table, index);
+	else
+		zxnpu_ppe_out(ppe, "sbrg: table %u index %#x = %08x %08x %08x\n",
+			      table, index, v[0], v[1], v[2]);
+}
+
 static void zxnpu_ppe_hex(struct zxnpu_ppe *ppe, const u8 *buf, int len)
 {
 	int i;
@@ -454,6 +675,11 @@ static ssize_t zxnpu_ppe_write(struct file *file, const char __user *ubuf,
 		ret = count;
 		goto out;
 	}
+	if (!strncmp(cmd, "sbrg h ", 7)) {
+		zxnpu_sbrg_cmd(ppe, cmd + 5, false);
+		ret = count;
+		goto out;
+	}
 	if (!strncmp(cmd, "entry ", 6)) {
 		if (sscanf(cmd + 6, "%u", &slot) != 1 ||
 		    zxnpu_entry_read(ppe, slot, got)) {
@@ -517,7 +743,17 @@ static ssize_t zxnpu_ppe_write(struct file *file, const char __user *ubuf,
 		ret = count;
 		goto out;
 	}
-	zxnpu_ppe_out(ppe, "commands: dump | poly | slots <proto> <sip> <dip> <sport> <dport> | entry <slot> | read <table> <index> | write <table> <index> <value> | entryw <slot> <60 hex bytes>\n");
+	if (!strncmp(cmd, "sbrg a ", 7) || !strncmp(cmd, "sbrg d ", 7)) {
+		zxnpu_sbrg_cmd(ppe, cmd + 5, true);
+		ret = count;
+		goto out;
+	}
+	if (!strncmp(cmd, "sbrg read ", 10)) {
+		zxnpu_sbrg_read(ppe, cmd + 10);
+		ret = count;
+		goto out;
+	}
+	zxnpu_ppe_out(ppe, "commands: dump | poly | slots <proto> <sip> <dip> <sport> <dport> | entry <slot> | read <table> <index> | write <table> <index> <value> | entryw <slot> <60 hex bytes> | sbrg h|a|d <sip 32hex> <dip 32hex> <vlan> [pt] | sbrg read <table 0..3> <index>\n");
 	ret = count;
 out:
 	mutex_unlock(&ppe->lock);
