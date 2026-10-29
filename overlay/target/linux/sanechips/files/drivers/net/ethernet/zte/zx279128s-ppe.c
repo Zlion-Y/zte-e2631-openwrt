@@ -440,15 +440,30 @@ int zx_ppe_flow_add(struct zx_eth_adapter *adapter,
 
 	if (!odev)
 		return (atomic_inc(&zx_ppe_skip[11]), -EOPNOTSUPP);
-	if (zx_eth_is_port(odev)) {
-		port = ZX_BRPORT(((struct zx_eth_priv *)netdev_priv(odev))->port);
-	} else {
-		/* wireless: resolve the VAP's fabric port, either directly or
-		 * through the bridge FDB when odev is the bridge master */
-		port = zx_idm_wifi_egress(adapter, odev, eth.h_dest);
-		if (port < 0)
-			return (atomic_inc(&zx_ppe_skip[12]), port);
-	}
+	/* Offload ONLY downlinks whose egress is a wireless VAP.
+	 *
+	 * fw4's hardware-offload path hands the driver MAC rewrites only: an
+	 * uplink flow arrives with sip=0/dip=0 even though the connection is
+	 * masqueraded (0.10 flow log: dev=wan egress=4 ... sip=0).  The
+	 * classifier would forward that frame with its private source
+	 * address and no answer would ever come back - invisible while few
+	 * flows are offloaded, fatal the moment a speed test pushes every
+	 * flow into the classifier.
+	 *
+	 * A wireless downlink needs nothing but the MAC rewrite (verified
+	 * byte for byte in the 0.8 dump), so that direction stays offloaded
+	 * and the CPU stops copying the bulk of the traffic.  Anything that
+	 * egresses a switch port - every uplink, and all wired forwarding -
+	 * falls through to the kernel flowtable, which applies NAT correctly.
+	 */
+	if (zx_eth_is_port(odev))
+		return (atomic_inc(&zx_ppe_skip[15]), -EOPNOTSUPP);
+
+	/* wireless: resolve the VAP's fabric port, either directly or
+	 * through the bridge FDB when odev is the bridge master */
+	port = zx_idm_wifi_egress(adapter, odev, eth.h_dest);
+	if (port < 0)
+		return (atomic_inc(&zx_ppe_skip[12]), port);
 	if (!is_valid_ether_addr(eth.h_source) || !is_valid_ether_addr(eth.h_dest))
 		return (atomic_inc(&zx_ppe_skip[13]), -EOPNOTSUPP);
 
