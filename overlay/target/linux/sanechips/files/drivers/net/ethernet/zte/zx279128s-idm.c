@@ -515,10 +515,29 @@ bool zx_idm_wifi_ingress(const struct zx_eth_adapter *adapter, int ifindex)
 		return false;
 	if (adapter != zx_idm.adapter)
 		return false;
-	for (i = 0; i < zx_idm.wifi_count; i++)
-		if (zx_idm.wifi[i].dev &&
-		    zx_idm.wifi[i].dev->ifindex == ifindex)
+
+	for (i = 0; i < zx_idm.wifi_count; i++) {
+		struct net_device *dev = zx_idm.wifi[i].dev;
+		struct net_device *br;
+		bool match = false;
+
+		if (!dev)
+			continue;
+		if (dev->ifindex == ifindex)
 			return true;
+		/* a bridged wireless client's flow enters the stack on the
+		 * bridge master, not on the VAP: accept the bridge when the
+		 * VAP is one of its ports, otherwise every wireless flow is
+		 * refused at the classifier ingress check and the whole
+		 * offload silently degrades to the CPU path */
+		rcu_read_lock();
+		br = netdev_master_upper_dev_get_rcu(dev);
+		if (br && netif_is_bridge_master(br) && br->ifindex == ifindex)
+			match = true;
+		rcu_read_unlock();
+		if (match)
+			return true;
+	}
 	return false;
 }
 
