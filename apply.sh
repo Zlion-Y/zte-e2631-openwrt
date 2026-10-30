@@ -368,6 +368,13 @@ echo "native: .config stripped of the open-source wireless drivers (refusals wri
 # npu branch: the scaffold is the branch's identity and has no MMIO access, so
 # unlike FFE it is always built. The kernel-build wiring ships as patch 037;
 # the symbol choice is pinned here so a fresh tree cannot silently drop it.
+NATIVE_MARK="# E2631: native wired data plane (P2, built-in, enable=0)"
+if [ -f "$TREE/target/linux/sanechips/patches-6.18/043-zte-add-the-ZX279128S-native-wired-driver.patch" ]; then
+	awk '$0 !~ /^CONFIG_ZXNATIVE_ETH=/ && $0 !~ /native wired data plane/' "$CFG" > "$CFG.tmp" && mv "$CFG.tmp" "$CFG"
+	printf '%s
+' "$NATIVE_MARK" 'CONFIG_ZXNATIVE_ETH=y' >> "$CFG"
+	echo "kernel config: native wired data plane (P2) built-in, runtime opt-in"
+fi
 ETH_MARK="# E2631: wired hardware layer (021, vendor-native data plane)"
 if [ -f "$TREE/target/linux/sanechips/patches-6.18/021-net-ethernet-zte-Add-ZX279128S-Ethernet-switch-drive.patch" ]; then
 	awk -v m="$ETH_MARK" '$0 != m && $0 != "CONFIG_ZX279128S_ETH=y" && $0 != "# CONFIG_ZX279128S_ETH is not set"' "$CFG" > "$CFG.tmp" && mv "$CFG.tmp" "$CFG"
@@ -518,6 +525,11 @@ assert "slot-aware partition parser wired (patch 033 + config)" \
 assert "slot parser source present in files/" \
 assert "slotpart carries the partition of_node (nvmem cell -> gmac MACs)" 	grep -q 'out\[i\]\.of_node = parts\[i\]\.np;' 	"$TREE/target/linux/sanechips/files/drivers/mtd/parsers/zx279128s-slotpart.c"
 	test -f "$TREE/target/linux/sanechips/files/drivers/mtd/parsers/zx279128s-slotpart.c"
+assert "native wired driver source present" \
+	test -f "$TREE/target/linux/sanechips/files/drivers/net/ethernet/zte/zxnative-eth.c"
+assert "native wired driver wiring patch present" \
+	test -f "$TREE/target/linux/sanechips/patches-6.18/043-zte-add-the-ZX279128S-native-wired-driver.patch"
+assert "native wired driver enabled in the target config" grep -q '^CONFIG_ZXNATIVE_ETH=y$' "$CFG"
 assert "wired hardware layer patch present" \
 	test -f "$TREE/target/linux/sanechips/patches-6.18/021-net-ethernet-zte-Add-ZX279128S-Ethernet-switch-drive.patch"
 assert "wired hardware layer enabled in target config" grep -q '^CONFIG_ZX279128S_ETH=y$' "$CFG"

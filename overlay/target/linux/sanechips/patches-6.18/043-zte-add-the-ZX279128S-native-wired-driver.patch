@@ -1,0 +1,24 @@
+--- a/drivers/net/ethernet/zte/Kconfig
++++ b/drivers/net/ethernet/zte/Kconfig
+@@ -73,4 +73,14 @@
+ 	  register writes also require commit=1.
+ 
+ 	  If unsure, say Y on this board.
++
++config ZXNATIVE_ETH
++	bool "ZTE ZX279128S native wired data plane (P2)"
++	depends on OF && PHYLINK
++	help
++	  Standalone vendor-behaviour rewrite of the switch/GMAC/DMA data
++	  path. While the baseline driver owns the node this module stays
++	  inert; zxnative_eth.enable=1 lets it probe instead.
++
++	  If unsure, say N.
+ endif # NET_VENDOR_ZTE
+--- a/drivers/net/ethernet/zte/Makefile
++++ b/drivers/net/ethernet/zte/Makefile
+@@ -6,3 +6,4 @@
+ obj-$(CONFIG_ZX_NPU_IDM) += zx279128s-npu-idm.o
+ obj-$(CONFIG_ZX_NPU_PPE) += zx279128s-npu-ppe.o
+ obj-$(CONFIG_ZX_CSP_WLAN) += zxnpu-wlan.o
++obj-$(CONFIG_ZXNATIVE_ETH) += zxnative-eth.o
