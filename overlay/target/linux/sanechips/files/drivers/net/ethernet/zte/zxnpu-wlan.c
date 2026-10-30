@@ -60,6 +60,11 @@ struct zxnpu_wlan {
 	void *mcu_buf;		/* 1 KiB command buffer */
 	dma_addr_t mcu_buf_dma;
 	u32 mcu_cidx;
+	void *fwdl_ring;	/* qid16 / 0x18024400: FwScatter bulk data */
+	dma_addr_t fwdl_ring_dma;
+	void *fwdl_buf;
+	dma_addr_t fwdl_buf_dma;
+	u32 fwdl_cidx;
 	void *rx_ring;		/* 32 x 36 descriptors */
 	dma_addr_t rx_ring_dma;
 	void *rx_buf;		/* 32 x 1700 buffers with 16B RXD */
@@ -127,6 +132,60 @@ static void zxnpu_cr_write(struct zxnpu_wlan *w, u32 cr, u32 val)
 	if (!w->bar[0] || (resource_size_t)off + 4 > pci_resource_len(w->pdev, 0))
 		return;
 	writel(val, w->bar[0] + off);
+}
+
+/* BAR0 offsets that are not in the 0x1800_0000 CR window. */
+static u32 zxnpu_bar0_read(struct zxnpu_wlan *w, u32 off)
+{
+	if (!w->bar[0] || (resource_size_t)off + 4 > pci_resource_len(w->pdev, 0))
+		return 0;
+	return readl(w->bar[0] + off);
+}
+
+static void zxnpu_bar0_write(struct zxnpu_wlan *w, u32 off, u32 val)
+{
+	if (!w->bar[0] || (resource_size_t)off + 4 > pci_resource_len(w->pdev, 0))
+		return;
+	writel(val, w->bar[0] + off);
+}
+
+/*
+ * FW state handshake, from ctrl_fw_state_v2 (0x1D5198) and
+ * AsicGetFwSyncValue (0x140C00). MT_TOP_MISC (0x180600F0) is reached
+ * through the L1 window: MT_HIF_REMAP_L1_MT7916 (0xFE260) takes
+ * addr >> 16, then the value is read at 0xE0000 + (addr & 0xFFFF).
+ * Bits 2:0 are the state mt76 calls FW_STATE_*: 1 = firmware download,
+ * 3 = normal operation, 7 = ready including the WA MCU.
+ */
+#define ZXNPU_HIF_REMAP_L1_MT7916	0x000fe260
+#define ZXNPU_L1_REMAP_BASE		0x000e0000
+#define ZXNPU_TOP_MISC			0x180600f0
+
+static u32 zxnpu_fw_state_read(struct zxnpu_wlan *w)
+{
+	zxnpu_bar0_write(w, ZXNPU_HIF_REMAP_L1_MT7916, ZXNPU_TOP_MISC >> 16);
+	(void)zxnpu_bar0_read(w, ZXNPU_HIF_REMAP_L1_MT7916);
+	return zxnpu_bar0_read(w, ZXNPU_L1_REMAP_BASE +
+			       (ZXNPU_TOP_MISC & 0xffff)) & 0x7;
+}
+
+static void zxnpu_wlan_fw_state(struct zxnpu_wlan *w, bool commit)
+{
+	u32 st;
+
+	zxnpu_wlan_append(w, "fw-state: %s\n", commit ? "COMMIT" : "read only");
+	zxnpu_wlan_append(w, "  remap %08x <- %04x, read %08x\n",
+			  ZXNPU_HIF_REMAP_L1_MT7916, ZXNPU_TOP_MISC >> 16,
+			  ZXNPU_L1_REMAP_BASE + (ZXNPU_TOP_MISC & 0xffff));
+	if (!commit) {
+		zxnpu_wlan_append(w, "  dry run: set commit=1 to read the L1 window\n");
+		return;
+	}
+	st = zxnpu_fw_state_read(w);
+	zxnpu_wlan_append(w, "  MT_TOP_MISC state=%u (%s)\n", st,
+			  st == 1 ? "firmware download" :
+			  st == 3 ? "normal operation" :
+			  st == 7 ? "ready (WM+WA)" : "unknown");
 }
 
 static void zxnpu_wlan_probe_regs(struct zxnpu_wlan *w)
@@ -243,9 +302,15 @@ static void zxnpu_wlan_mcuwin(struct zxnpu_wlan *w)
  *    qids are FWDL=16 (0x24400), MCU_WM=17 (0x24410), BAND0=18,
  *    BAND1=19, MCU_WA=20 (0x24440); the MCU_WM ring is the command ring.
  *
+ * Bulk FwScatter payloads go to qid16/FWDL (ring 0), every other command
+ * to qid17/MCU_WM (ring 1); this follows GetRealPortQueueID (0x1C112C),
+ * which maps type 0xEE to chip_cap[0x162] and everything else to the
+ * 0x8000 control queue.
+ *
  * This is a hypothesis, not a verified sequence: it is inert unless
- * enable=1 and commit=1, and it only ever touches ring 4.
+ * enable=1 and commit=1.
  */
+#define ZXNPU_FWDL_RING_NR	0
 #define ZXNPU_MCU_RING_NR	1
 #define ZXNPU_MCU_RING_REG	(ZXNPU_WFDMA_TX_RING0 + 0x10 * ZXNPU_MCU_RING_NR)
 #define ZXNPU_MCU_DESC_SIZE	36
@@ -258,11 +323,16 @@ static void zxnpu_wlan_mcuwin(struct zxnpu_wlan *w)
 #define ZXNPU_MCU_TYPE_FINISH	0x07
 #define ZXNPU_MCU_TYPE_ADDR	0x01
 #define ZXNPU_MCU_CHUNK		512
+#define ZXNPU_WM_FW		"zte/mt7916/WIFI_RAM_CODE_MT7916.bin"
+#define ZXNPU_WA_FW		"zte/mt7916/7916_WACPU_RAM_CODE_release.bin"
+#define ZXNPU_PATCH_FW		"zte/mt7916/mt7916_patch_e1_hdr.bin"
+#define ZXNPU_FW_MAX_REGIONS	16
+#define ZXNPU_PATCH_HDR		30
 
-static void zxnpu_mcu_fill_desc(struct zxnpu_wlan *w, u32 slot, u32 buf_dma,
-				u32 len)
+static void zxnpu_mcu_fill_desc(void *ring, dma_addr_t ring_dma, u32 slot,
+				u32 buf_dma, u32 len)
 {
-	u8 *d = (u8 *)w->mcu_ring + slot * ZXNPU_MCU_DESC_SIZE;
+	u8 *d = (u8 *)ring + slot * ZXNPU_MCU_DESC_SIZE;
 	u32 next = (slot + 1) % ZXNPU_MCU_RING_DEPTH;
 
 	memset(d, 0, ZXNPU_MCU_DESC_SIZE);
@@ -271,30 +341,43 @@ static void zxnpu_mcu_fill_desc(struct zxnpu_wlan *w, u32 slot, u32 buf_dma,
 	put_unaligned_le32(buf_dma + len, d + 8);
 	put_unaligned_le32(buf_dma, d + 12);
 	put_unaligned_le32(len, d + 24);
-	put_unaligned_le32(w->mcu_ring_dma + next * ZXNPU_MCU_DESC_SIZE, d + 28);
+	put_unaligned_le32(ring_dma + next * ZXNPU_MCU_DESC_SIZE, d + 28);
 }
 
-static int zxnpu_mcu_submit(struct zxnpu_wlan *w, const u8 *msg, int len,
-			  bool commit, bool verbose)
+/*
+ * ring 0 = qid16 FWDL (0x18024400), ring 1 = qid17 MCU_WM (0x18024410).
+ * GetRealPortQueueID (0x1C112C) sends type 0xEE to chip_cap[0x162] (the
+ * FWDL queue) and every other command to the 0x8000 control queue, so
+ * bulk FwScatter payloads use the FWDL ring and command messages use
+ * MCU_WM.
+ */
+static int zxnpu_mcu_submit_ring(struct zxnpu_wlan *w, int ring,
+				 const u8 *msg, int len, bool commit,
+				 bool verbose)
 {
+	void *desc = ring ? w->mcu_ring : w->fwdl_ring;
+	dma_addr_t desc_dma = ring ? w->mcu_ring_dma : w->fwdl_ring_dma;
+	void *buf = ring ? w->mcu_buf : w->fwdl_buf;
+	dma_addr_t buf_dma = ring ? w->mcu_buf_dma : w->fwdl_buf_dma;
+	u32 *cidx = ring ? &w->mcu_cidx : &w->fwdl_cidx;
+	u32 reg = ZXNPU_WFDMA_TX_RING0 + 0x10 * ring;
 	u32 slot, didx, prev;
 
-	if (!w->mcu_ring || !w->mcu_buf || len <= 0 || len > ZXNPU_MCU_BUF_SIZE)
+	if (!desc || !buf || len <= 0 || len > ZXNPU_MCU_BUF_SIZE)
 		return -EINVAL;
-	slot = w->mcu_cidx % ZXNPU_MCU_RING_DEPTH;
-	memset(w->mcu_buf, 0, ZXNPU_MCU_BUF_SIZE);
-	memcpy(w->mcu_buf, msg, len);
-	zxnpu_mcu_fill_desc(w, slot, (u32)w->mcu_buf_dma, len);
+	slot = (*cidx) % ZXNPU_MCU_RING_DEPTH;
+	memset(buf, 0, ZXNPU_MCU_BUF_SIZE);
+	memcpy(buf, msg, len);
+	zxnpu_mcu_fill_desc(desc, desc_dma, slot, (u32)buf_dma, len);
 	dma_wmb();
 
-	prev = zxnpu_cr_read(w, ZXNPU_MCU_RING_REG + 12);
+	prev = zxnpu_cr_read(w, reg + 12);
 	if (verbose)
-		zxnpu_wlan_append(w, "  submit slot=%u len=%d: reg %08x base=%08x cnt=%u cidx=%u didx=%u\n",
-				  slot, len, ZXNPU_MCU_RING_REG,
-				  zxnpu_cr_read(w, ZXNPU_MCU_RING_REG),
-				  zxnpu_cr_read(w, ZXNPU_MCU_RING_REG + 4),
-				  zxnpu_cr_read(w, ZXNPU_MCU_RING_REG + 8),
-				  prev);
+		zxnpu_wlan_append(w, "  submit qid%d slot=%u len=%d: base=%08x cnt=%u cidx=%u didx=%u\n",
+				  ring ? 17 : 16, slot, len,
+				  zxnpu_cr_read(w, reg),
+				  zxnpu_cr_read(w, reg + 4),
+				  zxnpu_cr_read(w, reg + 8), prev);
 	if (!commit) {
 		zxnpu_wlan_append(w, "  dry run: set zxnpu_wlan.commit=1 to write\n");
 		return 0;
@@ -306,19 +389,25 @@ static int zxnpu_mcu_submit(struct zxnpu_wlan *w, const u8 *msg, int len,
 		/* hif_set_WFDMA(2): WFDMA_EN | TX DMA EN */
 		zxnpu_cr_write(w, ZXNPU_WFDMA_GLO_CFG, glo | 0x5);
 	}
-	zxnpu_cr_write(w, ZXNPU_MCU_RING_REG, (u32)w->mcu_ring_dma);
-	zxnpu_cr_write(w, ZXNPU_MCU_RING_REG + 4, ZXNPU_MCU_RING_DEPTH);
-	w->mcu_cidx++;
-	zxnpu_cr_write(w, ZXNPU_MCU_RING_REG + 8, w->mcu_cidx);
-	if (!readl_poll_timeout(w->bar[0] + ZXNPU_CR(ZXNPU_MCU_RING_REG + 12),
-				didx, (didx % ZXNPU_MCU_RING_DEPTH) ==
-				(w->mcu_cidx % ZXNPU_MCU_RING_DEPTH), 100,
-				50000))
+	zxnpu_cr_write(w, reg, (u32)desc_dma);
+	zxnpu_cr_write(w, reg + 4, ZXNPU_MCU_RING_DEPTH);
+	(*cidx)++;
+	zxnpu_cr_write(w, reg + 8, *cidx);
+	if (!readl_poll_timeout(w->bar[0] + ZXNPU_CR(reg + 12), didx,
+				(didx % ZXNPU_MCU_RING_DEPTH) ==
+				(*cidx % ZXNPU_MCU_RING_DEPTH), 100, 50000))
 		zxnpu_wlan_append(w, "  didx advanced to %u\n", didx);
 	else
 		zxnpu_wlan_append(w, "  didx still %u (last was %u)\n",
-				  zxnpu_cr_read(w, ZXNPU_MCU_RING_REG + 12), prev);
+				  zxnpu_cr_read(w, reg + 12), prev);
 	return 0;
+}
+
+static int zxnpu_mcu_submit(struct zxnpu_wlan *w, const u8 *msg, int len,
+			    bool commit, bool verbose)
+{
+	return zxnpu_mcu_submit_ring(w, ZXNPU_MCU_RING_NR, msg, len, commit,
+				     verbose);
 }
 
 static void zxnpu_wlan_mcu_send(struct zxnpu_wlan *w, bool commit)
@@ -402,7 +491,7 @@ static void zxnpu_wlan_mcu_regions(struct zxnpu_wlan *w, const char *args,
 			msg[2] = 0xEE;
 			msg[4] = 0x10;
 			memcpy(msg + 24, fw->data + off + done, chunk);
-			if (zxnpu_mcu_submit(w, msg, 24 + chunk, true, false))
+			if (zxnpu_mcu_submit_ring(w, ZXNPU_FWDL_RING_NR, msg, 24 + chunk, true, false))
 				goto out;
 			done += chunk;
 			usleep_range(500, 1000);
@@ -706,7 +795,7 @@ static void zxnpu_wlan_mcu_dl(struct zxnpu_wlan *w, const char *args, bool commi
 		msg[2] = ZXNPU_MCU_TYPE_SCATTER;
 		msg[4] = ZXNPU_MCU_CMD_SCATTER;
 		memcpy(msg + 24, fw->data + offset + done, chunk);
-		if (zxnpu_mcu_submit(w, msg, 24 + chunk, true, false))
+		if (zxnpu_mcu_submit_ring(w, ZXNPU_FWDL_RING_NR, msg, 24 + chunk, true, false))
 			goto out;
 		done += chunk;
 		if (!(done % (64 * ZXNPU_MCU_CHUNK)))
@@ -741,12 +830,6 @@ out:
  * (the WA image) adds 0x10, while FwStart gets bit0 (override) and bit2
  * (WA working PDA CR4). This matches upstream mt76_connac2_load_ram.
  */
-#define ZXNPU_WM_FW		"zte/mt7916/WIFI_RAM_CODE_MT7916.bin"
-#define ZXNPU_WA_FW		"zte/mt7916/7916_WACPU_RAM_CODE_release.bin"
-#define ZXNPU_PATCH_FW		"zte/mt7916/mt7916_patch_e1_hdr.bin"
-#define ZXNPU_FW_MAX_REGIONS	16
-#define ZXNPU_PATCH_HDR		30
-
 struct zxnpu_fw_region {
 	u32 addr;
 	u32 len;
@@ -829,7 +912,7 @@ static int zxnpu_mcu_scatter(struct zxnpu_wlan *w, const u8 *data, u32 len,
 		msg[2] = ZXNPU_MCU_TYPE_SCATTER;
 		msg[4] = ZXNPU_MCU_CMD_SCATTER;
 		memcpy(msg + 24, data + done, chunk);
-		if (zxnpu_mcu_submit(w, msg, 24 + chunk, commit, false))
+		if (zxnpu_mcu_submit_ring(w, ZXNPU_FWDL_RING_NR, msg, 24 + chunk, commit, false))
 			return -EIO;
 		done += chunk;
 		if (!commit)
@@ -916,8 +999,22 @@ static void zxnpu_wlan_fw_dl(struct zxnpu_wlan *w, const char *args, bool commit
 	zxnpu_wlan_append(w, "fw-dl %s (%zu B) %s\n", name, fw->size,
 			  commit ? "COMMIT" : "dry run");
 	ret = zxnpu_fw_send(w, fw, wa, commit);
-	if (ret)
+	if (ret) {
 		zxnpu_wlan_append(w, "fw-dl: failed at %d\n", ret);
+	} else if (commit) {
+		u32 st = 0;
+		int i;
+
+		for (i = 0; i < 150; i++) {
+			st = zxnpu_fw_state_read(w);
+			if (st == 3 || st == 7)
+				break;
+			msleep(10);
+		}
+		zxnpu_wlan_append(w, "  fw-state after start: %u%s\n", st,
+				  st == 7 ? " (WM+WA ready)" :
+				  st == 3 ? " (normal operation)" : "");
+	}
 	release_firmware(fw);
 }
 
@@ -1115,6 +1212,8 @@ static ssize_t zxnpu_wlan_ctl_write(struct file *file, const char __user *ubuf,
 	memset(w->status, 0, sizeof(w->status));
 	if (!strncmp(cmd, "probe", 5)) {
 		zxnpu_wlan_probe_regs(w);
+	} else if (!strncmp(cmd, "fw-state", 8)) {
+		zxnpu_wlan_fw_state(w, zxnpu_wlan_commit);
 	} else if (!strncmp(cmd, "fw-plan ", 8)) {
 		zxnpu_wlan_fw_plan(w, cmd + 8);
 	} else if (!strncmp(cmd, "fw-dl ", 6)) {
@@ -1151,7 +1250,7 @@ static ssize_t zxnpu_wlan_ctl_write(struct file *file, const char __user *ubuf,
 			zxnpu_wlan_append(w, "commit refused: set zxnpu_wlan.commit=1\n");
 		zxnpu_wlan_wfdma(w, commit);
 	} else {
-		zxnpu_wlan_append(w, "commands: probe | fw | plan | mcu | rings | mcuwin | mcu-send | mcu-cmd | mcu-dl | mcu-dl-regions | fw-start | fw-info | fw-plan wm|wa | fw-dl wm|wa | rx-init | mcu-recv | commit\n");
+		zxnpu_wlan_append(w, "commands: probe | fw | plan | mcu | rings | mcuwin | mcu-send | mcu-cmd | mcu-dl | mcu-dl-regions | fw-start | fw-info | fw-state | fw-plan wm|wa | fw-dl wm|wa | rx-init | mcu-recv | commit\n");
 	}
 	mutex_unlock(&w->lock);
 	return count;
@@ -1193,6 +1292,11 @@ static int zxnpu_wlan_probe(struct pci_dev *pdev,
 					  &w->mcu_ring_dma, GFP_KERNEL);
 	w->mcu_buf = dmam_alloc_coherent(&pdev->dev, ZXNPU_MCU_BUF_SIZE,
 					 &w->mcu_buf_dma, GFP_KERNEL);
+	w->fwdl_ring = dmam_alloc_coherent(&pdev->dev,
+					   ZXNPU_MCU_RING_DEPTH * ZXNPU_MCU_DESC_SIZE,
+					   &w->fwdl_ring_dma, GFP_KERNEL);
+	w->fwdl_buf = dmam_alloc_coherent(&pdev->dev, ZXNPU_MCU_BUF_SIZE,
+					  &w->fwdl_buf_dma, GFP_KERNEL);
 	w->rx_ring = dmam_alloc_coherent(&pdev->dev,
 					 ZXNPU_MCU_RX_DEPTH * ZXNPU_MCU_DESC_SIZE,
 					 &w->rx_ring_dma, GFP_KERNEL);

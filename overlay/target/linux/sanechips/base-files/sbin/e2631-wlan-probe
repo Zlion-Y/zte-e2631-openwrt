@@ -37,7 +37,7 @@ for p in enable commit; do
 done
 
 say "probe + rings + fw-info + mcuwin"
-for c in probe rings fw-info mcuwin; do
+for c in probe rings fw-info mcuwin fw-state; do
 	echo "$c" > "$CTL"
 done
 sleep 1

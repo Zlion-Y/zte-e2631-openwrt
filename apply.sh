@@ -585,6 +585,8 @@ assert "npu CSP_WLAN can download a region list" grep -q 'mcu-dl-regions <file>'
 assert "npu CSP_WLAN decodes fw format-2 region tables" grep -q 'ZXNPU_FW_MAX_REGIONS' "$TREE/target/linux/sanechips/files/drivers/net/ethernet/zte/zxnpu-wlan.c"
 assert "npu CSP_WLAN has the WM/WA download command" grep -q 'usage: fw-dl wm|wa' "$TREE/target/linux/sanechips/files/drivers/net/ethernet/zte/zxnpu-wlan.c"
 assert "npu CSP_WLAN strips the 30-byte patch header" grep -q '#define ZXNPU_PATCH_HDR' "$TREE/target/linux/sanechips/files/drivers/net/ethernet/zte/zxnpu-wlan.c"
+assert "npu CSP_WLAN routes scatter to the FWDL ring" grep -q 'ZXNPU_FWDL_RING_NR' "$TREE/target/linux/sanechips/files/drivers/net/ethernet/zte/zxnpu-wlan.c"
+assert "npu CSP_WLAN reads the MCU FW state through L1" grep -q 'ZXNPU_HIF_REMAP_L1_MT7916' "$TREE/target/linux/sanechips/files/drivers/net/ethernet/zte/zxnpu-wlan.c"
 assert "overlay ppe.c carries the IPv6 trap fix" \
 	grep -q 'v6 = READ_ONCE(adapter->ppe_active) || !sw' \
 	"$TREE/target/linux/sanechips/files/drivers/net/ethernet/zte/zx279128s-ppe.c"
