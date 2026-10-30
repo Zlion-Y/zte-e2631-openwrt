@@ -198,20 +198,17 @@ static void zxnpu_wlan_mcuwin(struct zxnpu_wlan *w)
 {
 	int i;
 
-	zxnpu_wlan_append(w, "mcu window probe (read-only):
-");
+	zxnpu_wlan_append(w, "mcu window probe (read-only):\n");
 	for (i = 0; i < 3; i++) {
 		resource_size_t len = pci_resource_len(w->pdev, i);
 		unsigned long flags = pci_resource_flags(w->pdev, i);
 
 		if (!w->bar[i] || !(flags & IORESOURCE_MEM) || len < 0x10c) {
-			zxnpu_wlan_append(w, "  bar%d: unmapped/short (len %llu flags %lx)
-",
+			zxnpu_wlan_append(w, "  bar%d: unmapped/short (len %llu flags %lx)\n",
 					  i, (unsigned long long)len, flags);
 			continue;
 		}
-		zxnpu_wlan_append(w, "  bar%d: +0=%08x +8=%08x +0x108=%08x
-", i,
+		zxnpu_wlan_append(w, "  bar%d: +0=%08x +8=%08x +0x108=%08x\n", i,
 				  readl(w->bar[i]),
 				  readl(w->bar[i] + 8),
 				  readl(w->bar[i] + 0x108));
