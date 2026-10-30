@@ -45,6 +45,7 @@
 | native-1.2 | 有线 + 上机探针脚本 | /usr/sbin/e2631-wlan-probe [--commit]，sha256 8ac85ff0… |
 | native-1.3 | 有线 + 多段下载 | mcu-dl-regions（手工段表：AddressLen+Scatter），sha256 0c017378… |
 | native-1.5 | 有线 + P2 原生驱动 | zxnative-eth 内建（enable=0，与 021 共存），sha256 acb36ac3… |
+| native-wired-1.0 | P2 切换件 | 021 移除，zxnative-eth 接管（未真机验证），sha256 bb54a902… |
 
 无线仍无：MT7916 host driver 的 native 重写尚未到位（P4）。有线加速仍由
 021+PPE 提供；P2 的原生重写完成后替换 021。

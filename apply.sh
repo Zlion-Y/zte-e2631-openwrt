@@ -295,6 +295,8 @@ rm -f "$TREE/target/linux/sanechips/patches-6.18/039-zte-add-the-ZX279128S-NPU-I
 rm -f "$TREE/target/linux/sanechips/patches-6.18/040-zte-add-the-ZX279128S-NPU-PPE-CLA-access.patch"
 rm -f "$TREE/target/linux/sanechips/patches-6.18/041-zte-add-the-ZX279128S-CSP-WLAN-G3-skeleton.patch"
 rm -f "$TREE/target/linux/sanechips/patches-6.18/034-zte-add-the-ZX279128S-FFE-control-plane.patch"
+# 044 is only used by scripts/build-native-wired.sh (P2 switchover).
+rm -f "$TREE/target/linux/sanechips/patches-6.18/044-zte-add-the-ZX279128S-native-only-wiring.patch"
 echo "native: FFE wiring removed; 037-041 superseded by 042-zte-add-the-ZX279128S-NPU-wiring.patch"
 
 # The target-level DEFAULT_PACKAGES still names wpad-basic-mbedtls; on the

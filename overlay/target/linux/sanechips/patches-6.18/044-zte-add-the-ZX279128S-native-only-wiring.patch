@@ -1,0 +1,107 @@
+diff -ruN a/drivers/net/ethernet/Kconfig b/drivers/net/ethernet/Kconfig
+--- a/drivers/net/ethernet/Kconfig	2026-10-30 01:45:36.049624400 +0800
++++ b/drivers/net/ethernet/Kconfig	2026-10-30 01:45:36.091151900 +0800
+@@ -203,5 +203,6 @@
+ source "drivers/net/ethernet/wiznet/Kconfig"
+ source "drivers/net/ethernet/xilinx/Kconfig"
+ source "drivers/net/ethernet/xircom/Kconfig"
++source "drivers/net/ethernet/zte/Kconfig"
+ 
+ endif # ETHERNET
+diff -ruN a/drivers/net/ethernet/Makefile b/drivers/net/ethernet/Makefile
+--- a/drivers/net/ethernet/Makefile	2026-10-30 01:45:36.050630300 +0800
++++ b/drivers/net/ethernet/Makefile	2026-10-30 01:45:36.090151800 +0800
+@@ -108,3 +108,4 @@
+ obj-$(CONFIG_NET_VENDOR_SYNOPSYS) += synopsys/
+ obj-$(CONFIG_NET_VENDOR_PENSANDO) += pensando/
+ obj-$(CONFIG_OA_TC6) += oa_tc6.o
++obj-$(CONFIG_NET_VENDOR_ZTE) += zte/
+diff -ruN a/drivers/net/ethernet/zte/Kconfig b/drivers/net/ethernet/zte/Kconfig
+--- /dev/null
++++ b/drivers/net/ethernet/zte/Kconfig
+@@ -0,0 +1,74 @@
++# SPDX-License-Identifier: GPL-2.0-only
++config NET_VENDOR_ZTE
++	bool "ZTE devices"
++	depends on ARCH_ZTE || COMPILE_TEST
++	default y
++	help
++	  If you have a network (Ethernet) device belonging to this class, say Y.
++
++	  Note that the answer to this question doesn't directly affect the
++	  kernel: saying N will just cause the configurator to skip all
++	  the questions about ZTE devices.
++
++if NET_VENDOR_ZTE
++
++config ZX_NPU
++	bool "ZTE ZX279128S npu scaffold"
++	depends on OF
++	help
++	  Vendor-native control path scaffold for the ZX279128S packet
++	  accelerators. It creates /proc/zx-npu/status and touches no
++	  register.
++
++	  If unsure, say Y on this board.
++
++config ZX_NPU_AUDIT
++	bool "ZTE ZX279128S npu read-only register audit"
++	depends on OF
++	help
++	  Maps the NPP/IDM/TM/PP accelerator windows and exposes a proc file
++	  that reads a small documented set of registers only when userspace
++	  writes "run". It never writes a register.
++
++	  If unsure, say Y on this board.
++
++config ZX_NPU_IDM
++	bool "ZTE ZX279128S npu IDM engine"
++	depends on OF
++	help
++	  Vendor-native IDM descriptor engine (zxnpu0). Disabled at runtime
++	  until zxnpu_idm.enable=1 and the netdev is brought up.
++
++	  If unsure, say Y on this board.
++
++config ZX_NPU_PPE
++	bool "ZTE ZX279128S vendor-native PPE/CLA access"
++	depends on OF
++	help
++	  Low-level CLA/SBRG indirect table access for the vendor-native
++	  wired data plane. The proc interface is inert until
++	  zxnpu_ppe.enable=1.
++
++	  If unsure, say Y on this board.
++
++config ZX_CSP_WLAN
++	bool "ZTE ZX279128S CSP WLAN G3.2"
++	depends on PCI
++	help
++	  Vendor-native MT7916 companion-function probe, WFDMA plan and
++	  Andes MCU command encoder. Inert until zxnpu_wlan.enable=1 and
++	  register writes also require commit=1.
++
++	  If unsure, say Y on this board.
++
++config ZXNATIVE_ETH
++	bool "ZTE ZX279128S native wired data plane (P2)"
++	depends on OF && PHYLINK
++	help
++	  Standalone vendor-behaviour rewrite of the switch/GMAC/DMA data
++	  path. It binds zte,zx279128s-gmac; with the baseline driver absent
++	  this is the wired data plane.
++
++	  If unsure, say Y on this board.
++
++endif # NET_VENDOR_ZTE
+diff -ruN a/drivers/net/ethernet/zte/Makefile b/drivers/net/ethernet/zte/Makefile
+--- /dev/null
++++ b/drivers/net/ethernet/zte/Makefile
+@@ -0,0 +1,7 @@
++# SPDX-License-Identifier: GPL-2.0-only
++obj-$(CONFIG_ZX_NPU) += zx279128s-npu.o
++obj-$(CONFIG_ZX_NPU_AUDIT) += zx279128s-npu-audit.o
++obj-$(CONFIG_ZX_NPU_IDM) += zx279128s-npu-idm.o
++obj-$(CONFIG_ZX_NPU_PPE) += zx279128s-npu-ppe.o
++obj-$(CONFIG_ZX_CSP_WLAN) += zxnpu-wlan.o
++obj-$(CONFIG_ZXNATIVE_ETH) += zxnative-eth.o
