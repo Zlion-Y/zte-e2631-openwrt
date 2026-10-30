@@ -1184,6 +1184,29 @@ static void zxnpu_wlan_mcu_plan(struct zxnpu_wlan *w)
 	zxnpu_mcu_dump(w, 0x07, 0x17, NULL, 0);
 }
 
+/*
+ * Event-side expectations, from the vendor event decode (doc 37 §2.2):
+ * mtf_rx_event_handler (0x1B5E54, arch_ops[448]) reads the event header as
+ * +2 = eid (0xEE/0xED vendor specials, 0x17-family responses to the FWDL
+ * commands), +3/+4 = seq/status fields; AndesMTRxProcessEvent is the FWDL
+ * response matcher. This prints what each download stage should observe in
+ * the event ring so the operator can match `mcu-recv` frames against it —
+ * pure documentation in proc form, no waiting, no behavior change.
+ */
+static void zxnpu_wlan_ack_expect(struct zxnpu_wlan *w)
+{
+	zxnpu_wlan_append(w, "ack expectations (doc 37 §2.2 decode):\n");
+	zxnpu_wlan_append(w, "  event hdr: +2=eid, +3=seq/flag, +4=status (24B Andes header mirror)\n");
+	zxnpu_wlan_append(w, "  FWDL sequence expectations, in order:\n");
+	zxnpu_wlan_append(w, "    SemGet(type 0x10)      -> rsp: semaphore granted\n");
+	zxnpu_wlan_append(w, "    AddressLen(type 0x01)  -> rsp per scatter segment (check fw-dl didx advance)\n");
+	zxnpu_wlan_append(w, "    Finish(type 0x07)      -> rsp: ROM patch latched\n");
+	zxnpu_wlan_append(w, "    WM: 9 segments, FwStart option=00000001 override=0220a800\n");
+	zxnpu_wlan_append(w, "    WA: 3 segments, FwStart option=00000004\n");
+	zxnpu_wlan_append(w, "  fw-state transition: 1 (download) -> 7 (WM+WA ready)\n");
+	zxnpu_wlan_append(w, "  match frames from `mcu-recv` against +2 eid; 0xEE/0xED = vendor specials\n");
+}
+
 static int zxnpu_wlan_status_show(struct seq_file *s, void *unused)
 {
 	struct zxnpu_wlan *w = zxnpu_wlan_singleton;
@@ -1228,6 +1251,8 @@ static ssize_t zxnpu_wlan_ctl_write(struct file *file, const char __user *ubuf,
 		zxnpu_wlan_wfdma(w, false);
 	} else if (!strncmp(cmd, "mcu", 3)) {
 		zxnpu_wlan_mcu_plan(w);
+	} else if (!strncmp(cmd, "ack-expect", 10)) {
+		zxnpu_wlan_ack_expect(w);
 	} else if (!strncmp(cmd, "rings", 5)) {
 		zxnpu_wlan_rings(w);
 	} else if (!strncmp(cmd, "mcuwin", 6)) {
@@ -1250,7 +1275,7 @@ static ssize_t zxnpu_wlan_ctl_write(struct file *file, const char __user *ubuf,
 			zxnpu_wlan_append(w, "commit refused: set zxnpu_wlan.commit=1\n");
 		zxnpu_wlan_wfdma(w, commit);
 	} else {
-		zxnpu_wlan_append(w, "commands: probe | fw | plan | mcu | rings | mcuwin | mcu-send | mcu-cmd | mcu-dl | mcu-dl-regions | fw-start | fw-info | fw-state | fw-plan wm|wa | fw-dl wm|wa | rx-init | mcu-recv | commit\n");
+		zxnpu_wlan_append(w, "commands: ack-expect | probe | fw | plan | mcu | rings | mcuwin | mcu-send | mcu-cmd | mcu-dl | mcu-dl-regions | fw-start | fw-info | fw-state | fw-plan wm|wa | fw-dl wm|wa | rx-init | mcu-recv | commit\n");
 	}
 	mutex_unlock(&w->lock);
 	return count;
