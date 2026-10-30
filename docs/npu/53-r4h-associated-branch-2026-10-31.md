@@ -54,3 +54,14 @@ encryption mode）。
   镜像的同步点；
 - P5 落地：wcid 分配器 + ctx 维护按此布局（状态魔数 + 能力字 + 密钥
   镜像指针）。
+
+## 6. R4j 尝试与关闭（2026-10-31）：能力位逐位命名
+
+尝试解析 write_tmac_info_offload_pkt 尾部 debug 块的逐位 printk 名称：
+`.LC29-38` 符号在符号表**跨 section 重复**（.rodata.str1.4 0x2b8 组 =
+mbss/BssCoex 字符串；另一组 0x1cc0 = TMAC 块）——objdump 重定位只给
+符号名，归属歧义，离线无法可靠对应。
+
+**决策关闭 R4j**：逐位命名是 debug 装饰，不影响 TXD 构造正确性；真机
+首帧对照（清单 36 后）比静态猜名更可靠。SetKey 同步点已定性
+（fill_key_install_cmd_v2 → MCU 命令；host ctx = 镜像）。
