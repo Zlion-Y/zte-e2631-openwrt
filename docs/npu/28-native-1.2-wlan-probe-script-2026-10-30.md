@@ -31,7 +31,7 @@ e2631-wlan-probe --commit zte/mt7916/mt7916_patch_e1_hdr.bin
 输出包含：模块参数、CR/BAR 探针、WFDMA 11 个环块、固件头/尾、
 MCU 窗口，以及 commit 模式下的提交/收包/下载/启动日志。
 
-rootfs 见证： 为 ，1545 B。
+rootfs 见证：squashfs-root/sbin/e2631-wlan-probe 为 -rwxr-xr-x，1545 B。
 
 ## 3. 边界
 
