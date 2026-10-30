@@ -48,6 +48,8 @@
 | native-wired-1.0 | P2 切换件 | 021 移除，zxnative-eth 接管（未真机验证），sha256 bb54a902… |
 | native-wired-1.2 | P2 + trap 表 | SPA trap-DMAC / ONU 路由 MAC 表移植，sha256 210bccf4… |
 | native-wired-1.3 | P2 + shutdown | 重启/kexec 前停 DMA 的钩子，sha256 c58318a7… |
+| native-wired-1.4 | W 固件解码 | fw-plan/fw-dl、patch 30B 头、fw-state，sha256 8b0e11ef… |
+| native-wired-1.5 | W 下载双环 | scatter 走 FWDL qid16、命令走 qid17，sha256 2935b27a… |
 
 无线仍无：MT7916 host driver 的 native 重写尚未到位（P4）。有线加速仍由
 021+PPE 提供；P2 的原生重写完成后替换 021。
