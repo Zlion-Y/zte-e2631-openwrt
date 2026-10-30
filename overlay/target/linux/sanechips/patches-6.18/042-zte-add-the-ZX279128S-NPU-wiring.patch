@@ -1,0 +1,67 @@
+--- a/drivers/net/ethernet/zte/Kconfig
++++ b/drivers/net/ethernet/zte/Kconfig
+@@ -24,4 +24,53 @@
+ 	  Each switch port becomes its own network interface, such as the
+ 	  four LAN ports and the WAN port of the ZTE ZXHN H3600.
+ 
++
++config ZX_NPU
++	bool "ZTE ZX279128S npu scaffold"
++	depends on OF
++	help
++	  Vendor-native control path scaffold for the ZX279128S packet
++	  accelerators. It creates /proc/zx-npu/status and touches no
++	  register.
++
++	  If unsure, say Y on this board.
++
++config ZX_NPU_AUDIT
++	bool "ZTE ZX279128S npu read-only register audit"
++	depends on OF
++	help
++	  Maps the NPP/IDM/TM/PP accelerator windows and exposes a proc file
++	  that reads a small documented set of registers only when userspace
++	  writes "run". It never writes a register.
++
++	  If unsure, say Y on this board.
++
++config ZX_NPU_IDM
++	bool "ZTE ZX279128S npu IDM engine"
++	depends on OF
++	help
++	  Vendor-native IDM descriptor engine (zxnpu0). Disabled at runtime
++	  until zxnpu_idm.enable=1 and the netdev is brought up.
++
++	  If unsure, say Y on this board.
++
++config ZX_NPU_PPE
++	bool "ZTE ZX279128S vendor-native PPE/CLA access"
++	depends on OF
++	help
++	  Low-level CLA/SBRG indirect table access for the vendor-native
++	  wired data plane. The proc interface is inert until
++	  zxnpu_ppe.enable=1.
++
++	  If unsure, say Y on this board.
++
++config ZX_CSP_WLAN
++	bool "ZTE ZX279128S CSP WLAN G3.2"
++	depends on PCI
++	help
++	  Vendor-native MT7916 companion-function probe, WFDMA plan and
++	  Andes MCU command encoder. Inert until zxnpu_wlan.enable=1 and
++	  register writes also require commit=1.
++
++	  If unsure, say Y on this board.
+ endif # NET_VENDOR_ZTE
+--- a/drivers/net/ethernet/zte/Makefile
++++ b/drivers/net/ethernet/zte/Makefile
+@@ -1,3 +1,8 @@
+ # SPDX-License-Identifier: GPL-2.0-only
+ obj-$(CONFIG_ZX279128S_ETH) += zx279128s-eth.o
+ zx279128s-eth-y := zx279128s-main.o zx279128s-ppe.o zx279128s-switch.o
++obj-$(CONFIG_ZX_NPU) += zx279128s-npu.o
++obj-$(CONFIG_ZX_NPU_AUDIT) += zx279128s-npu-audit.o
++obj-$(CONFIG_ZX_NPU_IDM) += zx279128s-npu-idm.o
++obj-$(CONFIG_ZX_NPU_PPE) += zx279128s-npu-ppe.o
++obj-$(CONFIG_ZX_CSP_WLAN) += zxnpu-wlan.o

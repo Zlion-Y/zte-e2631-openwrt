@@ -142,6 +142,82 @@ static void zxnpu_wlan_probe_regs(struct zxnpu_wlan *w)
  * 0x2800000. This function only prints that plan unless commit=1 and the
  * caller asks for it.
  */
+/*
+ * WFDMA ring register blocks, from chip_show_dma_info (mt7916.ko 0x1A9188):
+ * TX rings 0..4 live at 0x18024400 + 0x10*n and RX rings 0..5 at
+ * 0x18024500 + 0x10*n; each block is BASE/CNT/CPU_IDX/DMA_IDX. The second
+ * MAC generation mirrors the same blocks at +0x4000 (0x1802_84xx/85xx).
+ */
+#define ZXNPU_WFDMA_TX_RING0	0x18024400
+#define ZXNPU_WFDMA_RX_RING0	0x18024500
+#define ZXNPU_WFDMA_TX_RINGS	5
+#define ZXNPU_WFDMA_RX_RINGS	6
+#define ZXNPU_WFDMA_BAND1	0x4000
+
+static void zxnpu_wlan_dump_ring(struct zxnpu_wlan *w, const char *tag,
+				 u32 base)
+{
+	zxnpu_wlan_append(w, "  %s %08x: base=%08x cnt=%u cidx=%u didx=%u\n",
+			  tag, base,
+			  zxnpu_cr_read(w, base),
+			  zxnpu_cr_read(w, base + 4),
+			  zxnpu_cr_read(w, base + 8),
+			  zxnpu_cr_read(w, base + 12));
+}
+
+static void zxnpu_wlan_rings(struct zxnpu_wlan *w)
+{
+	int i;
+
+	zxnpu_wlan_append(w, "wfdma rings (read-only):\n");
+	for (i = 0; i < ZXNPU_WFDMA_TX_RINGS; i++)
+		zxnpu_wlan_dump_ring(w, "tx",
+				     ZXNPU_WFDMA_TX_RING0 + 0x10 * i);
+	for (i = 0; i < ZXNPU_WFDMA_RX_RINGS; i++)
+		zxnpu_wlan_dump_ring(w, "rx",
+				     ZXNPU_WFDMA_RX_RING0 + 0x10 * i);
+	zxnpu_wlan_append(w, "wfdma rings, +0x4000 mirror:\n");
+	for (i = 0; i < ZXNPU_WFDMA_TX_RINGS; i++)
+		zxnpu_wlan_dump_ring(w, "tx",
+				     ZXNPU_WFDMA_TX_RING0 + ZXNPU_WFDMA_BAND1 +
+				     0x10 * i);
+	for (i = 0; i < ZXNPU_WFDMA_RX_RINGS; i++)
+		zxnpu_wlan_dump_ring(w, "rx",
+				     ZXNPU_WFDMA_RX_RING0 + ZXNPU_WFDMA_BAND1 +
+				     0x10 * i);
+}
+
+/*
+ * The vendor doorbell for host->MCU commands is a write to 0x54000108
+ * (pci_trigger_int_to_mcu, mt7916.ko 0x191DA0). The 0x54000000 window is
+ * not part of the 0x1802_xxxx CR space, so find out which mapped BAR owns
+ * it: read offset 0/8/0x108 of every memory BAR and print what is there.
+ * Read-only; used to pin the second register window before any send path.
+ */
+static void zxnpu_wlan_mcuwin(struct zxnpu_wlan *w)
+{
+	int i;
+
+	zxnpu_wlan_append(w, "mcu window probe (read-only):
+");
+	for (i = 0; i < 3; i++) {
+		resource_size_t len = pci_resource_len(w->pdev, i);
+		unsigned long flags = pci_resource_flags(w->pdev, i);
+
+		if (!w->bar[i] || !(flags & IORESOURCE_MEM) || len < 0x10c) {
+			zxnpu_wlan_append(w, "  bar%d: unmapped/short (len %llu flags %lx)
+",
+					  i, (unsigned long long)len, flags);
+			continue;
+		}
+		zxnpu_wlan_append(w, "  bar%d: +0=%08x +8=%08x +0x108=%08x
+", i,
+				  readl(w->bar[i]),
+				  readl(w->bar[i] + 8),
+				  readl(w->bar[i] + 0x108));
+	}
+}
+
 static void zxnpu_wlan_wfdma(struct zxnpu_wlan *w, bool commit)
 {
 	u32 v, nv;
@@ -303,13 +379,17 @@ static ssize_t zxnpu_wlan_ctl_write(struct file *file, const char __user *ubuf,
 		zxnpu_wlan_wfdma(w, false);
 	} else if (!strncmp(cmd, "mcu", 3)) {
 		zxnpu_wlan_mcu_plan(w);
+	} else if (!strncmp(cmd, "rings", 5)) {
+		zxnpu_wlan_rings(w);
+	} else if (!strncmp(cmd, "mcuwin", 6)) {
+		zxnpu_wlan_mcuwin(w);
 	} else if (!strncmp(cmd, "commit", 6)) {
 		commit = zxnpu_wlan_commit;
 		if (!commit)
 			zxnpu_wlan_append(w, "commit refused: set zxnpu_wlan.commit=1\n");
 		zxnpu_wlan_wfdma(w, commit);
 	} else {
-		zxnpu_wlan_append(w, "commands: probe | fw | plan | commit\n");
+		zxnpu_wlan_append(w, "commands: probe | fw | plan | mcu | rings | mcuwin | commit\n");
 	}
 	mutex_unlock(&w->lock);
 	return count;

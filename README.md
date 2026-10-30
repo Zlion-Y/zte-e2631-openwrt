@@ -1,4 +1,4 @@
-# E2631 native · 原厂行为对齐线（native-0.1）
+# E2631 native · 原厂行为对齐线（native-0.3）
 
 独立本地仓库。使命：**彻底放弃开源有线/无线数据面驱动，按原厂 4.1.25 二进制
 为唯一行为规范，在 6.18 上重写 ZX279128S 有线栈 + MT7916 私有栈（A+W）**。
@@ -9,27 +9,34 @@
 
 | | npu 分支 | 本仓库（native） |
 |---|---|---|
-| 开源数据面 | 保留为默认启动路径，native 模块 enable 门禁共存 | **移除**（构建期摘除） |
-| 启动路径 | v1.8.0 已验证栈 | OpenWrt 基座 + SoC 基础设施，无数据面驱动 |
+| 开源数据面 | 保留为默认启动路径，native 模块 enable 门禁共存 | 无线开源栈移除；有线保留 vendor-RE 硬件层作基线 |
+| 启动路径 | v1.8.0 已验证栈 | 0.2 起 SoC 基础设施 + WFDMA 只读探针；0.3 起有线基线回归 |
 | 用途 | 行为对照与共存迭代 | 全原厂重写的主线 |
 
-## native-0.1 移除清单（构建期强制）
+## 构建期强制项（0.3）
 
-- **021**（ghahramani 系 ZX279128S Ethernet switch/gmac 驱动，eth0..3）
-  —— apply.sh 从基础树摘除补丁，镜像内无此驱动；
+- **021**（ZX279128S Ethernet switch/gmac 硬件层）—— 0.3 起**保留**：
+  没有它镜像没有任何网口，不能算“可用”。它是本项目从原厂固件逆向出的
+  硬件层，P2 的原生重写完成后才会替换；
+- **037-041** —— 由 **042-zte-add-the-ZX279128S-NPU-wiring.patch** 取代：
+  042 直接追加到 021 创建的 zte/Kconfig 与 zte/Makefile，两套驱动共存；
 - **034**（FFE 控制面接线）—— overlay 补丁删除，P3 按原厂语义重建；
 - **kmod-mt7915e / kmod-mt7916-firmware / kmod-mac80211 / kmod-cfg80211 /
   wpad* / wireless-regdb / kmod-nft-offload** —— seed 与 DEVICE_PACKAGES
   双层拒绝（defconfig DEFAULT_ 机制防复活）；
 - 保留：SPI/NAND/PCIe/slotpart/DTS/USB(关) 等原厂 SoC 基础设施补丁、
-  zte-mesh（原厂二进制用户态）、e2631 板级工具、zxnpu 驱动族（037-041）。
+  zte-mesh（原厂二进制用户态）、e2631 板级工具、zxnpu 驱动族（042）。
 
-## native-0.1 已知代价（如实声明）
+## 版本进展与已知代价（如实声明）
 
-镜像**没有有线网口也没有无线**：gmac/交换机数据面与 MT7916 host driver
-的 native 重写尚未到位（P2/P4）。刷入后 = 可启动、UART/可管理、无网络数据面。
-这是切换期的定义性行为，不是缺陷；网络能力随 P2（有线驱动族）与 P4（MT7916
-固件启动门禁）逐模块回归。
+| 版本 | 数据面 | 说明 |
+|---|---|---|
+| native-0.1 | 无 | 开源有线/无线数据面全部摘除 |
+| native-0.2 | 无 | 增加 WFDMA 环只读探针（ctl 写 rings），sha256 5b0a508e… |
+| native-0.3 | 有线（021 硬件层） | 恢复网口可用；无线仍无；npu 族由 042 接线 |
+
+无线仍无：MT7916 host driver 的 native 重写尚未到位（P4）。有线加速仍由
+021+PPE 提供；P2 的原生重写完成后替换 021。
 
 rootfs 残留审计（0.1，逐文件核验）：**开源驱动包零残留**（manifest 与 apk
 数据库双向核验，kmod-mt76*/mac80211/cfg80211/mt7915e/mt7915-firmware/

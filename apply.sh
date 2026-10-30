@@ -81,7 +81,7 @@ for f in sbin/e2631-probe sbin/e2631-trial sbin/e2631-commit sbin/e2631-leds sbi
 	 etc/init.d/e2631-trial etc/init.d/e2631-leds etc/init.d/e2631-hb etc/init.d/e2631-userdata \
 	 etc/init.d/e2631-netune \
 	 lib/upgrade/platform.sh; do
-	chmod +x "$TREE/target/linux/sanechips/base-files/$f"
+	[ -f "$TREE/target/linux/sanechips/base-files/$f" ] && chmod +x "$TREE/target/linux/sanechips/base-files/$f"
 done
 
 # Same problem, one level deeper: rpcd execs the files in /usr/libexec/rpcd,
@@ -278,14 +278,24 @@ else
 	echo "kernel config: FFE control plane off (E2631_FFE=1 to test it)"
 fi
 
-# native-0.1: the open-source data plane patches are removed from the base
-# tree before prepare. 021 is the ghahramani-built Ethernet switch/gmac driver
-# (eth0..3); 034 is the FFE control-plane wiring (P3 rebuilds it under this
-# line's own rules). Everything else - SPI/NAND/PCIe/slotpart/DTS - is SoC
-# infrastructure the vendor port owns and stays.
-rm -f "$TREE/target/linux/sanechips/patches-6.18/021-net-ethernet-zte-Add-ZX279128S-Ethernet-switch-drive.patch"
+# native-0.2: 034 (the FFE control-plane wiring) is removed; the wired
+# hardware layer (021) stays as the baseline data plane until the native
+# replacement lands, because an image with no network is not usable. The
+# npu drivers are wired by 042, which appends to the files 021 creates, so
+# 037-041 (which create those files from scratch) are dropped.
+# 021 is tracked in the base tree; a previous native run used to delete it.
+# Restore it before prepare so the wired baseline is always present.
+if [ ! -f "$TREE/target/linux/sanechips/patches-6.18/021-net-ethernet-zte-Add-ZX279128S-Ethernet-switch-drive.patch" ] &&
+   [ -d "$TREE/.git" ]; then
+	git -C "$TREE" checkout -- target/linux/sanechips/patches-6.18/021-net-ethernet-zte-Add-ZX279128S-Ethernet-switch-drive.patch
+fi
+rm -f "$TREE/target/linux/sanechips/patches-6.18/037-zte-add-the-ZX279128S-NPU-scaffold.patch"
+rm -f "$TREE/target/linux/sanechips/patches-6.18/038-zte-add-the-ZX279128S-NPU-read-only-audit.patch"
+rm -f "$TREE/target/linux/sanechips/patches-6.18/039-zte-add-the-ZX279128S-NPU-IDM-engine.patch"
+rm -f "$TREE/target/linux/sanechips/patches-6.18/040-zte-add-the-ZX279128S-NPU-PPE-CLA-access.patch"
+rm -f "$TREE/target/linux/sanechips/patches-6.18/041-zte-add-the-ZX279128S-CSP-WLAN-G3-skeleton.patch"
 rm -f "$TREE/target/linux/sanechips/patches-6.18/034-zte-add-the-ZX279128S-FFE-control-plane.patch"
-echo "native: open-source eth/FFE patches removed from the base tree"
+echo "native: FFE wiring removed; 037-041 superseded by 042-zte-add-the-ZX279128S-NPU-wiring.patch"
 
 # The target-level DEFAULT_PACKAGES still names wpad-basic-mbedtls; on the
 # native line the open AP userspace is gone with the driver.
@@ -358,32 +368,39 @@ echo "native: .config stripped of the open-source wireless drivers (refusals wri
 # npu branch: the scaffold is the branch's identity and has no MMIO access, so
 # unlike FFE it is always built. The kernel-build wiring ships as patch 037;
 # the symbol choice is pinned here so a fresh tree cannot silently drop it.
+ETH_MARK="# E2631: wired hardware layer (021, vendor-native data plane)"
+if [ -f "$TREE/target/linux/sanechips/patches-6.18/021-net-ethernet-zte-Add-ZX279128S-Ethernet-switch-drive.patch" ]; then
+	awk -v m="$ETH_MARK" '$0 != m && $0 != "CONFIG_ZX279128S_ETH=y" && $0 != "# CONFIG_ZX279128S_ETH is not set"' "$CFG" > "$CFG.tmp" && mv "$CFG.tmp" "$CFG"
+	printf '%s
+' "$ETH_MARK" 'CONFIG_ZX279128S_ETH=y' >> "$CFG"
+	echo "kernel config: wired hardware layer ON"
+fi
 NPU_MARK="# E2631: npu scaffold (see apply.sh / npu branch)"
-if [ -f "$TREE/target/linux/sanechips/patches-6.18/037-zte-add-the-ZX279128S-NPU-scaffold.patch" ]; then
+if [ -f "$TREE/target/linux/sanechips/patches-6.18/042-zte-add-the-ZX279128S-NPU-wiring.patch" ]; then
 	awk -v m="$NPU_MARK" '$0 != m && $0 != "CONFIG_ZX_NPU=y" && $0 != "# CONFIG_ZX_NPU is not set"' "$CFG" > "$CFG.tmp" && mv "$CFG.tmp" "$CFG"
 	printf '%s\n' "$NPU_MARK" 'CONFIG_ZX_NPU=y' >> "$CFG"
 	echo "kernel config: npu scaffold ON"
 fi
 NPU_AUDIT_MARK="# E2631: npu read-only audit (see apply.sh / npu branch)"
-if [ -f "$TREE/target/linux/sanechips/patches-6.18/038-zte-add-the-ZX279128S-NPU-read-only-audit.patch" ]; then
+if [ -f "$TREE/target/linux/sanechips/patches-6.18/042-zte-add-the-ZX279128S-NPU-wiring.patch" ]; then
 	awk -v m="$NPU_AUDIT_MARK" '$0 != m && $0 != "CONFIG_ZX_NPU_AUDIT=y" && $0 != "# CONFIG_ZX_NPU_AUDIT is not set"' "$CFG" > "$CFG.tmp" && mv "$CFG.tmp" "$CFG"
 	printf '%s\n' "$NPU_AUDIT_MARK" 'CONFIG_ZX_NPU_AUDIT=y' >> "$CFG"
 	echo "kernel config: npu read-only audit ON"
 fi
 NPU_IDM_MARK="# E2631: npu vendor-native IDM engine (see apply.sh / npu branch)"
-if [ -f "$TREE/target/linux/sanechips/patches-6.18/039-zte-add-the-ZX279128S-NPU-IDM-engine.patch" ]; then
+if [ -f "$TREE/target/linux/sanechips/patches-6.18/042-zte-add-the-ZX279128S-NPU-wiring.patch" ]; then
 	awk -v m="$NPU_IDM_MARK" '$0 != m && $0 != "CONFIG_ZX_NPU_IDM=y" && $0 != "# CONFIG_ZX_NPU_IDM is not set"' "$CFG" > "$CFG.tmp" && mv "$CFG.tmp" "$CFG"
 	printf '%s\n' "$NPU_IDM_MARK" 'CONFIG_ZX_NPU_IDM=y' >> "$CFG"
 	echo "kernel config: npu IDM engine ON (hardware opt-in at runtime)"
 fi
 NPU_PPE_MARK="# E2631: npu PPE/CLA access (see apply.sh / npu branch)"
-if [ -f "$TREE/target/linux/sanechips/patches-6.18/040-zte-add-the-ZX279128S-NPU-PPE-CLA-access.patch" ]; then
+if [ -f "$TREE/target/linux/sanechips/patches-6.18/042-zte-add-the-ZX279128S-NPU-wiring.patch" ]; then
 	awk -v m="$NPU_PPE_MARK" '$0 != m && $0 != "CONFIG_ZX_NPU_PPE=y" && $0 != "# CONFIG_ZX_NPU_PPE is not set"' "$CFG" > "$CFG.tmp" && mv "$CFG.tmp" "$CFG"
 	printf '%s\n' "$NPU_PPE_MARK" 'CONFIG_ZX_NPU_PPE=y' >> "$CFG"
 	echo "kernel config: npu PPE/CLA access ON (hardware opt-in at runtime)"
 fi
 CSP_WLAN_MARK="# E2631: npu vendor-native MT7916 G3 skeleton (see apply.sh / npu branch)"
-if [ -f "$TREE/target/linux/sanechips/patches-6.18/041-zte-add-the-ZX279128S-CSP-WLAN-G3-skeleton.patch" ]; then
+if [ -f "$TREE/target/linux/sanechips/patches-6.18/042-zte-add-the-ZX279128S-NPU-wiring.patch" ]; then
 	awk -v m="$CSP_WLAN_MARK" '$0 != m && $0 != "CONFIG_ZX_CSP_WLAN=y" && $0 != "# CONFIG_ZX_CSP_WLAN is not set"' "$CFG" > "$CFG.tmp" && mv "$CFG.tmp" "$CFG"
 	printf '%s\n' "$CSP_WLAN_MARK" 'CONFIG_ZX_CSP_WLAN=y' >> "$CFG"
 	echo "kernel config: npu CSP_WLAN G3.2 ON (device opt-in)"
@@ -501,28 +518,31 @@ assert "slot-aware partition parser wired (patch 033 + config)" \
 assert "slot parser source present in files/" \
 assert "slotpart carries the partition of_node (nvmem cell -> gmac MACs)" 	grep -q 'out\[i\]\.of_node = parts\[i\]\.np;' 	"$TREE/target/linux/sanechips/files/drivers/mtd/parsers/zx279128s-slotpart.c"
 	test -f "$TREE/target/linux/sanechips/files/drivers/mtd/parsers/zx279128s-slotpart.c"
+assert "wired hardware layer patch present" \
+	test -f "$TREE/target/linux/sanechips/patches-6.18/021-net-ethernet-zte-Add-ZX279128S-Ethernet-switch-drive.patch"
+assert "wired hardware layer enabled in target config" grep -q '^CONFIG_ZX279128S_ETH=y$' "$CFG"
 assert "npu scaffold source present" \
 	test -f "$TREE/target/linux/sanechips/files/drivers/net/ethernet/zte/zx279128s-npu.c"
 assert "npu scaffold wiring patch present" \
-	test -f "$TREE/target/linux/sanechips/patches-6.18/037-zte-add-the-ZX279128S-NPU-scaffold.patch"
+	test -f "$TREE/target/linux/sanechips/patches-6.18/042-zte-add-the-ZX279128S-NPU-wiring.patch"
 assert "npu scaffold enabled in target config" grep -q '^CONFIG_ZX_NPU=y$' "$CFG"
 assert "npu scaffold DT node present" grep -q 'zte,zx279128s-npu-scaffold' "$DTS"
 assert "npu audit source present" \
 	test -f "$TREE/target/linux/sanechips/files/drivers/net/ethernet/zte/zx279128s-npu-audit.c"
 assert "npu audit wiring patch present" \
-	test -f "$TREE/target/linux/sanechips/patches-6.18/038-zte-add-the-ZX279128S-NPU-read-only-audit.patch"
+	test -f "$TREE/target/linux/sanechips/patches-6.18/042-zte-add-the-ZX279128S-NPU-wiring.patch"
 assert "npu audit enabled in target config" grep -q '^CONFIG_ZX_NPU_AUDIT=y$' "$CFG"
 assert "npu audit DT node present" grep -q 'zte,zx279128s-npu-audit' "$DTS"
 assert "npu IDM source present" \
 	test -f "$TREE/target/linux/sanechips/files/drivers/net/ethernet/zte/zx279128s-npu-idm.c"
 assert "npu IDM wiring patch present" \
-	test -f "$TREE/target/linux/sanechips/patches-6.18/039-zte-add-the-ZX279128S-NPU-IDM-engine.patch"
+	test -f "$TREE/target/linux/sanechips/patches-6.18/042-zte-add-the-ZX279128S-NPU-wiring.patch"
 assert "npu IDM enabled in target config" grep -q '^CONFIG_ZX_NPU_IDM=y$' "$CFG"
 assert "npu IDM DT node present" grep -q 'zte,zx279128s-npu-idm' "$DTS"
 assert "npu PPE source present" \
 	test -f "$TREE/target/linux/sanechips/files/drivers/net/ethernet/zte/zx279128s-npu-ppe.c"
 assert "npu PPE wiring patch present" \
-	test -f "$TREE/target/linux/sanechips/patches-6.18/040-zte-add-the-ZX279128S-NPU-PPE-CLA-access.patch"
+	test -f "$TREE/target/linux/sanechips/patches-6.18/042-zte-add-the-ZX279128S-NPU-wiring.patch"
 assert "npu PPE enabled in target config" grep -q '^CONFIG_ZX_NPU_PPE=y$' "$CFG"
 assert "npu PPE DT node present" grep -q 'zte,zx279128s-npu-ppe' "$DTS"
 assert "npu PPE knows the 45-byte key layout" grep -q 'bit 23..30  extract rule id' "$TREE/target/linux/sanechips/files/drivers/net/ethernet/zte/zx279128s-npu-ppe.c"
@@ -531,13 +551,66 @@ assert "npu PPE slot map covers tables 2..6" bash -c "grep -q 'table 6' '$TREE/t
 assert "npu CSP_WLAN source present" \
 	test -f "$TREE/target/linux/sanechips/files/drivers/net/ethernet/zte/zxnpu-wlan.c"
 assert "npu CSP_WLAN wiring patch present" \
-	test -f "$TREE/target/linux/sanechips/patches-6.18/041-zte-add-the-ZX279128S-CSP-WLAN-G3-skeleton.patch"
+	test -f "$TREE/target/linux/sanechips/patches-6.18/042-zte-add-the-ZX279128S-NPU-wiring.patch"
 assert "npu CSP_WLAN enabled in target config" grep -q '^CONFIG_ZX_CSP_WLAN=y$' "$CFG"
 assert "npu CSP_WLAN carries the WFDMA init plan" grep -q 'hif_init_WFDMA' "$TREE/target/linux/sanechips/files/drivers/net/ethernet/zte/zxnpu-wlan.c"
 assert "npu CSP_WLAN parses the patch header" grep -q 'platform=%.4s' "$TREE/target/linux/sanechips/files/drivers/net/ethernet/zte/zxnpu-wlan.c"
 assert "npu CSP_WLAN gates register writes on commit" grep -q 'zxnpu_wlan.commit=1' "$TREE/target/linux/sanechips/files/drivers/net/ethernet/zte/zxnpu-wlan.c"
 assert "npu CSP_WLAN encodes the Andes MCU header" grep -q 'type=%02x cmd=%02x' "$TREE/target/linux/sanechips/files/drivers/net/ethernet/zte/zxnpu-wlan.c"
 assert "npu CSP_WLAN renders the patch trio" grep -q 'SemGet(type 0x10)' "$TREE/target/linux/sanechips/files/drivers/net/ethernet/zte/zxnpu-wlan.c"
+assert "npu CSP_WLAN probes the WFDMA ring blocks" grep -q 'ZXNPU_WFDMA_TX_RING0' "$TREE/target/linux/sanechips/files/drivers/net/ethernet/zte/zxnpu-wlan.c"
+assert "npu CSP_WLAN ring probe is wired to ctl" grep -q 'zxnpu_wlan_rings(w)' "$TREE/target/linux/sanechips/files/drivers/net/ethernet/zte/zxnpu-wlan.c"
+assert "overlay ppe.c carries the IPv6 trap fix" \
+	grep -q 'v6 = READ_ONCE(adapter->ppe_active) || !sw' \
+	"$TREE/target/linux/sanechips/files/drivers/net/ethernet/zte/zx279128s-ppe.c"
+assert_one_line "overlay ppe.c stays a small diff (trap fix + FFE seam)" 90 25 \
+	"target/linux/sanechips/files/drivers/net/ethernet/zte/zx279128s-ppe.c"
+
+if [ "$APPLY_FAILED" != 0 ]; then
+	echo "apply.sh: $REPORT records structural failures; the tree is NOT in the state this script promises" >&2
+	exit 1
+fi
+
+echo "overlay applied to $TREE (base $BASE_SHA); assertions recorded in $REPORT"
+assert "npu scaffold source present" \
+	test -f "$TREE/target/linux/sanechips/files/drivers/net/ethernet/zte/zx279128s-npu.c"
+assert "npu scaffold wiring patch present" \
+	test -f "$TREE/target/linux/sanechips/patches-6.18/042-zte-add-the-ZX279128S-NPU-wiring.patch"
+assert "npu scaffold enabled in target config" grep -q '^CONFIG_ZX_NPU=y$' "$CFG"
+assert "npu scaffold DT node present" grep -q 'zte,zx279128s-npu-scaffold' "$DTS"
+assert "npu audit source present" \
+	test -f "$TREE/target/linux/sanechips/files/drivers/net/ethernet/zte/zx279128s-npu-audit.c"
+assert "npu audit wiring patch present" \
+	test -f "$TREE/target/linux/sanechips/patches-6.18/042-zte-add-the-ZX279128S-NPU-wiring.patch"
+assert "npu audit enabled in target config" grep -q '^CONFIG_ZX_NPU_AUDIT=y$' "$CFG"
+assert "npu audit DT node present" grep -q 'zte,zx279128s-npu-audit' "$DTS"
+assert "npu IDM source present" \
+	test -f "$TREE/target/linux/sanechips/files/drivers/net/ethernet/zte/zx279128s-npu-idm.c"
+assert "npu IDM wiring patch present" \
+	test -f "$TREE/target/linux/sanechips/patches-6.18/042-zte-add-the-ZX279128S-NPU-wiring.patch"
+assert "npu IDM enabled in target config" grep -q '^CONFIG_ZX_NPU_IDM=y$' "$CFG"
+assert "npu IDM DT node present" grep -q 'zte,zx279128s-npu-idm' "$DTS"
+assert "npu PPE source present" \
+	test -f "$TREE/target/linux/sanechips/files/drivers/net/ethernet/zte/zx279128s-npu-ppe.c"
+assert "npu PPE wiring patch present" \
+	test -f "$TREE/target/linux/sanechips/patches-6.18/042-zte-add-the-ZX279128S-NPU-wiring.patch"
+assert "npu PPE enabled in target config" grep -q '^CONFIG_ZX_NPU_PPE=y$' "$CFG"
+assert "npu PPE DT node present" grep -q 'zte,zx279128s-npu-ppe' "$DTS"
+assert "npu PPE knows the 45-byte key layout" grep -q 'bit 23..30  extract rule id' "$TREE/target/linux/sanechips/files/drivers/net/ethernet/zte/zx279128s-npu-ppe.c"
+assert "npu PPE carries the four stock hash polynomials" grep -q '0x32583499' "$TREE/target/linux/sanechips/files/drivers/net/ethernet/zte/zx279128s-npu-ppe.c"
+assert "npu PPE slot map covers tables 2..6" bash -c "grep -q 'table 6' '$TREE/target/linux/sanechips/files/drivers/net/ethernet/zte/zx279128s-npu-ppe.c' && grep -q 'ZXNPU_ACL_SLOTS' '$TREE/target/linux/sanechips/files/drivers/net/ethernet/zte/zx279128s-npu-ppe.c'"
+assert "npu CSP_WLAN source present" \
+	test -f "$TREE/target/linux/sanechips/files/drivers/net/ethernet/zte/zxnpu-wlan.c"
+assert "npu CSP_WLAN wiring patch present" \
+	test -f "$TREE/target/linux/sanechips/patches-6.18/042-zte-add-the-ZX279128S-NPU-wiring.patch"
+assert "npu CSP_WLAN enabled in target config" grep -q '^CONFIG_ZX_CSP_WLAN=y$' "$CFG"
+assert "npu CSP_WLAN carries the WFDMA init plan" grep -q 'hif_init_WFDMA' "$TREE/target/linux/sanechips/files/drivers/net/ethernet/zte/zxnpu-wlan.c"
+assert "npu CSP_WLAN parses the patch header" grep -q 'platform=%.4s' "$TREE/target/linux/sanechips/files/drivers/net/ethernet/zte/zxnpu-wlan.c"
+assert "npu CSP_WLAN gates register writes on commit" grep -q 'zxnpu_wlan.commit=1' "$TREE/target/linux/sanechips/files/drivers/net/ethernet/zte/zxnpu-wlan.c"
+assert "npu CSP_WLAN encodes the Andes MCU header" grep -q 'type=%02x cmd=%02x' "$TREE/target/linux/sanechips/files/drivers/net/ethernet/zte/zxnpu-wlan.c"
+assert "npu CSP_WLAN renders the patch trio" grep -q 'SemGet(type 0x10)' "$TREE/target/linux/sanechips/files/drivers/net/ethernet/zte/zxnpu-wlan.c"
+assert "npu CSP_WLAN probes the WFDMA ring blocks" grep -q 'ZXNPU_WFDMA_TX_RING0' "$TREE/target/linux/sanechips/files/drivers/net/ethernet/zte/zxnpu-wlan.c"
+assert "npu CSP_WLAN ring probe is wired to ctl" grep -q 'zxnpu_wlan_rings(w)' "$TREE/target/linux/sanechips/files/drivers/net/ethernet/zte/zxnpu-wlan.c"
 assert "overlay ppe.c carries the IPv6 trap fix" \
 	grep -q 'v6 = READ_ONCE(adapter->ppe_active) || !sw' \
 	"$TREE/target/linux/sanechips/files/drivers/net/ethernet/zte/zx279128s-ppe.c"
