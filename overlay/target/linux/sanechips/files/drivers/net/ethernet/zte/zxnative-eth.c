@@ -162,6 +162,60 @@ static void zxna_port_enable(struct zx_eth_adapter *a, int port, bool enable)
 	writel(val, reg);
 }
 
+/* ---- MAC routing / trap tables -------------------------------------- */
+
+/* MAC in the layout of the switch MAC registers: bytes 2-5, then 0-1 */
+static void zxna_mac_words(const u8 *mac, u32 w[2])
+{
+	w[0] = mac[2] << 24 | mac[3] << 16 | mac[4] << 8 | mac[5];
+	w[1] = mac[0] << 8 | mac[1];
+}
+
+/*
+ * Frames addressed to one of our MACs go to the CPU whatever their type.
+ * With flow offload active the stock driver moves these addresses to the
+ * ONU routed table instead; this driver has no offload yet, so the trap
+ * table is the path (zx_update_mac_tables in the baseline driver).
+ */
+static void zxna_set_trap_dmac(struct zx_eth_adapter *a, int idx, const u8 *mac)
+{
+	u32 w[2];
+
+	zxna_mac_words(mac, w);
+	writel(w[0], a->base + ZX_SPA_TRAP_DMAC + idx * 8);
+	writel(w[1], a->base + ZX_SPA_TRAP_DMAC + idx * 8 + 4);
+}
+
+static void zxna_update_mac_tables(struct zx_eth_adapter *a)
+{
+	static const u8 none[ETH_ALEN];
+	const u8 *addrs[ZX_NUM_PORTS];
+	int i, j, n = 0;
+
+	mutex_lock(&a->ppe_lock);
+	for (i = 0; i < ZX_NUM_PORTS; i++) {
+		struct net_device *dev = a->ports[i];
+
+		if (!dev)
+			continue;
+		for (j = 0; j < n; j++)
+			if (ether_addr_equal(addrs[j], dev->dev_addr))
+				break;
+		if (j == n)
+			addrs[n++] = dev->dev_addr;
+	}
+	for (i = 0; i < ZX_SPA_ONU_MAC_NUM; i++) {
+		u32 w[2];
+
+		zxna_mac_words(none, w);
+		writel(w[0], a->base + ZX_SPA_ONU_MAC + i * 8);
+		writel(w[1], a->base + ZX_SPA_ONU_MAC + i * 8 + 4);
+	}
+	for (i = 0; i < ZX_SPA_TRAP_DMAC_NUM; i++)
+		zxna_set_trap_dmac(a, i, i < n ? addrs[i] : none);
+	mutex_unlock(&a->ppe_lock);
+}
+
 /* ---- phylink -------------------------------------------------------- */
 
 static struct zx_eth_priv *zxna_pl_priv(struct phylink_config *config)
@@ -739,7 +793,13 @@ static int zxna_stop(struct net_device *netdev)
 
 static int zxna_set_mac(struct net_device *netdev, void *p)
 {
-	return eth_mac_addr(netdev, p);
+	struct zx_eth_priv *priv = netdev_priv(netdev);
+	int ret = eth_mac_addr(netdev, p);
+
+	if (ret)
+		return ret;
+	zxna_update_mac_tables(priv->adapter);
+	return 0;
 }
 
 static int zxna_ioctl(struct net_device *netdev, struct ifreq *ifr, int cmd)
@@ -786,6 +846,7 @@ static int zxna_probe(struct platform_device *pdev)
 	a->dev = dev;
 	spin_lock_init(&a->tx_lock);
 	spin_lock_init(&a->bmu_free_lock);
+	mutex_init(&a->ppe_lock);
 	a->base = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(a->base)) {
 		ret = PTR_ERR(a->base);
@@ -891,6 +952,8 @@ static int zxna_probe(struct platform_device *pdev)
 		goto unreg;
 	}
 
+	zxna_update_mac_tables(a);
+
 	netif_napi_add(a->ports[i], &a->napi, zxna_poll);
 	hrtimer_setup(&a->tx_timer, zxna_tx_timer, CLOCK_MONOTONIC,
 		      HRTIMER_MODE_REL);
@@ -952,6 +1015,25 @@ static void zxna_remove(struct platform_device *pdev)
 	zxna_hw_reset(a);
 }
 
+/*
+ * The switch keeps writing received frames into the DMA arena without the
+ * CPU; stop it before a reboot or kexec hands that memory to the next
+ * kernel (same reason as the baseline driver's shutdown hook).
+ */
+static void zxna_shutdown(struct platform_device *pdev)
+{
+	struct zx_eth_adapter *a = platform_get_drvdata(pdev);
+	int i;
+
+	if (!a)
+		return;
+	writel(~0, a->base + ZX_TM_INT_MASK);
+	zxna_dma_enable(a, false);
+	for (i = 0; i < ZX_NUM_PORTS; i++)
+		zxna_port_enable(a, i, false);
+	writel(0, a->base + ZX_BMU_CTRL);
+}
+
 static const struct of_device_id zxna_of_match[] = {
 	{ .compatible = "zte,zx279128s-gmac" },
 	{ }
@@ -961,6 +1043,7 @@ MODULE_DEVICE_TABLE(of, zxna_of_match);
 static struct platform_driver zxna_driver = {
 	.probe = zxna_probe,
 	.remove = zxna_remove,
+	.shutdown = zxna_shutdown,
 	.driver = {
 		.name = "zxnative-eth",
 		.of_match_table = zxna_of_match,

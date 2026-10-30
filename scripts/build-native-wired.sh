@@ -1,5 +1,5 @@
 #!/bin/bash
-# native-wired-1.0: P2 switchover build. 021 is removed; the new
+# native-wired-1.3: P2 switchover build. 021 is removed; the new
 # zxnative-eth driver owns the switch/GMAC/DMA node. MDIO/PHY (018/019)
 # and the SoC infrastructure stay. Nothing is flashed.
 set -uo pipefail
