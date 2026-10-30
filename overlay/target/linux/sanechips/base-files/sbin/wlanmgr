@@ -56,13 +56,33 @@ case "$1" in
 		run "data-recv"
 		run "dataplane"
 		;;
+	profile)
+		# wlanmgr profile b0|b1 [key]: read the per-band driver profile
+		# the vendor parses from /etc/wireless/mt7916/mt7916.dbdc.<band>.dat
+		shift; B=${1:-b0}
+		F=/etc/wireless/mt7916/mt7916.dbdc.$B.dat
+		[ -f "$F" ] || { echo "$F missing"; exit 1; }
+		if [ -n "$2" ]; then
+			grep "^$2=" "$F" || echo "key $2 not found"
+		else
+			echo "$F: $(grep -c '=' "$F") keys"
+			grep -E '^(SSID|Channel|AuthMode|HT_BW|VHT|ChannelGeoRegion|HideSSID|WscConfMode)=' "$F" | head -12
+		fi ;;
+	bssplan)
+		# BSS bring-up plan (P5 pre-staging, doc 40 contract)
+		echo "== BSS bring-up plan (native P5) =="
+		echo "  BAND0 wlan0:   profile mt7916.dbdc.b0.dat, EEPROM caldata@0x0/0x30000"
+		echo "  BAND1 wlan5g0: profile mt7916.dbdc.b1.dat, EEPROM caldata@0x0/0x30000"
+		echo "  TXD/TMAC: template+0=wcid, ctx=0x13BAB0+wcid*0x1C50 (doc 45 §7)"
+		echo "  order: fw-state=7 (step2) -> BSS config -> carrier on"
+		;;
 	selftest)
 		# offline verification: print the ctl command each subcommand sends
 		echo "status:status expect:ack-expect l1p:l1profile rings:rings"
 		echo "plane:dataplane recv:mcu-recv drecv:data-recv fwstate:fw-state"
 		echo "probe:probe step2:mcu-dl step3:data-init"
 		;;
-	*)	echo "usage: wlanmgr <status|expect|l1p|rings|plane|recv|drecv|fwstate|probe|help|selftest>"
+	*)	echo "usage: wlanmgr <status|expect|l1p|rings|plane|recv|drecv|fwstate|probe|profile|bssplan|help|selftest>"
 		echo "       wlanmgr step1|step2|step3   (checklist 36 sequences)"
 		echo "       wlanmgr commit <cmd>        (gated register writes)"
 		;;

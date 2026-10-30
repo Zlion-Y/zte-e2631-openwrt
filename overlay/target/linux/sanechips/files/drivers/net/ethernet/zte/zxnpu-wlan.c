@@ -77,6 +77,8 @@ struct zxnpu_wlan {
 	dma_addr_t rx_buf_dma;
 	u32 rx_cidx;
 	void *dtx_ring;		/* qid18 / BAND0 TX data ring (empty: TXD undecoded) */
+	void *dband_ring;	/* qid19 / BAND1 TX data ring (empty: TXD undecoded) */
+	dma_addr_t dband_ring_dma;
 	dma_addr_t dtx_ring_dma;
 	void *drx_ring;		/* qid1 RX data ring, 64 x 36 descriptors */
 	dma_addr_t drx_ring_dma;
@@ -713,6 +715,10 @@ static void zxnpu_wlan_data_init(struct zxnpu_wlan *w, bool commit)
 	zxnpu_cr_write(w, ZXNPU_DATA_TX_REG, (u32)w->dtx_ring_dma);
 	zxnpu_cr_write(w, ZXNPU_DATA_TX_REG + 4, ZXNPU_DATA_DEPTH);
 	zxnpu_cr_write(w, ZXNPU_DATA_TX_REG + 8, 0);
+	/* BAND1 TX (qid19): same shape, same TXD gap as BAND0 (doc 42) */
+	zxnpu_cr_write(w, ZXNPU_DATA_TX_REG + 0x10, (u32)w->dband_ring_dma);
+	zxnpu_cr_write(w, ZXNPU_DATA_TX_REG + 0x14, ZXNPU_DATA_DEPTH);
+	zxnpu_cr_write(w, ZXNPU_DATA_TX_REG + 0x18, 0);
 	w->drx_cidx = 0;
 }
 
@@ -806,11 +812,12 @@ static void zxnpu_wlan_dataplane(struct zxnpu_wlan *w)
 	zxnpu_wlan_append(w, "  BAND0 (wlan0):  TX qid18 %08x, RX data qid1 %08x\n",
 			  ZXNPU_WFDMA_TX_RING0 + 0x10 * 2,
 			  ZXNPU_DATA_RX_REG);
-	zxnpu_wlan_append(w, "  BAND1 (wlan5g0): TX qid19 %08x (ring alloc in P5)\n",
+	zxnpu_wlan_append(w, "  BAND1 (wlan5g0): TX qid19 %08x, RX data qid2 (P5)\n",
 			  ZXNPU_WFDMA_TX_RING0 + 0x10 * 3);
 	zxnpu_wlan_append(w, "  MCU events:      RX qid0 %08x (rx-init/mcu-recv)\n",
 			  ZXNPU_MCU_RX_REG);
-	zxnpu_wlan_append(w, "  depth: %u, buf %u B, NAPI attaches in P5\n",
+	zxnpu_wlan_append(w, "  BAND1 TX ring qid19: allocated and programmed by data-init\n");
+	zxnpu_wlan_append(w, "  depth: %u, buf %u B, NAPI attaches with the VAPs (vap=1)\n",
 			  ZXNPU_DATA_DEPTH, ZXNPU_DATA_BUF_SIZE);
 }
 
@@ -1747,6 +1754,9 @@ static int zxnpu_wlan_probe(struct pci_dev *pdev,
 	w->drx_buf = dmam_alloc_coherent(&pdev->dev,
 					 ZXNPU_DATA_DEPTH * ZXNPU_DATA_BUF_SIZE,
 					 &w->drx_buf_dma, GFP_KERNEL);
+	w->dband_ring = dmam_alloc_coherent(&pdev->dev,
+					    ZXNPU_DATA_DEPTH * ZXNPU_MCU_DESC_SIZE,
+					    &w->dband_ring_dma, GFP_KERNEL);
 	for (i = 0; i < 3; i++)
 		w->bar[i] = pcim_iomap_table(pdev)[i];
 
