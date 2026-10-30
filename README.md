@@ -35,6 +35,8 @@
 | native-0.2 | 无 | 增加 WFDMA 环只读探针（ctl 写 rings），sha256 5b0a508e… |
 | native-0.3 | 有线（021 硬件层） | 恢复网口可用；无线仍无；npu 族由 042 接线 |
 | native-0.4 | 有线 + npu 探针 | 增加 mcuwin（BAR +0/+8/0x108 只读），sha256 a100bde9… |
+| native-0.5 | 有线 + MCU 发送实验 | 64×36B 描述符环 + PatchSemGet 编码，双门禁，sha256 a9fd1e02… |
+| native-0.6 | 有线 + MCU 收发实验 | RX/事件 ring0（32×1700B、16B RXD）+ mcu-recv，sha256 d7a5d384… |
 
 无线仍无：MT7916 host driver 的 native 重写尚未到位（P4）。有线加速仍由
 021+PPE 提供；P2 的原生重写完成后替换 021。

@@ -561,6 +561,8 @@ assert "npu CSP_WLAN renders the patch trio" grep -q 'SemGet(type 0x10)' "$TREE/
 assert "npu CSP_WLAN probes the WFDMA ring blocks" grep -q 'ZXNPU_WFDMA_TX_RING0' "$TREE/target/linux/sanechips/files/drivers/net/ethernet/zte/zxnpu-wlan.c"
 assert "npu CSP_WLAN ring probe is wired to ctl" grep -q 'zxnpu_wlan_rings(w)' "$TREE/target/linux/sanechips/files/drivers/net/ethernet/zte/zxnpu-wlan.c"
 assert "npu CSP_WLAN can locate the MCU doorbell window" grep -q 'mcu window probe' "$TREE/target/linux/sanechips/files/drivers/net/ethernet/zte/zxnpu-wlan.c"
+assert "npu CSP_WLAN has the experimental MCU ring sender" grep -q 'mcu-send PatchSemGet' "$TREE/target/linux/sanechips/files/drivers/net/ethernet/zte/zxnpu-wlan.c"
+assert "npu CSP_WLAN has the RX/event ring" grep -q 'rx-init ring0' "$TREE/target/linux/sanechips/files/drivers/net/ethernet/zte/zxnpu-wlan.c"
 assert "overlay ppe.c carries the IPv6 trap fix" \
 	grep -q 'v6 = READ_ONCE(adapter->ppe_active) || !sw' \
 	"$TREE/target/linux/sanechips/files/drivers/net/ethernet/zte/zx279128s-ppe.c"
