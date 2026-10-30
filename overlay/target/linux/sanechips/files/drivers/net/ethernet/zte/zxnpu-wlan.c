@@ -802,6 +802,7 @@ static void zxnpu_wlan_data_tx(struct zxnpu_wlan *w)
 	zxnpu_wlan_append(w, "  the old '+60' read was a per-mode table, not the ctx)@N@");
 }
 
+
 /* The ring-to-VAP plan: names from the l1profile main_ifname pair, queue
  * numbers from the doc 35 qid map. NAPI attaches in P5, when the VAP
  * netdevs exist for it to poll on behalf of.
@@ -908,6 +909,67 @@ static const struct net_device_ops zxvap_netdev_ops = {
 	.ndo_start_xmit		= zxvap_xmit,
 	.ndo_validate_addr	= eth_validate_addr,
 };
+
+/*
+ * ---- per-STA ctx state management (P5, doc 52/53 decode) --------------
+ *
+ * The host-side mirror of the vendor per-STA table, following the layout
+ * decoded in R4g/R4h: ctx+0 = state word (magic 0x00040001 when the STA
+ * is associated, per ApUpdateCapabilityAndErpIe's capability word), ctx+8
+ * = pointer to the key/protect mirror block, ctx+240 = band index. The
+ * vendor table lives in firmware-controlled memory (base passed as arg5
+ * to the TMAC builders); our mirror is what the P5 TXD builder will read
+ * when constructing real frames.
+ */
+#define ZXNPU_CTX_MAGIC		0x00040001
+#define ZXNPU_CTX_STRIDE	0x1C50
+#define ZXNPU_CTX_BASE_OFF	0x13BAB0
+#define ZXNPU_WCID_MAX		243	/* 7-bit rewrite space, index 0 reserved */
+
+struct zxnpu_sta_ctx {
+	u32 state;		/* 0 = free, ZXNPU_CTX_MAGIC = associated */
+	u32 band;		/* 0 = BAND0 (wlan0), 1 = BAND1 (wlan5g0) */
+	u8 addr[6];
+	bool key_set;
+};
+
+__maybe_unused static struct zxnpu_sta_ctx zxna_ctx[ZXNPU_WCID_MAX];
+static DEFINE_MUTEX(zxna_ctx_lock);
+
+/* wcid 0 is reserved (index 0 per doc 16 §2.5); allocation starts at 1. */
+__maybe_unused static int zxna_wcid_alloc(struct zxnpu_vap *vap, const u8 *addr)
+{
+	int i;
+
+	mutex_lock(&zxna_ctx_lock);
+	for (i = 1; i < ZXNPU_WCID_MAX; i++) {
+		if (zxna_ctx[i].state == 0) {
+			memset(&zxna_ctx[i], 0, sizeof(zxna_ctx[i]));
+			zxna_ctx[i].state = ZXNPU_CTX_MAGIC;
+			zxna_ctx[i].band = vap->band;
+			memcpy(zxna_ctx[i].addr, addr, 6);
+			mutex_unlock(&zxna_ctx_lock);
+			return i;
+		}
+	}
+	mutex_unlock(&zxna_ctx_lock);
+	return -ENOSPC;	/* 127-flow capacity ceiling, doc 16 §2.5 */
+}
+
+__maybe_unused static void zxna_wcid_free(int wcid)
+{
+	if (wcid <= 0 || wcid >= ZXNPU_WCID_MAX)
+		return;
+	mutex_lock(&zxna_ctx_lock);
+	memset(&zxna_ctx[wcid], 0, sizeof(zxna_ctx[wcid]));
+	mutex_unlock(&zxna_ctx_lock);
+}
+
+/* The vendor reads the protect flag from the band block (doc 53 §1); the
+ * mirror tracks it per band so the P5 TXD builder sources w0 bits24+
+ * the same way.
+ */
+__maybe_unused static u8 zxna_band_protect[2];
 
 static void zxnpu_wlan_vaps_init(struct zxnpu_wlan *w)
 {
