@@ -40,9 +40,13 @@ mk_fake() {	# a minimal tree with every piece apply.sh's assertions read
 		"$d/target/linux/sanechips/patches-6.18" "$d/target/linux/generic" \
 		"$d/package/kernel/mt76" "$d/scripts"
 	printf '%s\n' '$(eval $(call BuildImage))' >"$d/target/linux/sanechips/image/Makefile"
+	printf 'DEFAULT_PACKAGES += \\\n\twpad-basic-mbedtls\n' \
+		>"$d/target/linux/sanechips/Makefile"
 	cp "$REPO/overlay/target/linux/sanechips/dts/zx279128s-zte-zxhn-e2631.dts" \
 		"$d/target/linux/sanechips/dts/"
 	: >"$d/target/linux/sanechips/patches-6.18/026-ARM-dts-zte-Add-ZX279128S-SoC-description.patch"
+	: >"$d/target/linux/sanechips/patches-6.18/021-net-ethernet-zte-Add-ZX279128S-Ethernet-switch-drive.patch"
+	printf 'CONFIG_TARGET_sanechips=y\n' >"$d/.config"
 	printf 'CONFIG_VFP=y\nCONFIG_VFPv3=y\nCONFIG_NEON=y\nCONFIG_KERNEL_MODE_NEON=y\nCONFIG_ARM_THUMBEE=y\n' \
 		>"$d/target/linux/sanechips/config-6.18"
 	printf '# CONFIG_SOFTLOCKUP_DETECTOR is not set\n# CONFIG_DETECT_HUNG_TASK is not set\n# CONFIG_DEFAULT_HUNG_TASK_TIMEOUT is not set\n' \
