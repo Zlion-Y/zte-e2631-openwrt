@@ -40,6 +40,7 @@
 | native-0.7 | 有线 + MCU 提交器 | rolling cidx 提交器 + mcu-cmd 原始命令控制台，sha256 6f02cb68… |
 | native-0.8 | 有线 + 补丁下载 | mcu-dl：SemGet→AddressLen→FwScatter→Finish 全序列，双门禁，sha256 dda87dc2… |
 | native-0.9 | 有线 + 队列校正 | MCU 命令环改到 0x18024410（qid 17），固件 trailer 已解，sha256 db7d36fd… |
+| native-1.0 | 有线 + 一键补丁下载 | mcu-dl 自动读 patch 头（dst/offset）+ fw-info，sha256 3d05497d… |
 
 无线仍无：MT7916 host driver 的 native 重写尚未到位（P4）。有线加速仍由
 021+PPE 提供；P2 的原生重写完成后替换 021。

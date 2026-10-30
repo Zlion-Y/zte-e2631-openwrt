@@ -331,6 +331,45 @@ static void zxnpu_wlan_mcu_send(struct zxnpu_wlan *w, bool commit)
 	zxnpu_mcu_submit(w, msg, sizeof(msg), commit, true);
 }
 
+/* fw-info [file]: patch header fields and MTK firmware trailer. */
+static void zxnpu_wlan_fw_info(struct zxnpu_wlan *w, const char *args)
+{
+	static const char * const names[] = {
+		"zte/mt7916/mt7916_patch_e1_hdr.bin",
+		"zte/mt7916/WIFI_RAM_CODE_MT7916.bin",
+		"zte/mt7916/7916_WACPU_RAM_CODE_release.bin",
+	};
+	char name[128];
+	int i;
+
+	if (sscanf(args, "%127s", name) == 1) {
+		const struct firmware *fw;
+		int ret = request_firmware_direct(&fw, name, &w->pdev->dev);
+
+		if (ret) {
+			zxnpu_wlan_append(w, "fw-info: %s missing (%d)@N@", name, ret);
+			return;
+		}
+		zxnpu_wlan_append(w, "fw-info %s size=%zu@N@", name, fw->size);
+		if (fw->size >= 0x40 && get_unaligned_le32(fw->data + 0x20) == 0x11223344) {
+			zxnpu_wlan_append(w, "  patch: date=%.16s platform=%.4s dst=%08x size_field=%08x@N@",
+					  fw->data, fw->data + 16,
+					  get_unaligned_le32(fw->data + 0x24),
+					  get_unaligned_le32(fw->data + 0x28));
+		} else if (fw->size >= 36) {
+			const u8 *t = fw->data + fw->size - 36;
+
+			zxnpu_wlan_append(w, "  trailer: chip=%02x n_region=%u fmt=%u date=%.15s crc=%08x@N@",
+					  t[0], t[2], t[3], t + 17,
+					  get_unaligned_le32(t + 32));
+		}
+		release_firmware(fw);
+		return;
+	}
+	for (i = 0; i < ARRAY_SIZE(names); i++)
+		zxnpu_wlan_fw_info(w, names[i]);
+}
+
 /* mcu-cmd <type> <cmd> <hex payload>: raw diagnostic command. */
 static void zxnpu_wlan_mcu_cmd(struct zxnpu_wlan *w, const char *args, bool commit)
 {
@@ -498,14 +537,31 @@ static void zxnpu_wlan_mcu_dl(struct zxnpu_wlan *w, const char *args, bool commi
 	char name[128];
 	int ret;
 
-	if (sscanf(args, "%127s %lx %u", name, &dst, &offset) < 2) {
-		zxnpu_wlan_append(w, "usage: mcu-dl <file> <dst-hex> [offset]\n");
+	int nargs = sscanf(args, "%127s %lx %u", name, &dst, &offset);
+
+	if (nargs < 1) {
+		zxnpu_wlan_append(w, "usage: mcu-dl <file> [dst-hex] [offset]\n");
 		return;
 	}
 	ret = request_firmware_direct(&fw, name, &w->pdev->dev);
 	if (ret) {
 		zxnpu_wlan_append(w, "mcu-dl: %s missing (%d)\n", name, ret);
 		return;
+	}
+	if (nargs < 2) {
+		/* Patch image: 0x11223344 magic at +0x20, load address at +0x24,
+		 * payload at +0x40 (the header fields were verified in doc 14). */
+		if (fw->size >= 0x40 &&
+		    get_unaligned_le32(fw->data + 0x20) == 0x11223344) {
+			dst = get_unaligned_le32(fw->data + 0x24);
+			offset = 0x40;
+			zxnpu_wlan_append(w, "  auto: patch header dst=%08lx offset=0x40\n",
+					  dst);
+		} else {
+			zxnpu_wlan_append(w, "mcu-dl: no dst given and no patch header\n");
+			release_firmware(fw);
+			return;
+		}
 	}
 	if (offset >= fw->size) {
 		zxnpu_wlan_append(w, "mcu-dl: offset beyond file\n");
@@ -733,6 +789,8 @@ static ssize_t zxnpu_wlan_ctl_write(struct file *file, const char __user *ubuf,
 		zxnpu_wlan_mcuwin(w);
 	} else if (!strncmp(cmd, "mcu-cmd ", 8)) {
 		zxnpu_wlan_mcu_cmd(w, cmd + 8, zxnpu_wlan_commit);
+	} else if (!strncmp(cmd, "fw-info", 7)) {
+		zxnpu_wlan_fw_info(w, cmd + 7);
 	} else if (!strncmp(cmd, "mcu-dl ", 7)) {
 		zxnpu_wlan_mcu_dl(w, cmd + 7, zxnpu_wlan_commit);
 	} else if (!strncmp(cmd, "rx-init", 7)) {
@@ -747,7 +805,7 @@ static ssize_t zxnpu_wlan_ctl_write(struct file *file, const char __user *ubuf,
 			zxnpu_wlan_append(w, "commit refused: set zxnpu_wlan.commit=1\n");
 		zxnpu_wlan_wfdma(w, commit);
 	} else {
-		zxnpu_wlan_append(w, "commands: probe | fw | plan | mcu | rings | mcuwin | mcu-send | mcu-cmd | mcu-dl | rx-init | mcu-recv | commit\n");
+		zxnpu_wlan_append(w, "commands: probe | fw | plan | mcu | rings | mcuwin | mcu-send | mcu-cmd | mcu-dl | fw-info | rx-init | mcu-recv | commit\n");
 	}
 	mutex_unlock(&w->lock);
 	return count;
