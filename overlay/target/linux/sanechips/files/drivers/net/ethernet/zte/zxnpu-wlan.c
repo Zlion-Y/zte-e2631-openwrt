@@ -741,6 +741,28 @@ static void zxnpu_wlan_data_recv(struct zxnpu_wlan *w)
 	}
 }
 
+/*
+ * TX path plan (doc 43, R4b decode): the vendor TX architecture is now
+ * mapped — write_tmac_info_offload_pkt (0x1B05E8) builds a ~54-byte TMAC
+ * on the stack field by field, the skb gets it pushed and is queued to the
+ * data ring, and pci_kick_out_data_tx (0x1E117C) is a pure doorbell: one
+ * hif_io_write32 of the CPU_IDX into the ring block's +8 register (the
+ * same BASE/CNT/CPU_IDX/DMA_IDX layout doc 14 §6.5.3 verified). What is
+ * NOT decoded yet is the TMAC's per-byte semantics — ~50 strb sites from
+ * ~15 value sources (R4c task). This command prints the plan and refuses
+ * to transmit: the TX ring stays empty until the TMAC template is traced.
+ */
+static void zxnpu_wlan_data_tx(struct zxnpu_wlan *w)
+{
+	zxnpu_wlan_append(w, "data-tx: plan printer, no transmission (TXD not decoded)@N@");
+	zxnpu_wlan_append(w, "  chain: write_tmac_info_offload_pkt(0x1B05E8) builds ~54B TMAC@N@");
+	zxnpu_wlan_append(w, "  -> skb push -> data ring (qid18 BAND0 %08x)@N@",
+			  ZXNPU_DATA_TX_REG);
+	zxnpu_wlan_append(w, "  -> pci_kick_out_data_tx(0x1E117C): CPU_IDX write to +8@N@");
+	zxnpu_wlan_append(w, "  TMAC byte semantics: R4c (R4b), ~50 strb sites from ~15 sources@N@");
+	zxnpu_wlan_append(w, "  until traced, the TX ring stays empty (data-init keeps it so)@N@");
+}
+
 /* The ring-to-VAP plan: names from the l1profile main_ifname pair, queue
  * numbers from the doc 35 qid map. NAPI attaches in P5, when the VAP
  * netdevs exist for it to poll on behalf of.
@@ -1496,6 +1518,8 @@ static ssize_t zxnpu_wlan_ctl_write(struct file *file, const char __user *ubuf,
 		zxnpu_wlan_data_init(w, zxnpu_wlan_commit);
 	} else if (!strncmp(cmd, "data-recv", 9)) {
 		zxnpu_wlan_data_recv(w);
+	} else if (!strncmp(cmd, "data-tx", 7)) {
+		zxnpu_wlan_data_tx(w);
 	} else if (!strncmp(cmd, "dataplane", 9)) {
 		zxnpu_wlan_dataplane(w);
 	} else if (!strncmp(cmd, "mcu-send", 8)) {
