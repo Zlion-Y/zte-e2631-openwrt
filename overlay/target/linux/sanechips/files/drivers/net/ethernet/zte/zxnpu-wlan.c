@@ -772,7 +772,11 @@ static void zxnpu_wlan_data_tx(struct zxnpu_wlan *w)
 	zxnpu_wlan_append(w, "    +31/+40 s8 sta+14 | +45 sta+41 | +48 sta+3528 (typed)@N@");
 	zxnpu_wlan_append(w, "    +52 sta+3420 | +53 =1 | zeros +6/+9/+11/+12/+15/+17/+20/+21@N@");
 	zxnpu_wlan_append(w, "  offload/mgmt path: HcGetMgmtQueueIdx/BcnQueueIdx +@N@");
-	zxnpu_wlan_append(w, "  asic_write_tmac_info_fixed_rate(0x142404) = data TMAC family (R4d)@N@");
+	zxnpu_wlan_append(w, "  asic_write_tmac_info_fixed_rate(0x142404) = dispatch,@N@");
+	zxnpu_wlan_append(w, "  mtf_write_tmac_info_fixed_rate(0x1B3018) = real TXD assembler:@N@");
+	zxnpu_wlan_append(w, "  TMAC(52B) -> 16B TXD, w0: +0 u16/+44->0x1800000/+25 lsl11/@N@");
+	zxnpu_wlan_append(w, "  +13 lsl20/+41 lsl24/bit31; w1: +48 lsl24/+50 lsl16/@N@");
+	zxnpu_wlan_append(w, "  +5 rate consts 0x1C50/0xBAB0; w2/w3 = R4e@N@");
 	zxnpu_wlan_append(w, "  sta+8 cap-word bits 16..31 = the layer_cap bit mask family@N@");
 	zxnpu_wlan_append(w, "  (same semantics as vendor npu_cap/zwzzrl layer_cap tables)@N@");
 }
