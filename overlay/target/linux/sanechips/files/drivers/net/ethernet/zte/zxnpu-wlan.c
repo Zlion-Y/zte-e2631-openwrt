@@ -13,9 +13,11 @@
 #include <linux/crc32.h>
 #include <linux/delay.h>
 #include <linux/dma-mapping.h>
+#include <linux/iopoll.h>
 #include <linux/firmware.h>
 #include <linux/io.h>
 #include <linux/kernel.h>
+#include <linux/minmax.h>
 #include <linux/module.h>
 #include <linux/moduleparam.h>
 #include <linux/mutex.h>
@@ -57,6 +59,7 @@ struct zxnpu_wlan {
 	dma_addr_t mcu_ring_dma;
 	void *mcu_buf;		/* 1 KiB command buffer */
 	dma_addr_t mcu_buf_dma;
+	u32 mcu_cidx;
 	void *rx_ring;		/* 32 x 36 descriptors */
 	dma_addr_t rx_ring_dma;
 	void *rx_buf;		/* 32 x 1700 buffers with 16B RXD */
@@ -246,14 +249,15 @@ static void zxnpu_wlan_mcuwin(struct zxnpu_wlan *w)
 #define ZXNPU_MCU_RING_REG	(ZXNPU_WFDMA_TX_RING0 + 0x10 * ZXNPU_MCU_RING_NR)
 #define ZXNPU_MCU_DESC_SIZE	36
 #define ZXNPU_MCU_RING_DEPTH	64
-#define ZXNPU_MCU_BUF_SIZE	1024
+#define ZXNPU_MCU_BUF_SIZE	4096
 #define ZXNPU_MCU_TYPE_PATCH	0x10
 #define ZXNPU_MCU_CMD_PATCH	0x17
 
 static void zxnpu_mcu_fill_desc(struct zxnpu_wlan *w, u32 slot, u32 buf_dma,
-				u32 len, u32 next_dma)
+				u32 len)
 {
 	u8 *d = (u8 *)w->mcu_ring + slot * ZXNPU_MCU_DESC_SIZE;
+	u32 next = (slot + 1) % ZXNPU_MCU_RING_DEPTH;
 
 	memset(d, 0, ZXNPU_MCU_DESC_SIZE);
 	put_unaligned_le32(16, d + 0);
@@ -261,60 +265,115 @@ static void zxnpu_mcu_fill_desc(struct zxnpu_wlan *w, u32 slot, u32 buf_dma,
 	put_unaligned_le32(buf_dma + len, d + 8);
 	put_unaligned_le32(buf_dma, d + 12);
 	put_unaligned_le32(len, d + 24);
-	put_unaligned_le32(next_dma, d + 28);
+	put_unaligned_le32(w->mcu_ring_dma + next * ZXNPU_MCU_DESC_SIZE, d + 28);
+}
+
+static int zxnpu_mcu_submit(struct zxnpu_wlan *w, const u8 *msg, int len,
+			  bool commit, bool verbose)
+{
+	u32 slot, didx, prev;
+
+	if (!w->mcu_ring || !w->mcu_buf || len <= 0 || len > ZXNPU_MCU_BUF_SIZE)
+		return -EINVAL;
+	slot = w->mcu_cidx % ZXNPU_MCU_RING_DEPTH;
+	memset(w->mcu_buf, 0, ZXNPU_MCU_BUF_SIZE);
+	memcpy(w->mcu_buf, msg, len);
+	zxnpu_mcu_fill_desc(w, slot, (u32)w->mcu_buf_dma, len);
+	dma_wmb();
+
+	prev = zxnpu_cr_read(w, ZXNPU_MCU_RING_REG + 12);
+	if (verbose)
+		zxnpu_wlan_append(w, "  submit slot=%u len=%d: reg %08x base=%08x cnt=%u cidx=%u didx=%u\n",
+				  slot, len, ZXNPU_MCU_RING_REG,
+				  zxnpu_cr_read(w, ZXNPU_MCU_RING_REG),
+				  zxnpu_cr_read(w, ZXNPU_MCU_RING_REG + 4),
+				  zxnpu_cr_read(w, ZXNPU_MCU_RING_REG + 8),
+				  prev);
+	if (!commit) {
+		zxnpu_wlan_append(w, "  dry run: set zxnpu_wlan.commit=1 to write\n");
+		return 0;
+	}
+
+	{
+		u32 glo = zxnpu_cr_read(w, ZXNPU_WFDMA_GLO_CFG);
+
+		/* hif_set_WFDMA(2): WFDMA_EN | TX DMA EN */
+		zxnpu_cr_write(w, ZXNPU_WFDMA_GLO_CFG, glo | 0x5);
+	}
+	zxnpu_cr_write(w, ZXNPU_MCU_RING_REG, (u32)w->mcu_ring_dma);
+	zxnpu_cr_write(w, ZXNPU_MCU_RING_REG + 4, ZXNPU_MCU_RING_DEPTH);
+	w->mcu_cidx++;
+	zxnpu_cr_write(w, ZXNPU_MCU_RING_REG + 8, w->mcu_cidx);
+	if (!readl_poll_timeout(w->bar[0] + ZXNPU_CR(ZXNPU_MCU_RING_REG + 12),
+				didx, (didx % ZXNPU_MCU_RING_DEPTH) ==
+				(w->mcu_cidx % ZXNPU_MCU_RING_DEPTH), 100,
+				50000))
+		zxnpu_wlan_append(w, "  didx advanced to %u\n", didx);
+	else
+		zxnpu_wlan_append(w, "  didx still %u (last was %u)\n",
+				  zxnpu_cr_read(w, ZXNPU_MCU_RING_REG + 12), prev);
+	return 0;
 }
 
 static void zxnpu_wlan_mcu_send(struct zxnpu_wlan *w, bool commit)
 {
 	u8 msg[24 + 4];
-	u32 cidx;
 
 	zxnpu_wlan_append(w, "mcu-send PatchSemGet (type %02x cmd %02x, ring %d): %s\n",
 			  ZXNPU_MCU_TYPE_PATCH, ZXNPU_MCU_CMD_PATCH,
 			  ZXNPU_MCU_RING_NR, commit ? "COMMIT" : "dry run");
-	if (!w->mcu_ring || !w->mcu_buf) {
-		zxnpu_wlan_append(w, "  no ring memory (probe with enable=1)\n");
-		return;
-	}
-
 	memset(msg, 0, sizeof(msg));
 	put_unaligned_le16(4, msg + 0);
 	msg[2] = ZXNPU_MCU_TYPE_PATCH;
 	msg[4] = ZXNPU_MCU_CMD_PATCH;
 	put_unaligned_le32(0, msg + 24);
-	memcpy(w->mcu_buf, msg, sizeof(msg));
-	zxnpu_mcu_fill_desc(w, 0, w->mcu_buf_dma, sizeof(msg),
-			    w->mcu_ring_dma + ZXNPU_MCU_DESC_SIZE);
-	dma_wmb();
+	zxnpu_mcu_submit(w, msg, sizeof(msg), commit, true);
+}
 
-	zxnpu_wlan_append(w, "  ring regs %08x: base=%08x cnt=%u cidx=%u didx=%u\n",
-			  ZXNPU_MCU_RING_REG,
-			  zxnpu_cr_read(w, ZXNPU_MCU_RING_REG),
-			  zxnpu_cr_read(w, ZXNPU_MCU_RING_REG + 4),
-			  zxnpu_cr_read(w, ZXNPU_MCU_RING_REG + 8),
-			  zxnpu_cr_read(w, ZXNPU_MCU_RING_REG + 12));
-	zxnpu_wlan_append(w, "  desc: base=%pad len=%zu buf=%pad\n",
-			  &w->mcu_ring_dma, sizeof(msg), &w->mcu_buf_dma);
-	if (!commit) {
-		zxnpu_wlan_append(w, "  dry run: set zxnpu_wlan.commit=1 to write\n");
+/* mcu-cmd <type> <cmd> <hex payload>: raw diagnostic command. */
+static void zxnpu_wlan_mcu_cmd(struct zxnpu_wlan *w, const char *args, bool commit)
+{
+	u8 msg[24 + 128];
+	unsigned int type, cmd;
+	u8 payload[128];
+	int n = 0;
+	const char *hex;
+
+	if (sscanf(args, "%u %u", &type, &cmd) != 2) {
+		zxnpu_wlan_append(w, "usage: mcu-cmd <type> <cmd> <hex>\n");
 		return;
 	}
+	hex = strchr(args, ' ');
+	hex = hex ? strchr(hex + 1, ' ') : NULL;
+	if (hex) {
+		hex++;
+		while (hex[0] && hex[1] && n < (int)sizeof(payload)) {
+			unsigned int hi, lo;
+			char c;
 
-	/* hif_set_WFDMA(2): WFDMA_EN | TX DMA EN (0x18024208 bits 0 and 2) */
-	{
-		u32 glo = zxnpu_cr_read(w, ZXNPU_WFDMA_GLO_CFG);
-
-		zxnpu_cr_write(w, ZXNPU_WFDMA_GLO_CFG, glo | 0x5);
+			c = hex[0];
+			hi = (c >= '0' && c <= '9') ? c - '0' :
+			     (c >= 'a' && c <= 'f') ? c - 'a' + 10 :
+			     (c >= 'A' && c <= 'F') ? c - 'A' + 10 : 0xff;
+			c = hex[1];
+			lo = (c >= '0' && c <= '9') ? c - '0' :
+			     (c >= 'a' && c <= 'f') ? c - 'a' + 10 :
+			     (c >= 'A' && c <= 'F') ? c - 'A' + 10 : 0xff;
+			if (hi == 0xff || lo == 0xff)
+				break;
+			payload[n++] = (hi << 4) | lo;
+			hex += 2;
+		}
 	}
-	zxnpu_cr_write(w, ZXNPU_MCU_RING_REG, (u32)w->mcu_ring_dma);
-	zxnpu_cr_write(w, ZXNPU_MCU_RING_REG + 4, ZXNPU_MCU_RING_DEPTH);
-	cidx = 1;
-	zxnpu_cr_write(w, ZXNPU_MCU_RING_REG + 8, cidx);
-	msleep(20);
-	zxnpu_wlan_append(w, "  after kick: cidx=%u didx=%u\n",
-			  zxnpu_cr_read(w, ZXNPU_MCU_RING_REG + 8),
-			  zxnpu_cr_read(w, ZXNPU_MCU_RING_REG + 12));
+	memset(msg, 0, sizeof(msg));
+	put_unaligned_le16(n, msg + 0);
+	msg[2] = type;
+	msg[4] = cmd;
+	memcpy(msg + 24, payload, n);
+	zxnpu_wlan_append(w, "mcu-cmd type=%u cmd=%u payload=%d\n", type, cmd, n);
+	zxnpu_mcu_submit(w, msg, 24 + n, commit, true);
 }
+
 
 /*
  * RX/event ring 0 (0x18024500). The stock ring memory init prefills every
@@ -408,6 +467,102 @@ static void zxnpu_wlan_mcu_recv(struct zxnpu_wlan *w)
 		if (zxnpu_wlan_commit)
 			zxnpu_cr_write(w, ZXNPU_MCU_RX_REG + 8, didx);
 	}
+}
+
+/*
+ * patch-dl <file> <dst-hex> [offset]: the download sequence recovered from
+ * load_patch_v1 (0x1D5C0C):
+ *
+ *   SemGet type 0x10 cmd 0x17 {sem}
+ *   AddressLen type 0x01 cmd 0x17 {dst, total, 0x80000000}
+ *   FwScatter type 0xEE cmd 0x10 {chunk of the file}
+ *   Finish type 0x07 cmd 0x17 {}
+ *
+ * The chunk size is 512 B to keep the on-stack message under the 1 KiB frame limit (the stock limit is 4096 - chip_cap[0x134]).
+ * Everything is inert unless enable=1 and commit=1.
+ */
+#define ZXNPU_MCU_TYPE_SCATTER	0xEE
+#define ZXNPU_MCU_CMD_SCATTER	0x10
+#define ZXNPU_MCU_TYPE_FINISH	0x07
+#define ZXNPU_MCU_TYPE_ADDR	0x01
+#define ZXNPU_MCU_CHUNK		512
+
+static void zxnpu_wlan_mcu_dl(struct zxnpu_wlan *w, const char *args, bool commit)
+{
+	const struct firmware *fw;
+	unsigned long dst;
+	unsigned int offset = 0;
+	u8 msg[24 + ZXNPU_MCU_CHUNK];
+	unsigned int done = 0, total;
+	char name[128];
+	int ret;
+
+	if (sscanf(args, "%127s %lx %u", name, &dst, &offset) < 2) {
+		zxnpu_wlan_append(w, "usage: mcu-dl <file> <dst-hex> [offset]\n");
+		return;
+	}
+	ret = request_firmware_direct(&fw, name, &w->pdev->dev);
+	if (ret) {
+		zxnpu_wlan_append(w, "mcu-dl: %s missing (%d)\n", name, ret);
+		return;
+	}
+	if (offset >= fw->size) {
+		zxnpu_wlan_append(w, "mcu-dl: offset beyond file\n");
+		release_firmware(fw);
+		return;
+	}
+	total = fw->size - offset;
+	zxnpu_wlan_append(w, "mcu-dl %s -> %08lx: %u bytes from +%u (%s)\n",
+			  name, dst, total, offset, commit ? "COMMIT" : "dry run");
+
+	memset(msg, 0, sizeof(msg));
+	put_unaligned_le16(4, msg + 0);
+	msg[2] = ZXNPU_MCU_TYPE_PATCH;
+	msg[4] = ZXNPU_MCU_CMD_PATCH;
+	put_unaligned_le32(1, msg + 24);
+	if (zxnpu_mcu_submit(w, msg, 28, commit, true))
+		goto out;
+	if (!commit)
+		goto out;
+	msleep(20);
+
+	memset(msg, 0, sizeof(msg));
+	put_unaligned_le16(12, msg + 0);
+	msg[2] = (dst == 0x04000000) ? 0x05 : ZXNPU_MCU_TYPE_ADDR;
+	msg[4] = ZXNPU_MCU_CMD_PATCH;
+	put_unaligned_le32(dst, msg + 24);
+	put_unaligned_le32(total, msg + 28);
+	put_unaligned_le32(0x80000000, msg + 32);
+	if (zxnpu_mcu_submit(w, msg, 36, true, true))
+		goto out;
+	msleep(10);
+
+	while (done < total) {
+		unsigned int chunk = min_t(unsigned int, ZXNPU_MCU_CHUNK,
+					   total - done);
+
+		memset(msg, 0, 24 + chunk);
+		put_unaligned_le16(chunk, msg + 0);
+		msg[2] = ZXNPU_MCU_TYPE_SCATTER;
+		msg[4] = ZXNPU_MCU_CMD_SCATTER;
+		memcpy(msg + 24, fw->data + offset + done, chunk);
+		if (zxnpu_mcu_submit(w, msg, 24 + chunk, true, false))
+			goto out;
+		done += chunk;
+		if (!(done % (64 * ZXNPU_MCU_CHUNK)))
+			zxnpu_wlan_append(w, "  ... %u/%u\n", done, total);
+		usleep_range(1000, 2000);
+	}
+
+	memset(msg, 0, sizeof(msg));
+	put_unaligned_le16(0, msg + 0);
+	msg[2] = ZXNPU_MCU_TYPE_FINISH;
+	msg[4] = ZXNPU_MCU_CMD_PATCH;
+	if (zxnpu_mcu_submit(w, msg, 24, true, true))
+		goto out;
+	zxnpu_wlan_append(w, "mcu-dl: %u bytes sent, finish issued\n", done);
+out:
+	release_firmware(fw);
 }
 
 static void zxnpu_wlan_wfdma(struct zxnpu_wlan *w, bool commit)
@@ -575,6 +730,10 @@ static ssize_t zxnpu_wlan_ctl_write(struct file *file, const char __user *ubuf,
 		zxnpu_wlan_rings(w);
 	} else if (!strncmp(cmd, "mcuwin", 6)) {
 		zxnpu_wlan_mcuwin(w);
+	} else if (!strncmp(cmd, "mcu-cmd ", 8)) {
+		zxnpu_wlan_mcu_cmd(w, cmd + 8, zxnpu_wlan_commit);
+	} else if (!strncmp(cmd, "mcu-dl ", 7)) {
+		zxnpu_wlan_mcu_dl(w, cmd + 7, zxnpu_wlan_commit);
 	} else if (!strncmp(cmd, "rx-init", 7)) {
 		zxnpu_wlan_rx_init(w, zxnpu_wlan_commit);
 	} else if (!strncmp(cmd, "mcu-recv", 8)) {
@@ -587,7 +746,7 @@ static ssize_t zxnpu_wlan_ctl_write(struct file *file, const char __user *ubuf,
 			zxnpu_wlan_append(w, "commit refused: set zxnpu_wlan.commit=1\n");
 		zxnpu_wlan_wfdma(w, commit);
 	} else {
-		zxnpu_wlan_append(w, "commands: probe | fw | plan | mcu | rings | mcuwin | mcu-send | rx-init | mcu-recv | commit\n");
+		zxnpu_wlan_append(w, "commands: probe | fw | plan | mcu | rings | mcuwin | mcu-send | mcu-cmd | mcu-dl | rx-init | mcu-recv | commit\n");
 	}
 	mutex_unlock(&w->lock);
 	return count;
