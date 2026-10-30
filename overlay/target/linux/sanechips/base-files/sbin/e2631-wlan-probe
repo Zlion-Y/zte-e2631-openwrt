@@ -1,0 +1,67 @@
+#!/bin/sh
+# e2631-wlan-probe [--commit]
+#
+# Drives the vendor-native MT7916 bring-up surface exposed by zxnpu-wlan.
+# Without --commit it is read-only: CR/BAR dumps, WFDMA ring registers and
+# firmware headers. With --commit it also sends PatchSemGet, initialises the
+# RX event ring, drains it and (if a second argument is given) downloads the
+# ROM patch. Both module parameters must allow it:
+#
+#   insmod zxnpu-wlan enable=1 commit=1
+#
+# Every write goes through the driver's own gating; this script never pokes
+# hardware directly.
+
+CTL=/proc/zx-csp-wlan/ctl
+STAT=/proc/zx-csp-wlan/status
+
+[ -e "$CTL" ] || {
+	echo "e2631-wlan-probe: $CTL missing - zxnpu-wlan not loaded (enable=0?)" >&2
+	exit 1
+}
+
+mode=read
+[ "${1:-}" = "--commit" ] && mode=commit
+patch=${2:-}
+
+say() { printf '\n### %s\n' "$*"; }
+
+say "module parameters"
+for p in enable commit; do
+	f=/sys/module/zxnpu_wlan/parameters/$p
+	[ -e "$f" ] && echo "$p=$(cat "$f")"
+done
+
+say "probe + rings + fw-info + mcuwin"
+for c in probe rings fw-info mcuwin; do
+	echo "$c" > "$CTL"
+	continue
+done
+sleep 1
+cat "$STAT"
+
+if [ "$mode" != commit ]; then
+	say "read-only run complete; re-run with --commit to exercise the MCU paths"
+	exit 0
+fi
+
+say "PatchSemGet (mcu-send)"
+echo "mcu-send" > "$CTL"
+
+say "RX event ring init + drain"
+printf 'rx-init\n' > "$CTL"
+sleep 1
+printf 'mcu-recv\n' > "$CTL"
+sleep 1
+
+if [ -n "$patch" ]; then
+	say "download $patch"
+	echo "mcu-dl $patch" > "$CTL"
+	sleep 1
+	printf 'mcu-recv\n' > "$CTL"
+	say "FwStart"
+	echo "fw-start 0" > "$CTL"
+	sleep 1
+fi
+
+cat "$STAT"

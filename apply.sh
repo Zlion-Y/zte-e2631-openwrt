@@ -74,7 +74,7 @@ cp "$HERE/tools/mkfactory.mjs" "$TREE/tools/e2631-mkfactory.mjs"
 # runnable on the device, and rc.common refuses to enable a service script that
 # is not executable.
 for f in sbin/e2631-probe sbin/e2631-trial sbin/e2631-commit sbin/e2631-leds sbin/e2631-hb \
-	 sbin/e2631-linkspeed sbin/e2631-wifi-on sbin/e2631-wifi-ap sbin/e2631-fwstate \
+	 sbin/e2631-linkspeed sbin/e2631-wlan-probe sbin/e2631-wifi-on sbin/e2631-wifi-ap sbin/e2631-fwstate \
 	 sbin/e2631-upgrade sbin/e2631-netune-apply \
 	 sbin/e2631-wanport \
 	 sbin/e2631-userdata-status sbin/e2631-userdata-firstboot sbin/e2631-userdata-init \
@@ -563,6 +563,7 @@ assert "npu CSP_WLAN ring probe is wired to ctl" grep -q 'zxnpu_wlan_rings(w)' "
 assert "npu CSP_WLAN can locate the MCU doorbell window" grep -q 'mcu window probe' "$TREE/target/linux/sanechips/files/drivers/net/ethernet/zte/zxnpu-wlan.c"
 assert "npu CSP_WLAN has the experimental MCU ring sender" grep -q 'mcu-send PatchSemGet' "$TREE/target/linux/sanechips/files/drivers/net/ethernet/zte/zxnpu-wlan.c"
 assert "npu CSP_WLAN has the RX/event ring" grep -q 'rx-init ring0' "$TREE/target/linux/sanechips/files/drivers/net/ethernet/zte/zxnpu-wlan.c"
+assert "wlan bring-up probe script present" test -f "$TREE/target/linux/sanechips/base-files/sbin/e2631-wlan-probe"
 assert "npu CSP_WLAN has the raw MCU command console" grep -q 'usage: mcu-cmd' "$TREE/target/linux/sanechips/files/drivers/net/ethernet/zte/zxnpu-wlan.c"
 assert "npu CSP_WLAN parses patch headers and fw trailers" grep -q 'auto: patch header' "$TREE/target/linux/sanechips/files/drivers/net/ethernet/zte/zxnpu-wlan.c"
 assert "npu CSP_WLAN can issue MtCmdFwStartReq" grep -q 'fw-start <option-hex>' "$TREE/target/linux/sanechips/files/drivers/net/ethernet/zte/zxnpu-wlan.c"
