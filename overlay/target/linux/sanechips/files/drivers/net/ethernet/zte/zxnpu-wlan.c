@@ -937,7 +937,7 @@ __maybe_unused static struct zxnpu_sta_ctx zxna_ctx[ZXNPU_WCID_MAX];
 static DEFINE_MUTEX(zxna_ctx_lock);
 
 /* wcid 0 is reserved (index 0 per doc 16 §2.5); allocation starts at 1. */
-__maybe_unused static int zxna_wcid_alloc(struct zxnpu_vap *vap, const u8 *addr)
+static int zxna_wcid_alloc(struct zxnpu_vap *vap, const u8 *addr)
 {
 	int i;
 
@@ -956,7 +956,7 @@ __maybe_unused static int zxna_wcid_alloc(struct zxnpu_vap *vap, const u8 *addr)
 	return -ENOSPC;	/* 127-flow capacity ceiling, doc 16 §2.5 */
 }
 
-__maybe_unused static void zxna_wcid_free(int wcid)
+static void zxna_wcid_free(int wcid)
 {
 	if (wcid <= 0 || wcid >= ZXNPU_WCID_MAX)
 		return;
@@ -1686,6 +1686,30 @@ static int zxnpu_wlan_status_show(struct seq_file *s, void *unused)
 	return 0;
 }
 
+/* parse 12 hex digits into a MAC (sta-add) */
+static int zxvap_parse_mac(const char *s, u8 *out)
+{
+	int i;
+
+	for (i = 0; i < 6; i++) {
+		int hi, lo;
+		char c;
+
+		c = s[i * 2];
+		hi = (c >= '0' && c <= '9') ? c - '0' :
+		     (c >= 'a' && c <= 'f') ? c - 'a' + 10 :
+		     (c >= 'A' && c <= 'F') ? c - 'A' + 10 : -1;
+		c = s[i * 2 + 1];
+		lo = (c >= '0' && c <= '9') ? c - '0' :
+		     (c >= 'a' && c <= 'f') ? c - 'a' + 10 :
+		     (c >= 'A' && c <= 'F') ? c - 'A' + 10 : -1;
+		if (hi < 0 || lo < 0)
+			return -EINVAL;
+		out[i] = (hi << 4) | lo;
+	}
+	return 0;
+}
+
 static ssize_t zxnpu_wlan_ctl_write(struct file *file, const char __user *ubuf,
 				    size_t count, loff_t *ppos)
 {
@@ -1746,6 +1770,62 @@ static ssize_t zxnpu_wlan_ctl_write(struct file *file, const char __user *ubuf,
 		zxnpu_wlan_data_tx(w);
 	} else if (!strncmp(cmd, "dataplane", 9)) {
 		zxnpu_wlan_dataplane(w);
+	} else if (!strncmp(cmd, "sta-add ", 8)) {
+		/* sta-add <hex 12> <band 0|1>: allocate a wcid and mark the
+		 * per-STA ctx associated (the R4g/R4h mirror layout). Real
+		 * association arrives with P5; this exercises the allocator
+		 * the P5 association handler will call. */
+		u8 amac[6];
+		char smac[24];
+		unsigned int band = 0;
+		int wcid;
+
+		if (sscanf(cmd + 8, "%23s %u", smac, &band) < 1 ||
+		    zxvap_parse_mac(smac, amac)) {
+			zxnpu_wlan_append(w, "usage: sta-add <mac 12hex> [band]\n");
+			goto done_ctl;
+		}
+		if (band > 1) {
+			zxnpu_wlan_append(w, "sta-add: band must be 0 or 1\n");
+			goto done_ctl;
+		}
+		wcid = -ENOSPC;
+		if (w->vaps[band])
+			wcid = zxna_wcid_alloc(w->vaps[band], amac);
+		else
+			zxnpu_wlan_append(w, "sta-add: VAP %u absent (vap=1)\n",
+					  band);
+		if (wcid >= 0)
+			zxnpu_wlan_append(w, "sta-add: mac %pM wcid %d band %u\n",
+					  amac, wcid, band);
+		else
+			zxnpu_wlan_append(w, "sta-add: failed (%d)\n", wcid);
+done_ctl:
+		zxnpu_wlan_append(w, "\n");
+	} else if (!strncmp(cmd, "sta-del ", 8)) {
+		unsigned int wcid;
+
+		if (sscanf(cmd + 8, "%u", &wcid) != 1) {
+			zxnpu_wlan_append(w, "usage: sta-del <wcid>\n");
+		} else {
+			zxna_wcid_free(wcid);
+			zxnpu_wlan_append(w, "sta-del: wcid %u freed\n", wcid);
+		}
+	} else if (!strncmp(cmd, "sta-list", 8)) {
+		int i;
+
+		zxnpu_wlan_append(w, "sta-list (ctx mirror, doc 52 layout):\n");
+		mutex_lock(&zxna_ctx_lock);
+		for (i = 1; i < ZXNPU_WCID_MAX; i++) {
+			if (zxna_ctx[i].state != ZXNPU_CTX_MAGIC)
+				continue;
+			zxnpu_wlan_append(w, "  wcid %d band %u addr %pM%s\n",
+					  i, zxna_ctx[i].band,
+					  zxna_ctx[i].addr,
+					  zxna_ctx[i].key_set ?
+					  " key-set" : "");
+		}
+		mutex_unlock(&zxna_ctx_lock);
 	} else if (!strncmp(cmd, "mcu-send", 8)) {
 		zxnpu_wlan_mcu_send(w, zxnpu_wlan_commit);
 	} else if (!strncmp(cmd, "commit", 6)) {
