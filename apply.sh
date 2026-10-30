@@ -579,9 +579,12 @@ assert "npu CSP_WLAN has the experimental MCU ring sender" grep -q 'mcu-send Pat
 assert "npu CSP_WLAN has the RX/event ring" grep -q 'rx-init ring0' "$TREE/target/linux/sanechips/files/drivers/net/ethernet/zte/zxnpu-wlan.c"
 assert "wlan bring-up probe script present" test -f "$TREE/target/linux/sanechips/base-files/sbin/e2631-wlan-probe"
 assert "npu CSP_WLAN has the raw MCU command console" grep -q 'usage: mcu-cmd' "$TREE/target/linux/sanechips/files/drivers/net/ethernet/zte/zxnpu-wlan.c"
-assert "npu CSP_WLAN parses patch headers and fw trailers" grep -q 'auto: patch header' "$TREE/target/linux/sanechips/files/drivers/net/ethernet/zte/zxnpu-wlan.c"
+assert "npu CSP_WLAN parses patch headers and fw trailers" grep -q 'auto: patch dst=' "$TREE/target/linux/sanechips/files/drivers/net/ethernet/zte/zxnpu-wlan.c"
 assert "npu CSP_WLAN can issue MtCmdFwStartReq" grep -q 'fw-start <option-hex>' "$TREE/target/linux/sanechips/files/drivers/net/ethernet/zte/zxnpu-wlan.c"
 assert "npu CSP_WLAN can download a region list" grep -q 'mcu-dl-regions <file>' "$TREE/target/linux/sanechips/files/drivers/net/ethernet/zte/zxnpu-wlan.c"
+assert "npu CSP_WLAN decodes fw format-2 region tables" grep -q 'ZXNPU_FW_MAX_REGIONS' "$TREE/target/linux/sanechips/files/drivers/net/ethernet/zte/zxnpu-wlan.c"
+assert "npu CSP_WLAN has the WM/WA download command" grep -q 'usage: fw-dl wm|wa' "$TREE/target/linux/sanechips/files/drivers/net/ethernet/zte/zxnpu-wlan.c"
+assert "npu CSP_WLAN strips the 30-byte patch header" grep -q '#define ZXNPU_PATCH_HDR' "$TREE/target/linux/sanechips/files/drivers/net/ethernet/zte/zxnpu-wlan.c"
 assert "overlay ppe.c carries the IPv6 trap fix" \
 	grep -q 'v6 = READ_ONCE(adapter->ppe_active) || !sw' \
 	"$TREE/target/linux/sanechips/files/drivers/net/ethernet/zte/zx279128s-ppe.c"

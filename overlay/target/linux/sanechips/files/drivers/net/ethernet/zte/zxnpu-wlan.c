@@ -652,14 +652,14 @@ static void zxnpu_wlan_mcu_dl(struct zxnpu_wlan *w, const char *args, bool commi
 		return;
 	}
 	if (nargs < 2) {
-		/* Patch image: 0x11223344 magic at +0x20, load address at +0x24,
-		 * payload at +0x40 (the header fields were verified in doc 14). */
-		if (fw->size >= 0x40 &&
+		/* parse_patch_v1 strips exactly 30 header bytes: the image sent to
+		 * the MCU starts at +0x1E and still contains the 0x11223344 word. */
+		if (fw->size > ZXNPU_PATCH_HDR &&
 		    get_unaligned_le32(fw->data + 0x20) == 0x11223344) {
 			dst = get_unaligned_le32(fw->data + 0x24);
-			offset = 0x40;
-			zxnpu_wlan_append(w, "  auto: patch header dst=%08lx offset=0x40\n",
-					  dst);
+			offset = ZXNPU_PATCH_HDR;
+			zxnpu_wlan_append(w, "  auto: patch dst=%08lx offset=%d\n",
+					  dst, ZXNPU_PATCH_HDR);
 		} else {
 			zxnpu_wlan_append(w, "mcu-dl: no dst given and no patch header\n");
 			release_firmware(fw);
@@ -715,13 +715,248 @@ static void zxnpu_wlan_mcu_dl(struct zxnpu_wlan *w, const char *args, bool commi
 	}
 
 	memset(msg, 0, sizeof(msg));
-	put_unaligned_le16(0, msg + 0);
+	put_unaligned_le16(4, msg + 0);
 	msg[2] = ZXNPU_MCU_TYPE_FINISH;
 	msg[4] = ZXNPU_MCU_CMD_PATCH;
-	if (zxnpu_mcu_submit(w, msg, 24, true, true))
+	if (zxnpu_mcu_submit(w, msg, 28, true, true))
 		goto out;
 	zxnpu_wlan_append(w, "mcu-dl: %u bytes sent, finish issued\n", done);
 out:
+	release_firmware(fw);
+}
+
+/*
+ * parse_fw_v3 (mt7916.ko 0x1D6858) + load_fw_v1 (0x1D5A48) in one place.
+ *
+ * The image ends with a 36-byte trailer and n_region 40-byte descriptors
+ * (mt76's struct mt76_connac2_fw_region); descriptors are walked backwards
+ * from the trailer and the payloads sit contiguously at the front of the
+ * file:
+ *
+ *   [payload 0][payload 1]...[padding][descriptor x n][trailer]
+ *
+ * feature_set bits: 0 encrypt, 1..2 key idx, 4 encr mode, 5 override addr,
+ * 6 non-downloadable. load_fw_v1 turns those into the AddressLen mode word
+ * 0x80000000 | (fs & 7) | (fs & 1 ? 8) | (fs & 0x10 ? 0x40) and band 1
+ * (the WA image) adds 0x10, while FwStart gets bit0 (override) and bit2
+ * (WA working PDA CR4). This matches upstream mt76_connac2_load_ram.
+ */
+#define ZXNPU_WM_FW		"zte/mt7916/WIFI_RAM_CODE_MT7916.bin"
+#define ZXNPU_WA_FW		"zte/mt7916/7916_WACPU_RAM_CODE_release.bin"
+#define ZXNPU_PATCH_FW		"zte/mt7916/mt7916_patch_e1_hdr.bin"
+#define ZXNPU_FW_MAX_REGIONS	16
+#define ZXNPU_PATCH_HDR		30
+
+struct zxnpu_fw_region {
+	u32 addr;
+	u32 len;
+	u32 off;
+	u8 feature;
+};
+
+static int zxnpu_fw_parse(const struct firmware *fw,
+			  struct zxnpu_fw_region *regs, int max,
+			  char *ver, size_t verlen, char *date, size_t datelen)
+{
+	const u8 *t, *tab;
+	u32 off = 0;
+	int i, n;
+
+	if (fw->size < 36)
+		return -EINVAL;
+	t = fw->data + fw->size - 36;
+	if (t[3] != 2)
+		return -EINVAL;
+	n = t[2];
+	if (!n || n > max || fw->size < 36 + (size_t)n * 40)
+		return -EINVAL;
+	tab = t - n * 40;
+	for (i = 0; i < n; i++) {
+		const u8 *e = tab + i * 40;
+
+		regs[i].addr = get_unaligned_le32(e + 16);
+		regs[i].len = get_unaligned_le32(e + 20);
+		regs[i].feature = e[24];
+		regs[i].off = off;
+		if (off + regs[i].len > fw->size)
+			return -EINVAL;
+		off += regs[i].len;
+	}
+	snprintf(ver, verlen, "%.10s", (const char *)t + 7);
+	snprintf(date, datelen, "%.15s", (const char *)t + 17);
+	return n;
+}
+
+static u32 zxnpu_fw_mode(u8 feature, bool wa)
+{
+	u32 mode = 0x80000000u | (feature & 0x07);
+
+	if (feature & 0x01)
+		mode |= 0x08;
+	if (feature & 0x10)
+		mode |= 0x40;
+	if (wa)
+		mode |= 0x10;
+	return mode;
+}
+
+static int zxnpu_mcu_addrlen(struct zxnpu_wlan *w, u32 addr, u32 len,
+			     u32 mode, bool commit)
+{
+	u8 msg[24 + 12];
+
+	memset(msg, 0, sizeof(msg));
+	put_unaligned_le16(12, msg + 0);
+	msg[2] = (addr == 0x04000000) ? 0x05 : 0x01;
+	msg[4] = ZXNPU_MCU_CMD_PATCH;
+	put_unaligned_le32(addr, msg + 24);
+	put_unaligned_le32(len, msg + 28);
+	put_unaligned_le32(mode, msg + 32);
+	return zxnpu_mcu_submit(w, msg, sizeof(msg), commit, false);
+}
+
+static int zxnpu_mcu_scatter(struct zxnpu_wlan *w, const u8 *data, u32 len,
+			     bool commit)
+{
+	u8 msg[24 + ZXNPU_MCU_CHUNK];
+	u32 done = 0;
+
+	while (done < len) {
+		u32 chunk = min_t(u32, ZXNPU_MCU_CHUNK, len - done);
+
+		memset(msg, 0, 24 + chunk);
+		put_unaligned_le16(chunk, msg + 0);
+		msg[2] = ZXNPU_MCU_TYPE_SCATTER;
+		msg[4] = ZXNPU_MCU_CMD_SCATTER;
+		memcpy(msg + 24, data + done, chunk);
+		if (zxnpu_mcu_submit(w, msg, 24 + chunk, commit, false))
+			return -EIO;
+		done += chunk;
+		if (!commit)
+			break;
+		usleep_range(500, 1000);
+	}
+	return 0;
+}
+
+static int zxnpu_fw_send(struct zxnpu_wlan *w, const struct firmware *fw,
+			 bool wa, bool commit)
+{
+	struct zxnpu_fw_region regs[ZXNPU_FW_MAX_REGIONS];
+	char ver[16], date[24];
+	u32 override = 0, option;
+	int i, n;
+
+	n = zxnpu_fw_parse(fw, regs, ZXNPU_FW_MAX_REGIONS, ver, sizeof(ver),
+			   date, sizeof(date));
+	if (n < 0) {
+		zxnpu_wlan_append(w, "  bad firmware image (%d)\n", n);
+		return n;
+	}
+	zxnpu_wlan_append(w, "  %s %s%s: %d regions\n", wa ? "WA" : "WM",
+			  ver, date, n);
+	for (i = 0; i < n; i++) {
+		struct zxnpu_fw_region *r = &regs[i];
+		u32 mode = zxnpu_fw_mode(r->feature, wa);
+		int ret;
+
+		zxnpu_wlan_append(w, "  [%d] addr=%08x len=%u off=%u fs=%02x mode=%08x\n",
+				  i, r->addr, r->len, r->off, r->feature, mode);
+		if (r->feature & 0x40)
+			continue;
+		if (r->feature & 0x20)
+			override = r->addr;
+		ret = zxnpu_mcu_addrlen(w, r->addr, r->len, mode, commit);
+		if (ret)
+			return ret;
+		if (!commit)
+			continue;
+		msleep(10);
+		ret = zxnpu_mcu_scatter(w, fw->data + r->off, r->len, true);
+		if (ret)
+			return ret;
+	}
+	option = (override ? 0x1 : 0) | (wa ? 0x4 : 0);
+	zxnpu_wlan_append(w, "  fw-start option=%08x override=%08x\n",
+			  option, override);
+	{
+		u8 msg[24 + 8];
+
+		memset(msg, 0, sizeof(msg));
+		put_unaligned_le16(8, msg + 0);
+		msg[2] = 0x02;
+		msg[4] = ZXNPU_MCU_CMD_PATCH;
+		put_unaligned_le32(option, msg + 24);
+		put_unaligned_le32(override, msg + 28);
+		return zxnpu_mcu_submit(w, msg, sizeof(msg), commit, true);
+	}
+}
+
+/* fw-dl wm|wa: patch sem, region download and FwStart for one MCU image. */
+static void zxnpu_wlan_fw_dl(struct zxnpu_wlan *w, const char *args, bool commit)
+{
+	const struct firmware *fw;
+	char name[16];
+	bool wa;
+	int ret;
+
+	if (sscanf(args, "%15s", name) != 1 ||
+	    (strcmp(name, "wm") && strcmp(name, "wa"))) {
+		zxnpu_wlan_append(w, "usage: fw-dl wm|wa\n");
+		return;
+	}
+	wa = !strcmp(name, "wa");
+	ret = request_firmware_direct(&fw, wa ? ZXNPU_WA_FW : ZXNPU_WM_FW,
+				      &w->pdev->dev);
+	if (ret) {
+		zxnpu_wlan_append(w, "fw-dl: %s missing (%d)\n",
+				  wa ? ZXNPU_WA_FW : ZXNPU_WM_FW, ret);
+		return;
+	}
+	zxnpu_wlan_append(w, "fw-dl %s (%zu B) %s\n", name, fw->size,
+			  commit ? "COMMIT" : "dry run");
+	ret = zxnpu_fw_send(w, fw, wa, commit);
+	if (ret)
+		zxnpu_wlan_append(w, "fw-dl: failed at %d\n", ret);
+	release_firmware(fw);
+}
+
+/* fw-plan wm|wa: offline decode of the trailer and region table. */
+static void zxnpu_wlan_fw_plan(struct zxnpu_wlan *w, const char *args)
+{
+	struct zxnpu_fw_region regs[ZXNPU_FW_MAX_REGIONS];
+	const struct firmware *fw;
+	char name[16], ver[16], date[24];
+	bool wa;
+	int i, n, ret;
+
+	if (sscanf(args, "%15s", name) != 1 ||
+	    (strcmp(name, "wm") && strcmp(name, "wa"))) {
+		zxnpu_wlan_append(w, "usage: fw-plan wm|wa\n");
+		return;
+	}
+	wa = !strcmp(name, "wa");
+	ret = request_firmware_direct(&fw, wa ? ZXNPU_WA_FW : ZXNPU_WM_FW,
+				      &w->pdev->dev);
+	if (ret) {
+		zxnpu_wlan_append(w, "fw-plan: %s missing (%d)\n",
+				  wa ? ZXNPU_WA_FW : ZXNPU_WM_FW, ret);
+		return;
+	}
+	zxnpu_wlan_append(w, "fw-plan %s (%zu B)\n", name, fw->size);
+	n = zxnpu_fw_parse(fw, regs, ZXNPU_FW_MAX_REGIONS, ver, sizeof(ver),
+			   date, sizeof(date));
+	if (n < 0) {
+		zxnpu_wlan_append(w, "  bad firmware image (%d)\n", n);
+		release_firmware(fw);
+		return;
+	}
+	zxnpu_wlan_append(w, "  ver=%s date=%s regions=%d\n", ver, date, n);
+	for (i = 0; i < n; i++)
+		zxnpu_wlan_append(w, "  [%d] addr=%08x len=%u off=%u fs=%02x%s\n",
+				  i, regs[i].addr, regs[i].len, regs[i].off,
+				  regs[i].feature,
+				  regs[i].feature & 0x40 ? " (skip)" : "");
 	release_firmware(fw);
 }
 
@@ -880,6 +1115,14 @@ static ssize_t zxnpu_wlan_ctl_write(struct file *file, const char __user *ubuf,
 	memset(w->status, 0, sizeof(w->status));
 	if (!strncmp(cmd, "probe", 5)) {
 		zxnpu_wlan_probe_regs(w);
+	} else if (!strncmp(cmd, "fw-plan ", 8)) {
+		zxnpu_wlan_fw_plan(w, cmd + 8);
+	} else if (!strncmp(cmd, "fw-dl ", 6)) {
+		zxnpu_wlan_fw_dl(w, cmd + 6, zxnpu_wlan_commit);
+	} else if (!strncmp(cmd, "fw-start ", 9)) {
+		zxnpu_wlan_fw_start(w, cmd + 9, zxnpu_wlan_commit);
+	} else if (!strncmp(cmd, "fw-info", 7)) {
+		zxnpu_wlan_fw_info(w, cmd + 7);
 	} else if (!strncmp(cmd, "fw", 2)) {
 		zxnpu_wlan_fw_detail(w);
 	} else if (!strncmp(cmd, "plan", 4)) {
@@ -894,10 +1137,6 @@ static ssize_t zxnpu_wlan_ctl_write(struct file *file, const char __user *ubuf,
 		zxnpu_wlan_mcu_cmd(w, cmd + 8, zxnpu_wlan_commit);
 	} else if (!strncmp(cmd, "mcu-dl-regions ", 15)) {
 		zxnpu_wlan_mcu_regions(w, cmd + 15, zxnpu_wlan_commit);
-	} else if (!strncmp(cmd, "fw-start ", 9)) {
-		zxnpu_wlan_fw_start(w, cmd + 9, zxnpu_wlan_commit);
-	} else if (!strncmp(cmd, "fw-info", 7)) {
-		zxnpu_wlan_fw_info(w, cmd + 7);
 	} else if (!strncmp(cmd, "mcu-dl ", 7)) {
 		zxnpu_wlan_mcu_dl(w, cmd + 7, zxnpu_wlan_commit);
 	} else if (!strncmp(cmd, "rx-init", 7)) {
@@ -912,7 +1151,7 @@ static ssize_t zxnpu_wlan_ctl_write(struct file *file, const char __user *ubuf,
 			zxnpu_wlan_append(w, "commit refused: set zxnpu_wlan.commit=1\n");
 		zxnpu_wlan_wfdma(w, commit);
 	} else {
-		zxnpu_wlan_append(w, "commands: probe | fw | plan | mcu | rings | mcuwin | mcu-send | mcu-cmd | mcu-dl | mcu-dl-regions | fw-start | fw-info | rx-init | mcu-recv | commit\n");
+		zxnpu_wlan_append(w, "commands: probe | fw | plan | mcu | rings | mcuwin | mcu-send | mcu-cmd | mcu-dl | mcu-dl-regions | fw-start | fw-info | fw-plan wm|wa | fw-dl wm|wa | rx-init | mcu-recv | commit\n");
 	}
 	mutex_unlock(&w->lock);
 	return count;

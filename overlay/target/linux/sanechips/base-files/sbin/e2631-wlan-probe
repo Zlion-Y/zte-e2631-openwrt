@@ -2,10 +2,15 @@
 # e2631-wlan-probe [--commit]
 #
 # Drives the vendor-native MT7916 bring-up surface exposed by zxnpu-wlan.
-# Without --commit it is read-only: CR/BAR dumps, WFDMA ring registers and
-# firmware headers. With --commit it also sends PatchSemGet, initialises the
-# RX event ring, drains it and (if a second argument is given) downloads the
-# ROM patch. Both module parameters must allow it:
+# Without --commit it is read-only: CR/BAR dumps, WFDMA ring registers,
+# firmware headers and the decoded region tables. With --commit it also
+# runs the download chain recovered from mt7916.ko:
+#
+#   ROM patch  -> PatchSemGet, AddressLen(0x04000000), FwScatter, Finish
+#   WM  image  -> per-region AddressLen + FwScatter, FwStart(option,override)
+#   WA  image  -> same with the band-1 mode bit and FwStart bit2
+#
+# Both module parameters must allow it:
 #
 #   insmod zxnpu-wlan enable=1 commit=1
 #
@@ -22,7 +27,6 @@ STAT=/proc/zx-csp-wlan/status
 
 mode=read
 [ "${1:-}" = "--commit" ] && mode=commit
-patch=${2:-}
 
 say() { printf '\n### %s\n' "$*"; }
 
@@ -35,9 +39,14 @@ done
 say "probe + rings + fw-info + mcuwin"
 for c in probe rings fw-info mcuwin; do
 	echo "$c" > "$CTL"
-	continue
 done
 sleep 1
+cat "$STAT"
+
+say "decoded firmware plans"
+for m in wm wa; do
+	echo "fw-plan $m" > "$CTL"
+done
 cat "$STAT"
 
 if [ "$mode" != commit ]; then
@@ -45,23 +54,25 @@ if [ "$mode" != commit ]; then
 	exit 0
 fi
 
-say "PatchSemGet (mcu-send)"
-echo "mcu-send" > "$CTL"
-
-say "RX event ring init + drain"
+say "RX event ring init"
 printf 'rx-init\n' > "$CTL"
+sleep 1
+
+say "ROM patch download (mcu-dl auto)"
+echo "mcu-dl zte/mt7916/mt7916_patch_e1_hdr.bin" > "$CTL"
 sleep 1
 printf 'mcu-recv\n' > "$CTL"
 sleep 1
 
-if [ -n "$patch" ]; then
-	say "download $patch"
-	echo "mcu-dl $patch" > "$CTL"
-	sleep 1
-	printf 'mcu-recv\n' > "$CTL"
-	say "FwStart"
-	echo "fw-start 0" > "$CTL"
-	sleep 1
-fi
+say "WM firmware download"
+echo "fw-dl wm" > "$CTL"
+sleep 1
+printf 'mcu-recv\n' > "$CTL"
+sleep 1
+
+say "WA firmware download"
+echo "fw-dl wa" > "$CTL"
+sleep 1
+printf 'mcu-recv\n' > "$CTL"
 
 cat "$STAT"
