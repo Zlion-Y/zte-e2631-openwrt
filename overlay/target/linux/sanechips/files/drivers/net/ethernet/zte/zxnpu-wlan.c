@@ -253,6 +253,11 @@ static void zxnpu_wlan_mcuwin(struct zxnpu_wlan *w)
 #define ZXNPU_MCU_BUF_SIZE	4096
 #define ZXNPU_MCU_TYPE_PATCH	0x10
 #define ZXNPU_MCU_CMD_PATCH	0x17
+#define ZXNPU_MCU_TYPE_SCATTER	0xEE
+#define ZXNPU_MCU_CMD_SCATTER	0x10
+#define ZXNPU_MCU_TYPE_FINISH	0x07
+#define ZXNPU_MCU_TYPE_ADDR	0x01
+#define ZXNPU_MCU_CHUNK		512
 
 static void zxnpu_mcu_fill_desc(struct zxnpu_wlan *w, u32 slot, u32 buf_dma,
 				u32 len)
@@ -329,6 +334,83 @@ static void zxnpu_wlan_mcu_send(struct zxnpu_wlan *w, bool commit)
 	msg[4] = ZXNPU_MCU_CMD_PATCH;
 	put_unaligned_le32(0, msg + 24);
 	zxnpu_mcu_submit(w, msg, sizeof(msg), commit, true);
+}
+
+/*
+ * mcu-dl-regions <file> <manifest>: the multi-region form of mcu-dl.
+ * The list is comma-separated regions: "addr len offset [flags]" in hex;
+ * for every line the driver sends
+ *   AddressLen(addr, len, 0x80000000 | flags)
+ * followed by ceil(len / 512) FwScatter commands built from
+ * file[offset .. offset+len). This is the shape load_fw_v1 uses; only
+ * the per-band region table (doc 14 6.14) is still missing, so the
+ * table can be supplied by hand until it is decoded.
+ */
+static void zxnpu_wlan_mcu_regions(struct zxnpu_wlan *w, const char *args,
+				   bool commit)
+{
+	const struct firmware *fw;
+	char name[128], manifest[128];
+	char *cur, *line;
+	int ret;
+
+	if (sscanf(args, "%127s %127s", name, manifest) != 2) {
+		zxnpu_wlan_append(w, "usage: mcu-dl-regions <file> <addr len off [flags],...>\n");
+		return;
+	}
+	ret = request_firmware_direct(&fw, name, &w->pdev->dev);
+	if (ret) {
+		zxnpu_wlan_append(w, "mcu-dl-regions: %s missing (%d)\n", name, ret);
+		return;
+	}
+	cur = manifest;
+	while ((line = strsep(&cur, ",")) && *line) {
+		unsigned long addr, len, off, flags = 0, done = 0;
+		u8 msg[24 + ZXNPU_MCU_CHUNK];
+
+		if (sscanf(line, "%lx %lx %lx %lx", &addr, &len, &off,
+			   &flags) < 3) {
+			zxnpu_wlan_append(w, "  bad region '%s'\n", line);
+			break;
+		}
+		if (off + len > fw->size) {
+			zxnpu_wlan_append(w, "  region beyond file: %s\n", line);
+			break;
+		}
+		zxnpu_wlan_append(w, "  region addr=%08lx len=%lu off=%lu flags=%lx\n",
+				  addr, len, off, flags);
+
+		memset(msg, 0, sizeof(msg));
+		put_unaligned_le16(12, msg + 0);
+		msg[2] = (addr == 0x04000000) ? 0x05 : 0x01;
+		msg[4] = ZXNPU_MCU_CMD_PATCH;
+		put_unaligned_le32(addr, msg + 24);
+		put_unaligned_le32(len, msg + 28);
+		put_unaligned_le32(0x80000000 | flags, msg + 32);
+		if (zxnpu_mcu_submit(w, msg, 36, commit, true))
+			break;
+		if (!commit)
+			continue;
+		msleep(10);
+
+		while (done < len) {
+			unsigned int chunk = min_t(unsigned long, ZXNPU_MCU_CHUNK,
+						   len - done);
+
+			memset(msg, 0, 24 + chunk);
+			put_unaligned_le16(chunk, msg + 0);
+			msg[2] = 0xEE;
+			msg[4] = 0x10;
+			memcpy(msg + 24, fw->data + off + done, chunk);
+			if (zxnpu_mcu_submit(w, msg, 24 + chunk, true, false))
+				goto out;
+			done += chunk;
+			usleep_range(500, 1000);
+		}
+		zxnpu_wlan_append(w, "  region done (%lu B)\n", done);
+	}
+out:
+	release_firmware(fw);
 }
 
 /*
@@ -547,11 +629,6 @@ static void zxnpu_wlan_mcu_recv(struct zxnpu_wlan *w)
  * The chunk size is 512 B to keep the on-stack message under the 1 KiB frame limit (the stock limit is 4096 - chip_cap[0x134]).
  * Everything is inert unless enable=1 and commit=1.
  */
-#define ZXNPU_MCU_TYPE_SCATTER	0xEE
-#define ZXNPU_MCU_CMD_SCATTER	0x10
-#define ZXNPU_MCU_TYPE_FINISH	0x07
-#define ZXNPU_MCU_TYPE_ADDR	0x01
-#define ZXNPU_MCU_CHUNK		512
 
 static void zxnpu_wlan_mcu_dl(struct zxnpu_wlan *w, const char *args, bool commit)
 {
@@ -815,6 +892,8 @@ static ssize_t zxnpu_wlan_ctl_write(struct file *file, const char __user *ubuf,
 		zxnpu_wlan_mcuwin(w);
 	} else if (!strncmp(cmd, "mcu-cmd ", 8)) {
 		zxnpu_wlan_mcu_cmd(w, cmd + 8, zxnpu_wlan_commit);
+	} else if (!strncmp(cmd, "mcu-dl-regions ", 15)) {
+		zxnpu_wlan_mcu_regions(w, cmd + 15, zxnpu_wlan_commit);
 	} else if (!strncmp(cmd, "fw-start ", 9)) {
 		zxnpu_wlan_fw_start(w, cmd + 9, zxnpu_wlan_commit);
 	} else if (!strncmp(cmd, "fw-info", 7)) {
@@ -833,7 +912,7 @@ static ssize_t zxnpu_wlan_ctl_write(struct file *file, const char __user *ubuf,
 			zxnpu_wlan_append(w, "commit refused: set zxnpu_wlan.commit=1\n");
 		zxnpu_wlan_wfdma(w, commit);
 	} else {
-		zxnpu_wlan_append(w, "commands: probe | fw | plan | mcu | rings | mcuwin | mcu-send | mcu-cmd | mcu-dl | fw-start | fw-info | rx-init | mcu-recv | commit\n");
+		zxnpu_wlan_append(w, "commands: probe | fw | plan | mcu | rings | mcuwin | mcu-send | mcu-cmd | mcu-dl | mcu-dl-regions | fw-start | fw-info | rx-init | mcu-recv | commit\n");
 	}
 	mutex_unlock(&w->lock);
 	return count;
