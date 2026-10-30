@@ -1207,6 +1207,95 @@ static void zxnpu_wlan_ack_expect(struct zxnpu_wlan *w)
 	zxnpu_wlan_append(w, "  match frames from `mcu-recv` against +2 eid; 0xEE/0xED = vendor specials\n");
 }
 
+/*
+ * L1 profile resolution (doc 40, R2): the vendor driver hardcodes
+ * /etc/wireless/mt7916/l1profile.dat.dbdc (mt7916.ko strings section, with
+ * "load l1profile succeed/failed" logs) and walks the INDEX<N>_* keys —
+ * per-band driver profile paths, init scripts, the EEPROM source
+ * (name/offset/size), interface naming and the SKU tables. We ship the same
+ * files under zte/mt7916/; this command resolves them the vendor way and
+ * prints the per-band bring-up plan. Read-only file parsing.
+ */
+static void zxnpu_wlan_l1profile(struct zxnpu_wlan *w)
+{
+	static const char * const keys[] = {
+		"INDEX0_profile_path", "INDEX0_init_script",
+		"INDEX0_EEPROM_offset", "INDEX0_EEPROM_size",
+		"INDEX0_EEPROM_name", "INDEX0_main_ifname",
+		"INDEX0_ext_ifname", "INDEX0_single_sku_path",
+		"INDEX0_bf_sku_path",
+	};
+	static const char * const bandfw[2] = {
+		"zte/mt7916/mt7916.dbdc.b0.dat",
+		"zte/mt7916/mt7916.dbdc.b1.dat",
+	};
+	const struct firmware *fw;
+	const u8 *p, *end;
+	int i, b, ret;
+
+	ret = request_firmware_direct(&fw, "zte/mt7916/l1profile.dat.dbdc",
+				      &w->pdev->dev);
+	if (ret) {
+		zxnpu_wlan_append(w, "l1profile: missing (%d)@N@", ret);
+		return;
+	}
+	zxnpu_wlan_append(w, "l1profile: %zu bytes (INDEX0 MT7916 dbdc)@N@",
+			  fw->size);
+	p = fw->data;
+	end = fw->data + fw->size;
+	while (p < end) {
+		const u8 *nl = memchr(p, '\n', end - p);
+		size_t len = nl ? (size_t)(nl - p) : (size_t)(end - p);
+
+		if (len && p[0] != '#') {
+			for (i = 0; i < ARRAY_SIZE(keys); i++) {
+				size_t klen = strlen(keys[i]);
+
+				if (len > klen + 1 &&
+				    !strncmp(p, keys[i], klen) &&
+				    p[klen] == '=')
+					zxnpu_wlan_append(w, "  %.*s@N@",
+							  (int)len, p);
+			}
+		}
+		p += len + (nl ? 1 : 0);
+	}
+	release_firmware(fw);
+
+	/* The per-band driver profiles profile_path points at; shipped
+	 * alongside the l1 profile. Report their shape (line/key counts) —
+	 * the operational defaults they carry are a P5 wlanmgr input.
+	 */
+	for (b = 0; b < 2; b++) {
+		const struct firmware *pf;
+		int lines = 0, kvs = 0;
+
+		ret = request_firmware_direct(&pf, bandfw[b], &w->pdev->dev);
+		if (ret) {
+			zxnpu_wlan_append(w, "  band%d profile: missing (%d)@N@",
+					  b, ret);
+			continue;
+		}
+		p = pf->data;
+		end = pf->data + pf->size;
+		while (p < end) {
+			const u8 *nl = memchr(p, '\n', end - p);
+			size_t len = nl ? (size_t)(nl - p) : (size_t)(end - p);
+
+			if (len && p[0] != '#') {
+				lines++;
+				if (memchr(p, '=', len))
+					kvs++;
+			}
+			p += len + (nl ? 1 : 0);
+		}
+		zxnpu_wlan_append(w, "  band%d profile: %zu bytes, %d lines, %d keys@N@",
+				  b, pf->size, lines, kvs);
+		release_firmware(pf);
+	}
+	zxnpu_wlan_append(w, "  note: init_script (mtwifi.lua) is vendor userspace; native wlanmgr replaces it in P5@N@");
+}
+
 static int zxnpu_wlan_status_show(struct seq_file *s, void *unused)
 {
 	struct zxnpu_wlan *w = zxnpu_wlan_singleton;
@@ -1251,6 +1340,8 @@ static ssize_t zxnpu_wlan_ctl_write(struct file *file, const char __user *ubuf,
 		zxnpu_wlan_wfdma(w, false);
 	} else if (!strncmp(cmd, "mcu", 3)) {
 		zxnpu_wlan_mcu_plan(w);
+	} else if (!strncmp(cmd, "l1profile", 9)) {
+		zxnpu_wlan_l1profile(w);
 	} else if (!strncmp(cmd, "ack-expect", 10)) {
 		zxnpu_wlan_ack_expect(w);
 	} else if (!strncmp(cmd, "rings", 5)) {
@@ -1275,7 +1366,7 @@ static ssize_t zxnpu_wlan_ctl_write(struct file *file, const char __user *ubuf,
 			zxnpu_wlan_append(w, "commit refused: set zxnpu_wlan.commit=1\n");
 		zxnpu_wlan_wfdma(w, commit);
 	} else {
-		zxnpu_wlan_append(w, "commands: ack-expect | probe | fw | plan | mcu | rings | mcuwin | mcu-send | mcu-cmd | mcu-dl | mcu-dl-regions | fw-start | fw-info | fw-state | fw-plan wm|wa | fw-dl wm|wa | rx-init | mcu-recv | commit\n");
+		zxnpu_wlan_append(w, "commands: l1profile | ack-expect | probe | fw | plan | mcu | rings | mcuwin | mcu-send | mcu-cmd | mcu-dl | mcu-dl-regions | fw-start | fw-info | fw-state | fw-plan wm|wa | fw-dl wm|wa | rx-init | mcu-recv | commit\n");
 	}
 	mutex_unlock(&w->lock);
 	return count;

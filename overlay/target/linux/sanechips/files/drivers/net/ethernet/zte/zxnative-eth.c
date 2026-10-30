@@ -17,6 +17,7 @@
 #include <linux/delay.h>
 #include <linux/dma-mapping.h>
 #include <linux/etherdevice.h>
+#include <linux/ethtool.h>
 #include <linux/hrtimer.h>
 #include <linux/interrupt.h>
 #include <linux/io.h>
@@ -30,6 +31,7 @@
 #include <linux/phylink.h>
 #include <linux/platform_device.h>
 #include <linux/rtnetlink.h>
+#include <net/flow_offload.h>
 
 #include "zx279128s-eth.h"
 
@@ -809,6 +811,89 @@ static int zxna_ioctl(struct net_device *netdev, struct ifreq *ifr, int cmd)
 	return phylink_mii_ioctl(priv->phylink, ifr, cmd);
 }
 
+/* ---- PPE offload hook (R3 skeleton, doc 38 §2) ----------------------- */
+/*
+ * The flow-offload entry point for the native data plane. The PPE
+ * programming it will drive is pinned by evidence: the 45-byte CLA key
+ * placement with the two CRC32 banks (docs 12/16 §7), a 127-flow
+ * rewrite-index capacity with -ENOSPC fallback to the CPU path, and the
+ * vendor trap-DMAC discipline (never clear the IPv6 trap half - doc 16
+ * §4.2; the vendor's own v6 L3 forwarding is pure CPU at 143 Mbit/s, so
+ * the skeleton offloads IPv4 only).
+ *
+ * Until the FWDL chain passes device validation (checklist 36 §2) this
+ * hook refuses everything: with zxnative_eth.offload=0 (default) it
+ * returns -EOPNOTSUPP before looking at the request; with offload=1 it
+ * prints the programming plan and still refuses - the classifier is not
+ * touched until the real flow programming lands in a later round.
+ */
+static bool zxnative_offload;
+module_param_named(offload, zxnative_offload, bool, 0444);
+MODULE_PARM_DESC(offload, "report the PPE flow-offload plan (skeleton; hardware programming not wired yet)");
+
+static int zxna_setup_tc(struct net_device *netdev, enum tc_setup_type type,
+			 void *type_data)
+{
+	struct flow_cls_offload *cls = type_data;
+
+	if (type != TC_SETUP_FT)
+		return -EOPNOTSUPP;
+	if (!zxnative_offload) {
+		netdev_dbg(netdev, "ppe offload refused: zxnative_eth.offload=0\n");
+		return -EOPNOTSUPP;
+	}
+	netdev_info(netdev,
+		    "ppe offload plan (skeleton): cookie=%lu cmd=%u - IPv4 only, 45B key placement, 2 CRC32 banks, 127-flow rewrite cap; hardware programming not wired yet\n",
+		    cls->cookie, cls->command);
+	return -EOPNOTSUPP;
+}
+
+/* ---- ethtool --------------------------------------------------------- */
+
+static void zxna_get_drvinfo(struct net_device *netdev,
+			     struct ethtool_drvinfo *info)
+{
+	strscpy(info->driver, "zxnative-eth", sizeof(info->driver));
+	strscpy(info->bus_info, dev_name(netdev->dev.parent),
+		sizeof(info->bus_info));
+}
+
+static const char zxna_stats_strings[][ETH_GSTRING_LEN] = {
+	"tx_pending",
+	"tx_done_excess",
+};
+
+static void zxna_get_strings(struct net_device *netdev, u32 sset, u8 *data)
+{
+	if (sset != ETH_SS_STATS)
+		return;
+	memcpy(data, zxna_stats_strings, sizeof(zxna_stats_strings));
+}
+
+static int zxna_get_sset_count(struct net_device *netdev, int sset)
+{
+	if (sset != ETH_SS_STATS)
+		return -EOPNOTSUPP;
+	return ARRAY_SIZE(zxna_stats_strings);
+}
+
+static void zxna_get_ethtool_stats(struct net_device *netdev,
+				   struct ethtool_stats *stats, u64 *data)
+{
+	struct zx_eth_priv *priv = netdev_priv(netdev);
+	struct zx_eth_adapter *a = priv->adapter;
+
+	data[0] = a->tx_pending;
+	data[1] = a->tx_done_excess;
+}
+
+static const struct ethtool_ops zxna_ethtool_ops = {
+	.get_drvinfo		= zxna_get_drvinfo,
+	.get_strings		= zxna_get_strings,
+	.get_sset_count		= zxna_get_sset_count,
+	.get_ethtool_stats	= zxna_get_ethtool_stats,
+};
+
 static const struct net_device_ops zxna_netdev_ops = {
 	.ndo_open		= zxna_open,
 	.ndo_stop		= zxna_stop,
@@ -816,6 +901,7 @@ static const struct net_device_ops zxna_netdev_ops = {
 	.ndo_set_mac_address	= zxna_set_mac,
 	.ndo_validate_addr	= eth_validate_addr,
 	.ndo_eth_ioctl		= zxna_ioctl,
+	.ndo_setup_tc		= zxna_setup_tc,
 };
 
 /* ---- probe/remove --------------------------------------------------- */
@@ -905,6 +991,7 @@ static int zxna_probe(struct platform_device *pdev)
 			else
 				eth_hw_addr_random(netdev);
 			netdev->netdev_ops = &zxna_netdev_ops;
+			netdev->ethtool_ops = &zxna_ethtool_ops;
 			netdev->min_mtu = 68;
 			netdev->max_mtu = 1500;
 			priv = netdev_priv(netdev);
