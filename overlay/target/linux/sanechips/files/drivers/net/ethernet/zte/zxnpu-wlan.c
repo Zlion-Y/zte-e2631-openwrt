@@ -742,25 +742,39 @@ static void zxnpu_wlan_data_recv(struct zxnpu_wlan *w)
 }
 
 /*
- * TX path plan (doc 43, R4b decode): the vendor TX architecture is now
- * mapped — write_tmac_info_offload_pkt (0x1B05E8) builds a ~54-byte TMAC
- * on the stack field by field, the skb gets it pushed and is queued to the
- * data ring, and pci_kick_out_data_tx (0x1E117C) is a pure doorbell: one
- * hif_io_write32 of the CPU_IDX into the ring block's +8 register (the
- * same BASE/CNT/CPU_IDX/DMA_IDX layout doc 14 §6.5.3 verified). What is
- * NOT decoded yet is the TMAC's per-byte semantics — ~50 strb sites from
- * ~15 value sources (R4c task). This command prints the plan and refuses
- * to transmit: the TX ring stays empty until the TMAC template is traced.
+ * TX path (doc 43 R4b + doc 44 R4c decode): the vendor TX architecture is
+ * mapped — the TMAC is a 52-byte block built by memzero + byte stores, the
+ * skb gets it pushed and is queued to the data ring, and
+ * pci_kick_out_data_tx (0x1E117C) is a pure doorbell: one hif_io_write32
+ * of the CPU_IDX into the ring block's +8 register (the same
+ * BASE/CNT/CPU_IDX/DMA_IDX layout doc 14 §6.5.3 verified).
+ *
+ * R4c traced the 52-byte layout with value sources: +4/+5 = u16 at
+ * sta+3552, +7 = 1, +24 = arg5 (u32), +28 = 0x18, +31/+40 = signed
+ * sta+14, +45 = sta+41, +48 = sta+3528 (typed, compared against 2),
+ * +52 = sta+3420, +53 = 1; zeros at +6/+9/+11/+12/+15/+17/+20/+21.
+ * write_tmac_info_offload_pkt (0x1B05E8) is the OFFLOAD/mgmt path
+ * (HcGetBcnQueueIdx / HcGetMgmtQueueIdx / HcGetBandByWdev /
+ * asic_write_tmac_info_fixed_rate for fixed-rate frames); the DATA
+ * TMAC builder is the asic_write_tmac_info_fixed_rate family
+ * (0x142404) — byte semantics still pending (R4d), so this prints the
+ * template and refuses to transmit.
  */
 static void zxnpu_wlan_data_tx(struct zxnpu_wlan *w)
 {
-	zxnpu_wlan_append(w, "data-tx: plan printer, no transmission (TXD not decoded)@N@");
-	zxnpu_wlan_append(w, "  chain: write_tmac_info_offload_pkt(0x1B05E8) builds ~54B TMAC@N@");
-	zxnpu_wlan_append(w, "  -> skb push -> data ring (qid18 BAND0 %08x)@N@",
+	zxnpu_wlan_append(w, "data-tx: TMAC template printer, no transmission@N@");
+	zxnpu_wlan_append(w, "  chain: TMAC(52B, memzero+fill) -> skb push -> data ring@N@");
+	zxnpu_wlan_append(w, "  (qid18 BAND0 %08x) -> pci_kick_out_data_tx(0x1E117C)@N@",
 			  ZXNPU_DATA_TX_REG);
-	zxnpu_wlan_append(w, "  -> pci_kick_out_data_tx(0x1E117C): CPU_IDX write to +8@N@");
-	zxnpu_wlan_append(w, "  TMAC byte semantics: R4c (R4b), ~50 strb sites from ~15 sources@N@");
-	zxnpu_wlan_append(w, "  until traced, the TX ring stays empty (data-init keeps it so)@N@");
+	zxnpu_wlan_append(w, "  kick = CPU_IDX write to ring block +8 (doc 14 §6.5.3)@N@");
+	zxnpu_wlan_append(w, "  TMAC layout (offset -> source, R4c trace):@N@");
+	zxnpu_wlan_append(w, "    +4/5 u16 sta+3552 | +7 =1 | +24 u32 arg5 | +28 =0x18@N@");
+	zxnpu_wlan_append(w, "    +31/+40 s8 sta+14 | +45 sta+41 | +48 sta+3528 (typed)@N@");
+	zxnpu_wlan_append(w, "    +52 sta+3420 | +53 =1 | zeros +6/+9/+11/+12/+15/+17/+20/+21@N@");
+	zxnpu_wlan_append(w, "  offload/mgmt path: HcGetMgmtQueueIdx/BcnQueueIdx +@N@");
+	zxnpu_wlan_append(w, "  asic_write_tmac_info_fixed_rate(0x142404) = data TMAC family (R4d)@N@");
+	zxnpu_wlan_append(w, "  sta+8 cap-word bits 16..31 = the layer_cap bit mask family@N@");
+	zxnpu_wlan_append(w, "  (same semantics as vendor npu_cap/zwzzrl layer_cap tables)@N@");
 }
 
 /* The ring-to-VAP plan: names from the l1profile main_ifname pair, queue
