@@ -55,6 +55,16 @@
  * double-added base lands outside the 4 MiB PP window and the access oopses.
  * "sbrg h" is pure computation plus one register read; every table access
  * stays behind enable=1.
+ *
+ * Verification status (docs/npu/16 §7): hash algorithm, CRC table, 34-byte
+ * reversed key path, slot formula and the reg-29 selector were verified
+ * instruction-by-instruction against the vendor tm.ko binary (sbrg_hash
+ * 0xc4a0, sbrg_add_ipv6table 0xefec, sbrg_get_table_sel 0xad48) — dual
+ * source with zwzzrl's device evidence. Scope note: vendor sbrg_hash has
+ * three key shapes (types 76/268/60); this code implements type 268 only,
+ * which is the shape their MLD-table work targets. The 48-byte entry bit
+ * layout rests on their device write-read-back and is kept behind enable=1
+ * until independently confirmed.
  */
 
 #include <linux/bits.h>
