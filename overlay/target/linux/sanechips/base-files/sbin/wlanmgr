@@ -1,15 +1,11 @@
 #!/bin/sh
 # wlanmgr: thin CLI over /proc/zx-csp-wlan/ctl (native P5 skeleton).
-# Read-only subcommands print driver state; anything that writes registers
-# must go through `wlanmgr commit <cmd>` so it is deliberate.
-CTL=/proc/zx-csp-wlan/ctl
+# Read-only subcommands only print; writing registers requires the explicit
+# `wlanmgr commit <cmd>` form (checklist 36 discipline: one variable at a
+# time). WLANMGR_CTL overrides the control path for offline selftests.
 
-usage() {
-	echo "usage: wlanmgr <command>"
-	echo "  read-only: status | expect | l1p | rings | plane | recv | fwstate | probe"
-	echo "  gated:     wlanmgr commit <cmd>   (forwards to ctl as-is)"
-	echo "  full command list: wlanmgr help"
-}
+CTL=${WLANMGR_CTL:-/proc/zx-csp-wlan/ctl}
+SYS=${WLANMGR_SYS:-/sys}
 
 run() {
 	echo "wlanmgr: $1" >&2
@@ -17,10 +13,17 @@ run() {
 	cat "$CTL"
 }
 
+need_commit() {
+	if [ ! -e "$SYS/module/zxnpu_wlan/parameters/commit" ] || \
+	   [ "$(cat "$SYS/module/zxnpu_wlan/parameters/commit")" != "1" ]; then
+		echo "refused: zxnpu_wlan.commit=1 required for '$1'" >&2
+		return 1
+	fi
+	return 0
+}
+
 case "$1" in
-	status)  cat "$CTL" ;;
-	help)    run "commands" ;;
-	probe)   run "probe" ;;
+	status)  run "status" ;;
 	expect)  run "ack-expect" ;;
 	l1p)     run "l1profile" ;;
 	rings)   run "rings" ;;
@@ -28,6 +31,39 @@ case "$1" in
 	recv)    run "mcu-recv" ;;
 	drecv)   run "data-recv" ;;
 	fwstate) run "fw-state" ;;
+	probe)   run "probe" ;;
+	help)    run "commands" ;;
 	commit)  shift; run "$*" ;;
-	*)       usage ;;
+	step1)
+		echo "== checklist 36 step 1: read-only surface =="
+		run "probe"    # expect: vendor=14c3 device=790a, BARs, FW CRC
+		run "rings"    # expect: TX qid16..20 / RX qid0..5 readable, no crash
+		run "fw-state" # expect: MT_TOP_MISC state=1 (firmware download)
+		;;
+	step2)
+		need_commit "step2" || exit 1
+		echo "== checklist 36 step 2: FWDL chain (commit=1) =="
+		run "mcu-dl zte/mt7916/mt7916_patch_e1_hdr.bin"
+		run "fw-state"
+		run "fw-dl wm"
+		run "fw-dl wa"
+		run "fw-state" # expect: state=7 (WM+WA ready)
+		;;
+	step3)
+		need_commit "step3" || exit 1
+		echo "== checklist 36 step 3: data plane =="
+		run "data-init"
+		run "data-recv"
+		run "dataplane"
+		;;
+	selftest)
+		# offline verification: print the ctl command each subcommand sends
+		echo "status:status expect:ack-expect l1p:l1profile rings:rings"
+		echo "plane:dataplane recv:mcu-recv drecv:data-recv fwstate:fw-state"
+		echo "probe:probe step2:mcu-dl step3:data-init"
+		;;
+	*)	echo "usage: wlanmgr <status|expect|l1p|rings|plane|recv|drecv|fwstate|probe|help|selftest>"
+		echo "       wlanmgr step1|step2|step3   (checklist 36 sequences)"
+		echo "       wlanmgr commit <cmd>        (gated register writes)"
+		;;
 esac
