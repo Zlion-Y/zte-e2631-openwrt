@@ -13,6 +13,7 @@
 #include <linux/crc32.h>
 #include <linux/delay.h>
 #include <linux/dma-mapping.h>
+#include <linux/etherdevice.h>
 #include <linux/iopoll.h>
 #include <linux/firmware.h>
 #include <linux/io.h>
@@ -21,9 +22,11 @@
 #include <linux/module.h>
 #include <linux/moduleparam.h>
 #include <linux/mutex.h>
+#include <linux/netdevice.h>
 #include <linux/pci.h>
 #include <linux/proc_fs.h>
 #include <linux/seq_file.h>
+#include <linux/skbuff.h>
 #include <linux/string.h>
 #include <linux/unaligned.h>
 
@@ -49,6 +52,9 @@ MODULE_PARM_DESC(enable, "probe the 790a companion function and audit firmware f
 static bool zxnpu_wlan_commit;
 module_param_named(commit, zxnpu_wlan_commit, bool, 0644);
 MODULE_PARM_DESC(commit, "allow the WFDMA init plan to actually write registers");
+
+#define ZXNPU_VAP_MAX		2
+struct zxnpu_vap;
 
 struct zxnpu_wlan {
 	struct pci_dev *pdev;
@@ -77,6 +83,7 @@ struct zxnpu_wlan {
 	void *drx_buf;		/* 64 x 1700 buffers with 16B RXD */
 	dma_addr_t drx_buf_dma;
 	u32 drx_cidx;
+	struct zxnpu_vap *vaps[ZXNPU_VAP_MAX];
 	char status[4096];
 };
 
@@ -802,6 +809,128 @@ static void zxnpu_wlan_dataplane(struct zxnpu_wlan *w)
 	zxnpu_wlan_append(w, "  depth: %u, buf %u B, NAPI attaches in P5\n",
 			  ZXNPU_DATA_DEPTH, ZXNPU_DATA_BUF_SIZE);
 }
+
+/*
+ * ---- VAP netdev skeleton (P5 pre-work, doc 38 R4) ---------------------
+ *
+ * Two VAPs named after the l1profile main_ifname pair (wlan0 = BAND0,
+ * wlan5g0 = BAND1), created only with zxnpu_wlan.vap=1 so the default
+ * firmware changes nothing. Each VAP carries a NAPI on the shared data
+ * RX ring (qid1): the poll walks the ring the same way `data-recv` does
+ * and, for now, counts and frees — delivering frames to the stack needs
+ * the 802.11->802.3 conversion and the wcid->VAP mapping that only make
+ * sense once the firmware is up (fw-state=7) and BSS exists (P5).
+ *
+ * TX is stubbed: the connac2 TXD template is decoded (docs 44/45) but a
+ * real frame needs wcid/encryption state, so zxvap_xmit counts and drops.
+ * Carrier stays off until the FWDL chain reports fw-state=7 (P5 hook).
+ */
+
+
+struct zxnpu_vap {
+	struct net_device *ndev;
+	struct zxnpu_wlan *w;
+	struct napi_struct napi;
+	int band;
+	u64 rx_frames, tx_frames, tx_dropped;
+};
+
+static bool zxnpu_wlan_vap;
+module_param_named(vap, zxnpu_wlan_vap, bool, 0444);
+MODULE_PARM_DESC(vap, "register the two VAP netdevs (wlan0/wlan5g0) at probe");
+
+static int zxvap_open(struct net_device *ndev)
+{
+	/* carrier comes up only when the firmware reports fw-state=7 */
+	netif_carrier_off(ndev);
+	return 0;
+}
+
+static int zxvap_stop(struct net_device *ndev)
+{
+	return 0;
+}
+
+static netdev_tx_t zxvap_xmit(struct sk_buff *skb, struct net_device *ndev)
+{
+	struct zxnpu_vap *vap = netdev_priv(ndev);
+
+	vap->tx_dropped++;
+	dev_kfree_skb(skb);
+	return NETDEV_TX_OK;
+}
+
+static int zxvap_poll(struct napi_struct *napi, int budget)
+{
+	struct zxnpu_vap *vap = container_of(napi, struct zxnpu_vap, napi);
+	struct zxnpu_wlan *w = vap->w;
+	u32 didx, cidx, n;
+	int work = 0;
+
+	if (!w->drx_ring || !w->drx_buf)
+		return 0;
+	didx = zxnpu_cr_read(w, ZXNPU_DATA_RX_REG + 12) % ZXNPU_DATA_DEPTH;
+	cidx = w->drx_cidx % ZXNPU_DATA_DEPTH;
+	n = (didx + ZXNPU_DATA_DEPTH - cidx) % ZXNPU_DATA_DEPTH;
+	while (work < budget && n--) {
+		u32 slot = (cidx + work) % ZXNPU_DATA_DEPTH;
+		u8 *d = (u8 *)w->drx_ring + slot * ZXNPU_MCU_DESC_SIZE;
+
+		/* frame content is 802.11 (no conversion wired yet): count
+		 * and resubmit the buffer; delivery lands in P5. */
+		vap->rx_frames++;
+		memset(d, 0, ZXNPU_MCU_DESC_SIZE);
+		work++;
+	}
+	cidx = (cidx + work) % ZXNPU_DATA_DEPTH;
+	w->drx_cidx = cidx;
+	if (zxnpu_wlan_commit && work)
+		zxnpu_cr_write(w, ZXNPU_DATA_RX_REG + 8, cidx);
+	if (work < budget)
+		napi_complete_done(napi, work);
+	return work;
+}
+
+static const struct net_device_ops zxvap_netdev_ops = {
+	.ndo_open		= zxvap_open,
+	.ndo_stop		= zxvap_stop,
+	.ndo_start_xmit		= zxvap_xmit,
+	.ndo_validate_addr	= eth_validate_addr,
+};
+
+static void zxnpu_wlan_vaps_init(struct zxnpu_wlan *w)
+{
+	static const char * const names[ZXNPU_VAP_MAX] = { "wlan0", "wlan5g0" };
+	int i;
+
+	if (!zxnpu_wlan_vap)
+		return;
+	for (i = 0; i < ZXNPU_VAP_MAX; i++) {
+		struct zxnpu_vap *vap;
+		struct net_device *ndev = alloc_netdev(sizeof(*vap), names[i],
+						       NET_NAME_UNKNOWN,
+						       ether_setup);
+
+		if (!ndev)
+			continue;
+		vap = netdev_priv(ndev);
+		vap->w = w;
+		vap->band = i;
+		vap->ndev = ndev;
+		SET_NETDEV_DEV(ndev, &w->pdev->dev);
+		ndev->netdev_ops = &zxvap_netdev_ops;
+		eth_hw_addr_random(ndev);
+		netif_napi_add(ndev, &vap->napi, zxvap_poll);
+		netif_carrier_off(ndev);
+		if (register_netdev(ndev)) {
+			netif_napi_del(&vap->napi);
+			free_netdev(ndev);
+			continue;
+		}
+		w->vaps[i] = vap;
+	}
+}
+
 
 static void zxnpu_wlan_rx_init(struct zxnpu_wlan *w, bool commit)
 {
@@ -1645,7 +1774,9 @@ static int zxnpu_wlan_probe(struct pci_dev *pdev,
 	w->proc = dir;
 	zxnpu_wlan_singleton = w;
 	pci_set_drvdata(pdev, w);
-	dev_info(&pdev->dev, "G3.2 ready (commit=%d)\n", zxnpu_wlan_commit);
+	zxnpu_wlan_vaps_init(w);
+	dev_info(&pdev->dev, "G3.2 ready (commit=%d vaps=%d)\n",
+		 zxnpu_wlan_commit, zxnpu_wlan_vap);
 	return 0;
 }
 
