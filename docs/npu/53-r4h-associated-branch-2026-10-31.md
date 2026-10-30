@@ -38,3 +38,19 @@ encryption mode）。
 - R4i：host 密钥管理路径（SetKey 族 → ctx+8 镜像填充）追溯；
 - P5 落地时 wcid 分配器 + ctx 维护按此布局实现；
 - L2-L6 真机闭环等用户解除禁刷（清单 36 已脚本化：wlanmgr step1/2/3）。
+
+## 5. R4i 增补（同日）：ctx 写入者家族定位
+
+**`ApUpdateCapabilityAndErpIe`**（对象前部 0x7xx-0xa6c 区）= per-STA ctx
+的写入者家族：`HcGetMaxStaNum` 循环遍历 wcid（`mla 0x1C50×wcid + base`
+同款地址算式）更新能力字段；ctx+0 魔数 0x00040001 = 能力字
+（0x0004/0x0001 位组合，`orr r5,#4` 之类的位操作族在此维护）；区域还
+含 slottime/ERP 更新与 per-band 交互（HW_SET_SLOTTIME、movt 189=0xBD
+的 band 块引用）。
+
+- 密钥材质路径已定性：fill_key_install_cmd_v2 → MCU 命令（固件侧持有
+  真密钥）；host ctx 是能力/状态镜像；
+- R4j（可选深化）：能力位 0x0004/0x0001 的逐位命名 + SetKey 族与 ctx
+  镜像的同步点；
+- P5 落地：wcid 分配器 + ctx 维护按此布局（状态魔数 + 能力字 + 密钥
+  镜像指针）。
