@@ -565,6 +565,7 @@ assert "npu CSP_WLAN has the experimental MCU ring sender" grep -q 'mcu-send Pat
 assert "npu CSP_WLAN has the RX/event ring" grep -q 'rx-init ring0' "$TREE/target/linux/sanechips/files/drivers/net/ethernet/zte/zxnpu-wlan.c"
 assert "npu CSP_WLAN has the raw MCU command console" grep -q 'usage: mcu-cmd' "$TREE/target/linux/sanechips/files/drivers/net/ethernet/zte/zxnpu-wlan.c"
 assert "npu CSP_WLAN parses patch headers and fw trailers" grep -q 'auto: patch header' "$TREE/target/linux/sanechips/files/drivers/net/ethernet/zte/zxnpu-wlan.c"
+assert "npu CSP_WLAN can issue MtCmdFwStartReq" grep -q 'fw-start <option-hex>' "$TREE/target/linux/sanechips/files/drivers/net/ethernet/zte/zxnpu-wlan.c"
 assert "overlay ppe.c carries the IPv6 trap fix" \
 	grep -q 'v6 = READ_ONCE(adapter->ppe_active) || !sw' \
 	"$TREE/target/linux/sanechips/files/drivers/net/ethernet/zte/zx279128s-ppe.c"

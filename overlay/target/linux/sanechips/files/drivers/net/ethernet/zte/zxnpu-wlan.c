@@ -331,6 +331,32 @@ static void zxnpu_wlan_mcu_send(struct zxnpu_wlan *w, bool commit)
 	zxnpu_mcu_submit(w, msg, sizeof(msg), commit, true);
 }
 
+/*
+ * fw-start <option-hex> [override-hex]: MtCmdFwStartReq (mt7916.ko
+ * 0x1CC1D0) is type 0x02 / cmd 0x17 with a two-word payload
+ * {option, override_addr}. load_fw_v1 sets bit0 of option when a region
+ * carried the override flag (feature_set 0x20) and bit2 for band 1.
+ */
+static void zxnpu_wlan_fw_start(struct zxnpu_wlan *w, const char *args, bool commit)
+{
+	u8 msg[24 + 8];
+	unsigned long option = 0, override = 0;
+
+	if (sscanf(args, "%lx %lx", &option, &override) < 1) {
+		zxnpu_wlan_append(w, "usage: fw-start <option-hex> [override-hex]\n");
+		return;
+	}
+	memset(msg, 0, sizeof(msg));
+	put_unaligned_le16(8, msg + 0);
+	msg[2] = 0x02;
+	msg[4] = ZXNPU_MCU_CMD_PATCH;
+	put_unaligned_le32(option, msg + 24);
+	put_unaligned_le32(override, msg + 28);
+	zxnpu_wlan_append(w, "fw-start option=%08lx override=%08lx\n",
+			  option, override);
+	zxnpu_mcu_submit(w, msg, 32, commit, true);
+}
+
 /* fw-info [file]: patch header fields and MTK firmware trailer. */
 static void zxnpu_wlan_fw_info(struct zxnpu_wlan *w, const char *args)
 {
@@ -789,6 +815,8 @@ static ssize_t zxnpu_wlan_ctl_write(struct file *file, const char __user *ubuf,
 		zxnpu_wlan_mcuwin(w);
 	} else if (!strncmp(cmd, "mcu-cmd ", 8)) {
 		zxnpu_wlan_mcu_cmd(w, cmd + 8, zxnpu_wlan_commit);
+	} else if (!strncmp(cmd, "fw-start ", 9)) {
+		zxnpu_wlan_fw_start(w, cmd + 9, zxnpu_wlan_commit);
 	} else if (!strncmp(cmd, "fw-info", 7)) {
 		zxnpu_wlan_fw_info(w, cmd + 7);
 	} else if (!strncmp(cmd, "mcu-dl ", 7)) {
@@ -805,7 +833,7 @@ static ssize_t zxnpu_wlan_ctl_write(struct file *file, const char __user *ubuf,
 			zxnpu_wlan_append(w, "commit refused: set zxnpu_wlan.commit=1\n");
 		zxnpu_wlan_wfdma(w, commit);
 	} else {
-		zxnpu_wlan_append(w, "commands: probe | fw | plan | mcu | rings | mcuwin | mcu-send | mcu-cmd | mcu-dl | fw-info | rx-init | mcu-recv | commit\n");
+		zxnpu_wlan_append(w, "commands: probe | fw | plan | mcu | rings | mcuwin | mcu-send | mcu-cmd | mcu-dl | fw-start | fw-info | rx-init | mcu-recv | commit\n");
 	}
 	mutex_unlock(&w->lock);
 	return count;
