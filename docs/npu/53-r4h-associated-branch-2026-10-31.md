@@ -65,3 +65,19 @@ mbss/BssCoex 字符串；另一组 0x1cc0 = TMAC 块）——objdump 重定位�
 **决策关闭 R4j**：逐位命名是 debug 装饰，不影响 TXD 构造正确性；真机
 首帧对照（清单 36 后）比静态猜名更可靠。SetKey 同步点已定性
 （fill_key_install_cmd_v2 → MCU 命令；host ctx = 镜像）。
+
+## 7. R4i 续（同日）：密钥安装命令结构（fill_key_install_cmd_v2 链）
+
+`fill_key_install_cmd_v2`(0x1DC644) → `fill_wtbl_key_info_struc_v2`
+(0x11EDCC)：
+
+- **命令头**（区别于 Andes 24B 头）：byte0 = **0x11（WTBL key 命令）**、
+  byte1 = 0、+2（u16）= 总长；长度按密码类型伸缩：
+  - 基本 8B（无 .30/.480/.1536 位）→ 44B（WEP/TKIP 类）→ +36（PMF）
+  → 再 +36（第二密钥位 0x600）；
+- **密钥信息字段**：+4/+5/+8/+9/+10/+11 = 密码类型相关字段
+  （cipher id / key 索引 / 长度），模板 +96/+163 = 密钥材质来源；
+- os_alloc_mem(r7) → 填充 → 上层继续封装为 MCU 命令。
+
+完整字段矩阵（cipher id 枚举、key material 偏移）= R4k；真机首帧对照
+后按需补全（与清单 36 的关联步骤同步）。
