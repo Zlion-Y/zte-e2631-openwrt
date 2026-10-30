@@ -781,6 +781,8 @@ static void zxnpu_wlan_data_tx(struct zxnpu_wlan *w)
 	zxnpu_wlan_append(w, "  +5 rate consts 0x1C50/0xBAB0; w2/w3 = R4e@N@");
 	zxnpu_wlan_append(w, "  sta+8 cap-word bits 16..31 = the layer_cap bit mask family@N@");
 	zxnpu_wlan_append(w, "  (same semantics as vendor npu_cap/zwzzrl layer_cap tables)@N@");
+	zxnpu_wlan_append(w, "  R4f: dw1 b13=+465 flag; rate word=mtf_tx_rate_to_tmi_rate lsl16;@N@");
+	zxnpu_wlan_append(w, "  +28: +30 lsl11/+34 lsl16/+33 lsl20 - TMAC->TXD map closed (doc 45 §6)@N@");
 }
 
 /* The ring-to-VAP plan: names from the l1profile main_ifname pair, queue
