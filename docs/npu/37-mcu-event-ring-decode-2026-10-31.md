@@ -48,6 +48,29 @@ AndesSendCmdMsg 入队的命令也是在这里真正发出的（doc 14 §6.5.1�
 ack 匹配点（completion 唤醒）。arch_ops 表的 PCI 侧填充者 = 下一站
 （查 arch_ops 注册函数 → 槽 448 的 PCI 实现 → 事件头字段）。
 
+## 2.2 事件头字段 + FWDL rsp 处理器（2026-10-31 第三轮解码）
+
+arch_ops[448] 的 PCI 实现 = **`mtf_rx_event_handler`(0x1B5E54)**
+（mt7916_init @1a08ac 填，r5+448）。事件头字段（r4 = 事件载荷指针，
+即 24B Andes 头之后的开始……对照 mt76 connac2 rxd 同源布局）：
+
+| 偏移 | 字段 | 证据 |
+|---|---|---|
+| +2 | **type/eid** | `cmp #238(0xEE)`、`cmp #237(0xED)`、`cmp #4` 三分支 |
+| +3 | 字段（seq/flag 类） | `ldrb r3,[r4,#3]; cmp #0` |
+| +4 | status/seq 类 | `ldrb r3,[r4,#4]; ubfx r3,r3,#3,#1`；`cmp #1/#2` |
+| +22 | 事件子字段 | `ldrb r3,[r4,#22]` |
+
+关键调用：
+
+- **`AndesMTRxProcessEvent`(0x1B5EB0 处调用)** = **FWDL rsp 处理器**
+  （SemGet/AddressLen/Finish 的响应匹配）——FWDL 链的 ack 出口；
+- `chip_parse_rxv_packet` = RXV 分支（type 与 RXV 相关时）；
+- `skb_push`×2 + `__memzero` = 事件帧重建头部回退。
+
+与 doc 14 发送头（+2=type、+4=cmd）对称：接收头 +2=eid/type、+3/+4=
+seq/status。0xEE/0xED 两个特殊 eid 待真机 `rings` 首帧对字段确认。
+
 ## 3. 下轮任务清单
 
 1. 反汇编 `pci_rx_event_process`：事件头字段偏移（type/seq/len/self?）；
