@@ -1,0 +1,33 @@
+#!/bin/sh
+# wlanmgr: thin CLI over /proc/zx-csp-wlan/ctl (native P5 skeleton).
+# Read-only subcommands print driver state; anything that writes registers
+# must go through `wlanmgr commit <cmd>` so it is deliberate.
+CTL=/proc/zx-csp-wlan/ctl
+
+usage() {
+	echo "usage: wlanmgr <command>"
+	echo "  read-only: status | expect | l1p | rings | plane | recv | fwstate | probe"
+	echo "  gated:     wlanmgr commit <cmd>   (forwards to ctl as-is)"
+	echo "  full command list: wlanmgr help"
+}
+
+run() {
+	echo "wlanmgr: $1" >&2
+	echo "$1" > "$CTL" 2>/dev/null || { echo "ctl write failed" >&2; return 1; }
+	cat "$CTL"
+}
+
+case "$1" in
+	status)  cat "$CTL" ;;
+	help)    run "commands" ;;
+	probe)   run "probe" ;;
+	expect)  run "ack-expect" ;;
+	l1p)     run "l1profile" ;;
+	rings)   run "rings" ;;
+	plane)   run "dataplane" ;;
+	recv)    run "mcu-recv" ;;
+	drecv)   run "data-recv" ;;
+	fwstate) run "fw-state" ;;
+	commit)  shift; run "$*" ;;
+	*)       usage ;;
+esac
