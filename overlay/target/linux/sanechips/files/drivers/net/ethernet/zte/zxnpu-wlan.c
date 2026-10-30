@@ -239,13 +239,14 @@ static void zxnpu_wlan_mcuwin(struct zxnpu_wlan *w)
  *    descriptor is the same 36-byte shape as the RX descriptors:
  *    [0]=16, [4]=current VA, [8]=end VA, [12]=skb VA, [24]=len,
  *    [28]=next (pci_kick_out_cmd_msg, 0x1E19C0);
- *  - the WFDMA data rings are 0x18024400 + 0x10*n; ring 4 is the last
- *    one the stock dumper covers and is the MTK MCU ring convention.
+ *  - TX ring bases are WFDMA0(0x24000) + 0x300 + qid*0x10. For MT7916 the
+ *    qids are FWDL=16 (0x24400), MCU_WM=17 (0x24410), BAND0=18,
+ *    BAND1=19, MCU_WA=20 (0x24440); the MCU_WM ring is the command ring.
  *
  * This is a hypothesis, not a verified sequence: it is inert unless
  * enable=1 and commit=1, and it only ever touches ring 4.
  */
-#define ZXNPU_MCU_RING_NR	4
+#define ZXNPU_MCU_RING_NR	1
 #define ZXNPU_MCU_RING_REG	(ZXNPU_WFDMA_TX_RING0 + 0x10 * ZXNPU_MCU_RING_NR)
 #define ZXNPU_MCU_DESC_SIZE	36
 #define ZXNPU_MCU_RING_DEPTH	64
