@@ -774,7 +774,9 @@ static void zxnpu_wlan_data_tx(struct zxnpu_wlan *w)
 	zxnpu_wlan_append(w, "  offload/mgmt path: HcGetMgmtQueueIdx/BcnQueueIdx +@N@");
 	zxnpu_wlan_append(w, "  asic_write_tmac_info_fixed_rate(0x142404) = dispatch,@N@");
 	zxnpu_wlan_append(w, "  mtf_write_tmac_info_fixed_rate(0x1B3018) = real TXD assembler:@N@");
-	zxnpu_wlan_append(w, "  TMAC(52B) -> 16B TXD, w0: +0 u16/+44->0x1800000/+25 lsl11/@N@");
+	zxnpu_wlan_append(w, "  TMAC(52B) -> TXD words: r4+12 bit31+u12(lsl16), r4+20 flags@N@");
+	zxnpu_wlan_append(w, "  (+46 b9/+45 b10/+47 b14), r4+24 rate word (r6: b6->2048,@N@");
+	zxnpu_wlan_append(w, "  +1 b1 lsl14, bits5-3 phy mode); w2/w3 tail = R4f@N@");
 	zxnpu_wlan_append(w, "  +13 lsl20/+41 lsl24/bit31; w1: +48 lsl24/+50 lsl16/@N@");
 	zxnpu_wlan_append(w, "  +5 rate consts 0x1C50/0xBAB0; w2/w3 = R4e@N@");
 	zxnpu_wlan_append(w, "  sta+8 cap-word bits 16..31 = the layer_cap bit mask family@N@");
