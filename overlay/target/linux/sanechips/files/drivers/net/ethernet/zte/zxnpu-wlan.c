@@ -2175,6 +2175,40 @@ static int zxnpu_wlan_probe(struct pci_dev *pdev,
 		w->bar[1] = pcim_iomap_table(pdev)[2];
 		w->bar[2] = pcim_iomap_table(pdev)[4];
 
+		/* The root port's prefetch-window forwarding is dead on this
+		 * silicon: every access inside it master-aborts and latches
+		 * RMA, reads return 0 (3.13/3.14 evidence - the 1MB BAR0 was
+		 * allocated in that window, the 32KB BAR2 in the ordinary MEM
+		 * window and answered). Widen the root port's ordinary MEM
+		 * window over the whole child range so BAR0 routes through
+		 * the working path, and switch the prefetch window off. */
+		{
+			struct pci_dev *br = pdev->bus->self;
+			u32 lo = ~0u, hi = 0;
+			int bi;
+
+			for (bi = 0; bi < 6; bi++) {
+				struct resource *r = &pdev->resource[bi];
+
+				if (resource_size(r) && r->start) {
+					lo = min(lo, (u32)(r->start >> 20));
+					hi = max(hi, (u32)(r->end >> 20));
+				}
+			}
+			if (br && hi) {
+				pci_write_config_word(br, PCI_MEMORY_BASE,
+						      lo << 4);
+				pci_write_config_word(br, PCI_MEMORY_LIMIT,
+						      hi << 4);
+				pci_write_config_word(br, PCI_PREF_MEMORY_BASE,
+						      0xfff0);
+				pci_write_config_word(br, PCI_PREF_MEMORY_LIMIT,
+						      0x0000);
+				zxnpu_wlan_pl_append(w, "bridge %s mem window widened to %03x00000-%03xfffff, prefetch window disabled\n",
+						     pci_name(br), lo, hi);
+			}
+		}
+
 		pci_read_config_byte(pdev, PCI_REVISION_ID, &revision);
 		pci_read_config_word(pdev, PCI_COMMAND, &command);
 		pci_read_config_word(pdev, PCI_STATUS, &status);

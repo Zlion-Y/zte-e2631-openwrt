@@ -243,3 +243,29 @@ cond_resched；scan 只走已证活窗（BAR2）且 256 读封顶；BAR0 一律�
 int 配置 0xFEF0000F/0xB0B00008 vs 0x0D004204/0x0D008204 写入 hif 表头）；
 mt_physical_addr_map 分段翻译 + 窗口表（命中 = 窗内偏移 + 物理映射基址）。
 下轮：mac_io_write32 调用点地址形态反推窗口表全貌 → 定位 connac 唤醒门。
+
+## 12. 访问模型终版破解（活系统对照 + remap 三段映射）——2026-10-31 收官
+
+**授权突破**：192.168.5.1（同款 E2631 原厂系统，admin/admin telnet）只读
+探测 + /tmp/rd 静态读取器上传（OpenWrt 盒 wget 供体；WAN IP DHCP 后为
+5.16；vendor 盒有 wget/tftp 无 nc/devmem/dd）。
+
+**活值对照表**（全部 /dev/mem 只读）：
+- bar0+0x24208（我们以为的 GLO_CFG）= **活系统也是 0** —— 偏移错位
+- bar0+0xFE25C/260 (remap L0/L1) = 0x1802184c / 0x18001806 ——**我们系统与
+  活系统一致（ROM/cspboot 已配好）**
+- **L1 窗实证**：bar0+0xE00F0 = 7 = MT_TOP_MISC（WM+WA ready）
+- **L0 窗实证**：bar0+0xD4208 = 0x1030bc55（GLO_CFG：WFDMA_EN|TX_DMA_EN）；
+  bar0+0xD4400 四件套 = 4a6c7000/80/2e/2e（FWDL qid16 环活值）
+
+**访问模型终版**：1MB BAR0 = HIF 窗（非 0x18000000 直映）。三段 remap：
+0x1802xxxx → bar0+0xD0000+(x-0x18020000)；0x1806xxxx → +0xE0000；
+0x1800xxxx → +0xF0000。remap 寄存器 ROM 已配，无需写。
+vendor 软件链：mac_io → mt_mac_cr_range_mapping（bss 窗口表，翻译命中
+后 *(chip_ops[0x84]+phys)=val，未命中走 chip_ops[0x1a8]=remap 回调）。
+
+**3.17 规格（下轮第一件事）**：CR 访问层换三段映射（ZXNPU_CR 宏改为
+函数或三段表）；rings/fw-state/probe 全部自动对位；预期 fw-state 直接
+读到真实状态；FWDL 链（mcu-dl patch → fw-dl wm/wa）在正确窗口上执行。
+**事故教训追加**：3.16 桥窗拓宽无罪但也没解决（prefetch 窗理论证伪——
+真问题是访问模型错位）；活系统 GLO_CFG=0 曾误导（实为偏移错位）。
