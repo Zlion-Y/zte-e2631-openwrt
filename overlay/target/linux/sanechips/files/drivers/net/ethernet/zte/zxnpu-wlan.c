@@ -605,6 +605,26 @@ static void zxnpu_wlan_queue_init(struct zxnpu_wlan *w, int ring)
 		w->fwdl_ring_armed = true;
 }
 
+/* Build the 60-byte connac2 MCU TXD header mt76_connac2_mcu_fill_message
+ * emits for non-scatter commands: the ROM parses this, not the 24-byte
+ * Andes header this driver started with (doc 62 §42). Payload follows at
+ * +60. */
+static int zxnpu_mcu_txd_header(u8 *msg, int payload_len, u8 cid, u8 seq)
+{
+	u32 total = 60 + payload_len;
+
+	memset(msg, 0, 60);
+	put_unaligned_le32(0x41000000u | (total & 0xffff), msg + 0);
+	put_unaligned_le32(0x80010000u, msg + 4);
+	put_unaligned_le16(payload_len, msg + 8);
+	put_unaligned_le16(0x8000u, msg + 10);	/* pq_id: port 1, q 0x20 */
+	msg[12] = cid;
+	msg[13] = 0xa0;				/* MCU_PKT_ID */
+	msg[14] = 1;				/* MCU_Q_SET */
+	msg[15] = seq & 0xf;
+	return 60;
+}
+
 /*
  * ring 0 = qid16 FWDL (0x18024400), ring 1 = qid17 MCU_WM (0x18024410).
  * GetRealPortQueueID (0x1C112C) sends type 0xEE to chip_cap[0x162] (the
@@ -691,11 +711,10 @@ static void zxnpu_wlan_mcu_send(struct zxnpu_wlan *w, bool commit)
 			  ZXNPU_MCU_TYPE_PATCH, ZXNPU_MCU_CMD_PATCH,
 			  ZXNPU_MCU_RING_NR, commit ? "COMMIT" : "dry run");
 	memset(msg, 0, sizeof(msg));
-	put_unaligned_le16(4, msg + 0);
-	msg[2] = ZXNPU_MCU_TYPE_PATCH;
-	msg[4] = ZXNPU_MCU_CMD_PATCH;
-	put_unaligned_le32(0, msg + 24);
-	zxnpu_mcu_submit(w, msg, sizeof(msg), commit, true);
+	/* connac2 MCU TXD (mt76_connac2_mcu_fill_message): cid 0x10 = PATCH_SEM_CONTROL, get */
+	zxnpu_mcu_txd_header(msg, 4, 0x10, 1);
+	put_unaligned_le32(0, msg + 60);
+	zxnpu_mcu_submit(w, msg, 64, commit, true);
 }
 
 /*
@@ -745,13 +764,13 @@ static void zxnpu_wlan_mcu_regions(struct zxnpu_wlan *w, const char *args,
 				  addr, len, off, flags);
 
 		memset(msg, 0, sizeof(msg));
-		put_unaligned_le16(12, msg + 0);
-		msg[2] = (addr == 0x04000000) ? 0x05 : 0x01;
-		msg[4] = ZXNPU_MCU_CMD_PATCH;
-		put_unaligned_le32(addr, msg + 24);
-		put_unaligned_le32(len, msg + 28);
-		put_unaligned_le32(0x80000000 | flags, msg + 32);
-		if (zxnpu_mcu_submit(w, msg, 36, commit, true))
+		/* connac2 MCU TXD: cid 0x05 PATCH_START_REQ for the MCU SRAM
+		 * window, else 0x01 TARGET_ADDRESS_LEN_REQ */
+		zxnpu_mcu_txd_header(msg, 12, (addr == 0x04000000) ? 0x05 : 0x01, 2);
+		put_unaligned_le32(addr, msg + 60);
+		put_unaligned_le32(len, msg + 64);
+		put_unaligned_le32(0x80000000 | flags, msg + 68);
+		if (zxnpu_mcu_submit(w, msg, 72, commit, true))
 			break;
 		if (!commit)
 			continue;
@@ -1454,10 +1473,8 @@ static void zxnpu_wlan_mcu_dl(struct zxnpu_wlan *w, const char *args, bool commi
 	}
 
 	memset(msg, 0, sizeof(msg));
-	put_unaligned_le16(4, msg + 0);
-	msg[2] = ZXNPU_MCU_TYPE_FINISH;
-	msg[4] = ZXNPU_MCU_CMD_PATCH;
-	if (zxnpu_mcu_submit(w, msg, 28, true, true))
+	zxnpu_mcu_txd_header(msg, 0, 0x07, 3);
+	if (zxnpu_mcu_submit(w, msg, 60, true, true))
 		goto out;
 	zxnpu_wlan_append(w, "mcu-dl: %u bytes sent, finish issued\n", done);
 out:
