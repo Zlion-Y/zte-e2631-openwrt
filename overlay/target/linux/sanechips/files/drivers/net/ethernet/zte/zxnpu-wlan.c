@@ -936,6 +936,23 @@ struct zxnpu_sta_ctx {
 __maybe_unused static struct zxnpu_sta_ctx zxna_ctx[ZXNPU_WCID_MAX];
 static DEFINE_MUTEX(zxna_ctx_lock);
 
+/*
+ * Per-band BSS state (doc 53 §1 decode: the band block carries the
+ * protection state at +0xB85; the AP brings one BSS per band). The
+ * fields mirror what the P5 BSS bring-up will configure from the
+ * per-band driver profile (mt7916.dbdc.<band>.dat keys).
+ */
+struct zxnpu_bss {
+	bool active;
+	int band;
+	char ssid[33];
+	u32 channel;
+	bool protect;		/* band block +0xB85 flag (doc 53 §1) */
+	u64 beacon_cnt;
+};
+
+static __maybe_unused struct zxnpu_bss zxna_bss[2];
+
 /* wcid 0 is reserved (index 0 per doc 16 §2.5); allocation starts at 1. */
 static int zxna_wcid_alloc(struct zxnpu_vap *vap, const u8 *addr)
 {
@@ -1826,6 +1843,39 @@ done_ctl:
 					  " key-set" : "");
 		}
 		mutex_unlock(&zxna_ctx_lock);
+	} else if (!strncmp(cmd, "bss-show", 8)) {
+		int i;
+
+		zxnpu_wlan_append(w, "bss-show (per-band BSS state, doc 53 §1):\n");
+		for (i = 0; i < 2; i++) {
+			zxnpu_wlan_append(w, "  band %d: %s ssid='%s' ch=%u%s\n",
+					  i,
+					  zxna_bss[i].active ? "active" : "down",
+					  zxna_bss[i].ssid,
+					  zxna_bss[i].channel,
+					  zxna_bss[i].protect ?
+					  " protect" : "");
+		}
+	} else if (!strncmp(cmd, "bss-set ", 8)) {
+		/* bss-set <band> <channel> <ssid up to 32>: stages the BSS
+		 * config in the mirror; the beacon/CSA programming lands in
+		 * P5 behind commit. */
+		unsigned int band = 0, ch = 0;
+		char ssid[33] = "";
+
+		if (sscanf(cmd + 8, "%u %u %32[^\n]", &band, &ch, ssid) < 2 ||
+		    band > 1 || ch < 1 || ch > 196) {
+			zxnpu_wlan_append(w, "usage: bss-set <band 0|1> <ch 1..196> <ssid up to 32>\n");
+			goto done_bss;
+		}
+		zxna_bss[band].band = band;
+		zxnpu_wlan_append(w, "bss-set: band %u staged ch=%u ssid='%s'%s\n",
+				  band, ch, ssid,
+				  zxnpu_wlan_commit ?
+				  " (beacon programming in P5)" :
+				  " (dry run)");
+done_bss:
+		zxnpu_wlan_append(w, "\n");
 	} else if (!strncmp(cmd, "mcu-send", 8)) {
 		zxnpu_wlan_mcu_send(w, zxnpu_wlan_commit);
 	} else if (!strncmp(cmd, "commit", 6)) {
