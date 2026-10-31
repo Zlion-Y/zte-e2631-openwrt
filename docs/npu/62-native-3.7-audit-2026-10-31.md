@@ -906,3 +906,40 @@ BAR 转发、**connac2 MCU TXD 命令头（60B，cid/pkt_type 0xa0，payload@60�
 **DIDX 仍 0**：命令格式已与 mt76 权威实现一致，但 WFDMA 引擎仍未取
 描述符。剩余方向：DMASHDL 组配置（活值 0xd6100=038a037a /
 0xd6140=00100a55，crw 写不粘）+ ROM 阶段 DMA 使能前提。
+
+## 43. mt76 架构真相：7906=主功能（含 wfsys reset），790a=仅 hif2（2026-11-01）
+
+mt76 `mt7915_pci_probe` 的分派是决定性的：
+
+```c
+if (id->device == 0x7916 || id->device == 0x790a)
+        return mt7915_pci_hif2_probe(pdev);   /* 790a: 只做 hif2 辅助通道 */
+dev = mt7915_mmio_probe(..., id->device);      /* 主功能: 完整初始化 */
+mt7915_wfsys_reset(dev);                       /* ← 关键，只有主功能做 */
+```
+
+`mt7915_wfsys_reset` 对 mt7916（else 分支）：
+```c
+mt76_set(dev, MT_WF_SUBSYS_RST, 0x1);   msleep(20);
+mt76_clear(dev, MT_WF_SUBSYS_RST, 0x1); /* 释放复位 → MCU 重新执行 ROM code */
+```
+另有 mt7915 分支用 `MT_TOP_PWR_CTRL = 0x18000000`（MT_TOP_RGU_BASE+0）做
+SW_RST 三连（assert→release→HW_CTRL），key=0x5746<<16。
+
+**这就是 21 轮没找到的东西**：整个 FWDL 链的前提是"MCU 重新执行 ROM
+code"，而它由主功能的 wfsys reset 触发。我们一直绑 790a（hif2），
+从来没绑 7906 做主驱动——所以 ROM code 可能从未在当前配置下重跑，
+DMA 自然不会取描述符。
+
+**本次实测（经 0xF0000 窗写 0x18000000）**：写入不粘，读回恒 0x72 ——
+该窗在此芯片上是只读视图（B3.x 现象），SW_RST 序列需走 7906 的 BAR。
+
+**下一轮规格（R-A 重构，不再打补丁）**：
+1. 驱动以 **7906 为主实例**：映射其 BAR0、做 wfsys reset、跑完整
+   init（dma_disable(rst)→队列→prefetch→enable→INT_SOURCE 清除）
+2. 790a 仅作 hif2（可选，辅助通道）
+3. FWDL 全部寄存器访问走主实例 BAR
+4. 验收：wfsys reset 后 `MT_TOP_MISC.FW_STATE` 变化 → DIDX 前进 →
+   fw-state=7
+已排除清单（21 轮）：描述符格式、环地址/步进/深度、GLO_CFG、INT_ENA、
+信用表、PCIe 窗、门铃、DMASHDL 组、RST_DTX_PTR、MCU TXD 头。
