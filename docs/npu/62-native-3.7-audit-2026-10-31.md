@@ -655,3 +655,25 @@ CIDX/DIDX）、使能（五环+GLO_CFG+INT_ENA+信用表对齐活值）、描述
 2. connac top 0x1800xxxx 域的 MCU hold 寄存器扫描（0xF0000 窗活，
    可写试验：top cfg 的 SW reset/hold 位）
 3. PERST/电源序列复核：gpio enable/reset 时序重放后再探
+
+## 33. chip_ops 填充图（部分）+ 0xC8 追踪（2026-10-31）
+
+mt7916_init 的 chip_ops（r3 表，820B）填充图（符号已归因）：
+- [0x90] = **pci_trigger_int_to_mcu**（门铃槽实锤——mt7916 门铃 =
+  chip_ops[0x90] 转发）
+- [0x94] = pci_interrupt_disable、[0xFC] = fw_prepare、[0xF0] =
+  CmdHeraStbcPriorityCtrl、[0xD8] = mt7916_eBFPfmuMemAlloc、
+  [0x104] = MT7916BandGetByIdx、[0x140] = get_fw_sync_value、
+  [0x108/0x118/0x10c/0x124/0x128/0x12c/0x138/0x13c] = BF/校准系
+- **[0xC8] 填充未在 str [r3,#N] 线性扫描现形**——疑计算偏移存储
+  （str rX, [r3, rY]）或经 memcpy 批量（hc_register_chip_ops 前的
+  820B 表拷贝）
+- pause/resume 符号搜索零命中——[0xC8] 的实现函数名不含 pause/resume
+  （doc 14 的"暂停/恢复 ✓"为语义标注非符号名）
+
+**下轮**：
+1. mt_load_fw 反汇编精读 [0xC8] 调用上下文（r1 参数 = 1 暂停 / 0 恢复），
+   反推 [0xC8] 函数指针来源（mt_load_fw 里 ldr rX, [chip_ops, #0xC8]
+   前的取基址指令链）
+2. 计算偏移存储搜索：mt7916_init 里 str [r3, rN] 形式
+3. 若 [0xC8] = fw_own/hold 类——对照 mt76 的 mt7915_mcu_fw_own 语义
