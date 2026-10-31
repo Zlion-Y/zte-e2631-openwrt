@@ -76,6 +76,37 @@ case "$1" in
 		echo "  TXD/TMAC: template+0=wcid, ctx=0x13BAB0+wcid*0x1C50 (doc 45 §7)"
 		echo "  order: fw-state=7 (step2) -> BSS config -> carrier on"
 		;;
+	conf-read)
+		# wlanmgr conf-read <band>: read the BSS config file
+		# (/etc/wireless/zte-native.conf, vendor dat key style)
+		shift; B=${1:-b0}
+		F=${WLANMGR_CONF:-/etc/wireless/zte-native.conf}
+		if [ ! -f "$F" ]; then
+			echo "$F missing (wlanmgr conf-write to create)"
+			exit 1
+		fi
+		echo "[$B]"
+		sed -n "/^\[$B\]/,/^\[/p" "$F" | grep '=' | head -20
+		;;
+	conf-write)
+		# wlanmgr conf-write <band> <key> <value>: update the BSS config
+		shift; B=$1; K=$2; V=$3
+		F=${WLANMGR_CONF:-/etc/wireless/zte-native.conf}
+		[ -n "$B" ] && [ -n "$K" ] && [ -n "$V" ] || {
+			echo "usage: conf-write <band> <key> <value>"; exit 1; }
+		touch "$F"
+		if grep -q "^\[$B\]" "$F"; then
+			if grep -A20 "^\[$B\]" "$F" | grep -q "^$K="; then
+				sed -i "/^\[$B\]/,/^\[/ s/^$K=.*/$K=$V/" "$F"
+			else
+				sed -i "/^\[$B\]/a $K=$V" "$F"
+			fi
+		else
+			echo "[$B]" >> "$F"
+			echo "$K=$V" >> "$F"
+		fi
+		echo "$B.$K=$V written to $F"
+		;;
 	selftest)
 		# offline verification: print the ctl command each subcommand sends
 		echo "status:status expect:ack-expect l1p:l1profile rings:rings"
