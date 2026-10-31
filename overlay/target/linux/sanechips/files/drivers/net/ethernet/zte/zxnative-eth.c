@@ -941,6 +941,13 @@ bool zx_eth_is_port(const struct net_device *dev)
 	return dev->netdev_ops == &zxna_netdev_ops;
 }
 
+/* ppe.c drives the trap-DMAC table through this shared-name hook; the
+ * native driver keeps its own zxna_set_trap_dmac, so forward. */
+void zx_set_trap_dmac(struct zx_eth_adapter *a, int idx, const u8 *mac)
+{
+	zxna_set_trap_dmac(a, idx, mac);
+}
+
 
 /* ---- probe/remove --------------------------------------------------- */
 
