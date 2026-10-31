@@ -471,3 +471,22 @@ Bus error）——翻译表运行期读取不可行。
 3. kcore 路线备选（vendor /proc/kcore 存在性待查）
 工具状态：3.23 双门禁过 ALL-PASS（crw b 形式 + 全部前序）；5.1 探测
 全程只读合规。
+
+## 23. 3.24：映射表结构闭环（hif_chip_init 分派 + LANCHOR0 指针定位）
+
+- **hif_chip_init(chip_type)**：uxth 比较——790a→mt790A_hif_ctrl_chip_pcie1_init、
+  7906→mt7906_hif_ctrl_chip_init；r0 = hif_ctrl 结构。
+- **hif_ctrl 写值**：7906=[0xFEF0000F, 0x0D004204]；790A=[0xB0B00008,
+  0x0D008204]；[+0xD8] = **&LANCHOR0**（物理基址数组指针！）；
+  [+0xC4/+0xC8] = ISR 对；[+0x6A4] = 0xC0。
+- **mt_mac_cr_range_mapping 结构重认**：窗口表走 chip_cap（[+4]=base、
+  [+8]=len，12B 步进），命中后 phys = **LANCHOR0[3i+1]** + (addr-base)，
+  再过 dev+0x5DD984 位检查（bit2=4 时 addr-base ≥0x100000 拒绝）。
+- LANCHOR0 = .bss 全局（+0 与 +0x804 两锚），运行期填充者未定；
+  STRICT_DEVMEM 封死运行期读取。
+
+**3.24 未完成项（下轮续）**：
+1. LANCHOR0 填充函数定位（消费 hif+0xD8 指针的代码 = 映射路径使用者）
+2. 0x0D004204/0x0D008204（7906/790A 各自的窗口 base 常量）语义
+3. 用重建的映射重定位 {base, cidx/didx} BAR 偏移 → 3.25 重写
+工具就绪：3.23 ALL-PASS（crw b 直写 + 全部前序），5.1 只读合规。
