@@ -513,3 +513,23 @@ Bus error）——翻译表运行期读取不可行。
   multi_hif_entry_* 系（alloc/get_by_id/gid/rid，0x15bee4-0x15c12c）
   ——7906/790A init 调的 multi_hif_entry_id_get 同族。下轮解码该族
   找环寄存器地址赋值。
+
+## 26. 模型大修正：0x10 步进复活 + 时钟门控实锤 + ROM 只服务 qid16（2026-10-31）
+
+1. **原始 0x10 步进 BASE/CNT/CIDX/DIDX 模型复活**：活 FWDL 环
+   base=4a6c7000、CNT=128（0xd4404=0x80！之前误读为 base_hi）、
+   cidx=did=0x2e——0x20 步进是 0x20 步长扫描的采样伪影。
+2. **时钟门控实锤**：CNT 写在 GLO_CFG 强制（0x1030b857）后粘
+   （回读 0x80）；未强制时全部"不粘"——此前所有写粘性结论都受
+   引擎时钟门状态污染。
+3. **ROM 只服务 FWDL 环（qid16）**：vendor 的 46 块全在 qid16 且
+   cidx=did=0x2e 被消费；我们把 SemGet/AddressLen/Finish 发给
+   qid17（WM 环）= ROM 阶段无人服务。FwScatter 走 qid16 正确但
+   其 didx 亦未动（CNT=512 与 ROM 期望 128 不符/引擎时钟未常开）。
+4. multi_hif_entry_* 族 = 纯 HIF 链表管理（无寄存器地址）——族排除。
+
+**3.24-续规格（下轮）**：
+- 环寄存器回 0x10 步进（撤销 0x20 重写）；CNT=128（活值）
+- mcu-dl 的命令（SemGet/AddressLen/Finish）改走 qid16（ROM FWDL 环）
+- 每阶段 GLO_CFG 强制（0x1030b857）再写寄存器
+- DIDX 判定：qid16 cidx/did 对进即可确认 ROM 消费
