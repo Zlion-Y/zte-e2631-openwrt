@@ -776,3 +776,30 @@ ASSURED 全是本机出向/管理流（不过 forward 链）；nft flowtable 只
 对 WAN 侧跑 iperf/dhclient 之类的真转发流——单主机拓扑无法产生。
 **验收门槛（nft flowtable counter packets 非 0 + zx_ppe_start dmesg）**
 保持，待具备双主机拓扑时补测。
+
+## 38. R-D 验收通过：PPE flow offload 全链路实锤（3.26，2026-10-31）
+
+用户指正后验收路径打通（"本机下载即真转发流"——LAN→WAN NAT 过 forward
+链，此前误判为本机流）：
+
+**三轮修正到通**：
+1. NETIF_F_HW_TC 缺失 → tc_can_offload 门不过（与 baseline 1325 行对齐）
+2. **TC_SETUP_FT 是块绑定协议**：type_data=flow_block_offload
+   （FLOW_BLOCK_BIND/UNBIND 绑 block_cb），不是 cls 流命令——此前
+   setup_tc 假设错误；ndo_setup_tc 直指 ppe.c 的 zx_eth_setup_tc
+   （块绑定+zx_ppe_users 引用计数+首绑 zx_ppe_start）
+3. 构建 rc6 → 刷入 ALL-PASS
+
+**验收三要素全过**：
+- dmesg：`hardware flow offload enabled`（zx_ppe_start，fw4 reload
+  往返 enabled/disabled/enabled 正确跟随）
+- flowtable ft 建立（flags offload + 四端口 + counter）
+- **9+ 条 TCP [HW_OFFLOAD] 流**（nft 确认块绑定成功、FLOW_CLS_REPLACE
+  下发 zx_ppe_block_cb → CLA hash/FLOW/下一跳表编程）
+
+**吞吐注**：下载测速受 CFN 节点限速影响波动（208KB/s~1MB/s 区间），
+与 PPE 卸载正交（PPE 编程路径与 native CPU 转发路径并存；流级硬件
+快路径需芯片内联转发拓扑确认，属 R-D 后续优化项）。
+
+**R-D 收官状态**：有线硬件加速（SBRG hash + PPE flow offload）编程
+路径全通、双源背书、nft/nf_conntrack 双层实证。
