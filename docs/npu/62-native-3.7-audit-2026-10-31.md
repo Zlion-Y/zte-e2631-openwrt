@@ -591,3 +591,22 @@ WFDMA/队列状态、时钟、或 vendor init 中尚未复刻的一步）。
 2. mt76 对照：connac2 ROM 阶段 WFDMA 是否默认活（mt76 无 vendor init
    也能 FWDL——重查 mt76 mmio 初始化序列与我们差异）
 3. PCIe INT 状态寄存器（设备侧）核对 MCU 是否回过任何中断
+
+## 30. vendor 调试面穷尽 + mt76 上游对照路线定案（2026-10-31）
+
+5.1 枚举结果：debugfs 仅泛用子系统（无 wifi 目录）；/proc/net 无
+mt/tm/wifi 条目；**iwpriv 无任何 wifi 网口**（MTK SDK 网口未创建——
+5.1 的 wifi 处于 down 态，环状态为启动遗留）；/proc/tm/shell = 只写
+命令接口（输出进内核日志，无 dmesg 可读）；无 kcore。
+
+**vendor 调试面穷尽**。FWDL 状态缺口的最后权威路径：
+
+**mt76 上游源码对照**（下轮首刀）：
+- mt76 无 vendor init 也能对 MT7916 做 ROM FWDL——其 mt7915/mmio.c、
+  mcu.c、regs.h 含 connac2 ROM 阶段的寄存器地址（MT_MCU_BASE 区）与
+  描述符格式的权威定义
+- 关键疑点：mt76 的 MT_MCU_BASE = 0x18024000 区 = **ROM 直服务的 MCU
+  环（非 WFDMA 引擎）**——描述符格式可能是 ROM 自有格式而非 WFDMA
+  36B 环项；WFDMA 引擎（0xd7000）仅固件后生效
+- 获取：base 树 feeds 或上游 mt76 master（git/web）
+- 产出：对照表 → 修正我们的 ROM 阶段描述符与环地址 → DIDX
