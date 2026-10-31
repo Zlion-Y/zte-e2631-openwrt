@@ -223,3 +223,23 @@ mac_io 地址先过翻译（分段公式 + chip_cap 窗口表 + 0x7906 chip-id �
 **3.14（构建中）**：只读窗扫描器——`win <bar> <off> [n]` 任意窗直读、
 `scan` 双功能三 BAR 稀疏扫（非零命中汇总）。目标：定位 BAR2 32KB 的
 内容图谱（是否含 HIF/WFDMA 镜像或 remap 寄存器），为 FWDL 选路。
+
+## 11. 3.14 楔死事故 + BAR2 定性（2026-10-31）
+
+**事故**：scan 命令 3000+ 次无调度点直读（含死窗）→ AXI 桥楔死整个 SoC
+（ping 活、SSH 死、TTL 控制台零输出零回显——内核连 UART 都不服务）。
+断电重启恢复（TTL 抓到启动）。教训入码：win 上限 64 读 +
+cond_resched；scan 只走已证活窗（BAR2）且 256 读封顶；BAR0 一律禁扫。
+
+**BAR2 (32KB) 定性（单读小批采样，80 读安全完成）**：
+- +0x1000=790a14c3（=14c3:790a 反序）= **PCI 配置空间镜像**
+- +0x1010=2030000c / +0x1018=20200004 = 本功能 BAR 原始值
+- 0x2000+ 全 0xFF = 悬空
+- 结论：BAR2 = PCIe EP 控制器寄存器页，不是 connac 总线窗
+- connac 总线只经 BAR0(1MB) 访问，读零 = **核心总线冷**（此前
+  "BAR2 活=芯片活"的乐观定性修正）
+
+**vendor 深化**：mt7906/mt790A_hif_ctrl init 对（rx5/tx6 vs rx1/tx2 环、
+int 配置 0xFEF0000F/0xB0B00008 vs 0x0D004204/0x0D008204 写入 hif 表头）；
+mt_physical_addr_map 分段翻译 + 窗口表（命中 = 窗内偏移 + 物理映射基址）。
+下轮：mac_io_write32 调用点地址形态反推窗口表全貌 → 定位 connac 唤醒门。

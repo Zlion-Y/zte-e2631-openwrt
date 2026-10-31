@@ -377,49 +377,55 @@ static void zxnpu_wlan_win_read(struct zxnpu_wlan *w, const char *args)
 	int n;
 
 	if (sscanf(args, "%u %lx %x", &bar, &off, &count) < 2 || bar > 2) {
-		zxnpu_wlan_append(w, "usage: win <bar 0..2> <off-hex> [count <=256]\n");
+		zxnpu_wlan_append(w, "usage: win <bar 0..2> <off-hex> [count <=64]\n");
 		return;
 	}
-	if (count > 256)
-		count = 256;
+	/* dead-window reads can wedge the AXI bridge: the 3.14 incident ran
+	 * ~3000 of them in a resched-less loop and hard-locked the SoC
+	 * (console included). Keep every command small enough to bail out
+	 * of, and yield between reads. */
+	if (count > 64)
+		count = 64;
 	p = zxnpu_wlan_bar_of(w, bar, &len);
 	if (!p || off + 4 > len) {
 		zxnpu_wlan_append(w, "win: bar%u unmapped or offset %lx beyond %llu\n",
 				  bar, off, (unsigned long long)len);
 		return;
 	}
-	for (n = 0; n < count && off + 4 <= len; n++, off += 4)
+	for (n = 0; n < count && off + 4 <= len; n++, off += 4) {
 		zxnpu_wlan_append(w, "bar%u+%05lx = %08x\n",
 				  bar, off, readl(p + off));
+		cond_resched();
+	}
 }
 
+/* Scan ONE bar of ONE function with a hard-bounded read budget. Never used
+ * on the 1MB BAR0: dead-window reads wedge the AXI bridge (3.14 incident);
+ * only the proven-alive 32KB BAR2 gets walked, sparsely. */
 static void zxnpu_wlan_scan_bar(struct zxnpu_wlan *out, struct zxnpu_wlan *hw,
-				int bar, u32 stride, u32 limit)
+				u32 stride, u32 limit)
 {
-	static const unsigned int ridx[3] = { 0, 2, 4 };
-	void __iomem *p = hw->bar[bar];
-	resource_size_t len;
+	void __iomem *p = hw->bar[1];	/* BAR2, 32KB */
 	u32 off, hits = 0;
 
 	if (!p)
 		return;
-	len = pci_resource_len(hw->pdev, ridx[bar]);
-	if (limit > len)
-		limit = len;
+	if (limit > 0x8000)
+		limit = 0x8000;
 	for (off = 0; off + 4 <= limit; off += stride) {
 		u32 v = readl(p + off);
 
 		if (v) {
-			if (hits < 16)
-				zxnpu_wlan_append(out, "  %s bar%d+%06x = %08x\n",
+			if (hits < 24)
+				zxnpu_wlan_append(out, "  %s bar2+%04x = %08x\n",
 						  hw->is_main ? "7906" : "790a",
-						  ridx[bar], off, v);
+						  off, v);
 			hits++;
 		}
+		cond_resched();
 	}
-	zxnpu_wlan_append(out, "  %s bar%d: %u non-zero hits (stride %u, range %x)\n",
-			  hw->is_main ? "7906" : "790a", ridx[bar], hits,
-			  stride, limit);
+	zxnpu_wlan_append(out, "  %s bar2: %u non-zero hits (stride %u, range %x)\n",
+			  hw->is_main ? "7906" : "790a", hits, stride, limit);
 }
 
 static void zxnpu_wlan_bus_scan(struct zxnpu_wlan *w)
@@ -427,18 +433,10 @@ static void zxnpu_wlan_bus_scan(struct zxnpu_wlan *w)
 	struct zxnpu_wlan *other = (w == zxnpu_wlan_main) ?
 				   zxnpu_wlan_comp : zxnpu_wlan_main;
 
-	zxnpu_wlan_append(w, "bus scan (read-only, non-zero hits):\n");
-	/* scan the active instance first, then the other one if bound */
-	zxnpu_wlan_scan_bar(w, w, 0, 0x1000, 0x100000);
-	zxnpu_wlan_scan_bar(w, w, 1, 4, 0x200);
-	zxnpu_wlan_scan_bar(w, w, 1, 0x100, 0x8000);
-	zxnpu_wlan_scan_bar(w, w, 2, 4, 0x1000);
-	if (other) {
-		zxnpu_wlan_scan_bar(w, other, 0, 0x1000, 0x100000);
-		zxnpu_wlan_scan_bar(w, other, 1, 4, 0x200);
-		zxnpu_wlan_scan_bar(w, other, 1, 0x100, 0x8000);
-		zxnpu_wlan_scan_bar(w, other, 2, 4, 0x1000);
-	}
+	zxnpu_wlan_append(w, "bus scan (BAR2 only - BAR0 is cold and reads there wedge the bridge):\n");
+	zxnpu_wlan_scan_bar(w, w, 0x80, 0x8000);
+	if (other)
+		zxnpu_wlan_scan_bar(w, other, 0x80, 0x8000);
 }
 
 /*
