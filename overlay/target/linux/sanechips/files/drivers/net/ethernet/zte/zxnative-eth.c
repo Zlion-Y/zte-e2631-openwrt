@@ -34,6 +34,7 @@
 #include <net/flow_offload.h>
 
 #include "zx279128s-eth.h"
+#include "zx-ffe-ops.h"
 
 /* Default on: the driver links ahead of the baseline, so with enable=y it
  * wins the boot probe race and the baseline (which suppresses bind attrs
@@ -834,12 +835,15 @@ static int zxna_ioctl(struct net_device *netdev, struct ifreq *ifr, int cmd)
  */
 static bool zxnative_offload;
 module_param_named(offload, zxnative_offload, bool, 0444);
-MODULE_PARM_DESC(offload, "report the PPE flow-offload plan (skeleton; hardware programming not wired yet)");
+MODULE_PARM_DESC(offload, "arm the PPE flow offload (register snapshot, V4 rules, packet modifier, trap/MAC flip)");
 
 static int zxna_setup_tc(struct net_device *netdev, enum tc_setup_type type,
 			 void *type_data)
 {
+	struct zx_eth_priv *priv = netdev_priv(netdev);
+	struct zx_eth_adapter *a = priv->adapter;
 	struct flow_cls_offload *cls = type_data;
+	int ret;
 
 	if (type != TC_SETUP_FT)
 		return -EOPNOTSUPP;
@@ -847,11 +851,32 @@ static int zxna_setup_tc(struct net_device *netdev, enum tc_setup_type type,
 		netdev_dbg(netdev, "ppe offload refused: zxnative_eth.offload=0\n");
 		return -EOPNOTSUPP;
 	}
-	netdev_info(netdev,
-		    "ppe offload plan (skeleton): cookie=%lu cmd=%u - IPv4 only, 45B key placement, 2 CRC32 banks, 127-flow rewrite cap; hardware programming not wired yet\n",
-		    cls->cookie, cls->command);
-	return -EOPNOTSUPP;
+
+	mutex_lock(&a->ppe_lock);
+	switch (cls->command) {
+	case FLOW_CLS_REPLACE:
+		/* first flow arms the PPE: register snapshot + V4 rules +
+		 * packet modifier + trap/MAC table flip (zx_ppe_start) */
+		if (!a->ppe_active) {
+			ret = zx_ppe_start(a);
+			if (ret)
+				break;
+		}
+		ret = zx_ppe_flow_add(a, cls);
+		break;
+	case FLOW_CLS_DESTROY:
+		ret = zx_ppe_flow_del(a, cls);
+		break;
+	case FLOW_CLS_STATS:
+		ret = zx_ppe_flow_stats(a, cls);
+		break;
+	default:
+		ret = -EOPNOTSUPP;
+	}
+	mutex_unlock(&a->ppe_lock);
+	return ret;
 }
+
 
 /* ---- ethtool --------------------------------------------------------- */
 
@@ -899,6 +924,13 @@ static const struct ethtool_ops zxna_ethtool_ops = {
 	.get_ethtool_stats	= zxna_get_ethtool_stats,
 };
 
+/* ppe.c classifies ingress ports through this hook (declared in the shared
+ * header); the native driver answers for its own netdev_ops. */
+bool zx_eth_is_port(const struct net_device *dev)
+{
+	return dev->netdev_ops == &zxna_netdev_ops;
+}
+
 static const struct net_device_ops zxna_netdev_ops = {
 	.ndo_open		= zxna_open,
 	.ndo_stop		= zxna_stop,
@@ -939,6 +971,7 @@ static int zxna_probe(struct platform_device *pdev)
 	spin_lock_init(&a->tx_lock);
 	spin_lock_init(&a->bmu_free_lock);
 	mutex_init(&a->ppe_lock);
+	zx_ppe_init(a);
 	a->base = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(a->base)) {
 		ret = PTR_ERR(a->base);

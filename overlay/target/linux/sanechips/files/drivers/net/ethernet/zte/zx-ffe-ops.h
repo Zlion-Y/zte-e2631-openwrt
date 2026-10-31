@@ -28,6 +28,9 @@ struct zx_ffe_ops {
 };
 
 /* the hardware primitives ppe.c owns; the FFE control plane calls them */
+int zx_ppe_init(struct zx_eth_adapter *adapter);
+int zx_ppe_start(struct zx_eth_adapter *adapter);
+void zx_ppe_stop(struct zx_eth_adapter *adapter);
 int zx_ppe_flow_add(struct zx_eth_adapter *adapter, struct flow_cls_offload *f);
 int zx_ppe_flow_del(struct zx_eth_adapter *adapter, struct flow_cls_offload *f);
 int zx_ppe_flow_stats(struct zx_eth_adapter *adapter, struct flow_cls_offload *f);

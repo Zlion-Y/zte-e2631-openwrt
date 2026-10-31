@@ -663,7 +663,12 @@ void zx_update_mac_tables(struct zx_eth_adapter *adapter)
  * CPU.  IPv6, ARP and VLAN tagged frames stay trapped.  Frames the
  * classifier does not know still go to the CPU.
  */
-static int zx_ppe_start(struct zx_eth_adapter *adapter)
+int zx_ppe_init(struct zx_eth_adapter *adapter)
+{
+	return rhashtable_init(&adapter->ppe_flows, &zx_ppe_ht_params);
+}
+
+int zx_ppe_start(struct zx_eth_adapter *adapter)
 {
 	static const u32 cmd = 0x00010000;
 	void __iomem *base = adapter->base;
@@ -710,7 +715,7 @@ static void zx_ppe_flush(void *ptr, void *arg)
 	kfree(e);
 }
 
-static void zx_ppe_stop(struct zx_eth_adapter *adapter)
+void zx_ppe_stop(struct zx_eth_adapter *adapter)
 {
 	void __iomem *base = adapter->base;
 	int i;

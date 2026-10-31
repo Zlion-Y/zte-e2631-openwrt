@@ -21,9 +21,10 @@
  endif # NET_VENDOR_ZTE
 --- a/drivers/net/ethernet/zte/Makefile
 +++ b/drivers/net/ethernet/zte/Makefile
-@@ -1,4 +1,5 @@
+@@ -1,4 +1,6 @@
  # SPDX-License-Identifier: GPL-2.0-only
 +obj-$(CONFIG_ZXNATIVE_ETH) += zxnative-eth.o
++zxnative-eth-y := zxnative-eth.o zx279128s-ppe.o
  obj-$(CONFIG_ZX279128S_ETH) += zx279128s-eth.o
  zx279128s-eth-y := zx279128s-main.o zx279128s-ppe.o zx279128s-switch.o
  obj-$(CONFIG_ZX_NPU) += zx279128s-npu.o
