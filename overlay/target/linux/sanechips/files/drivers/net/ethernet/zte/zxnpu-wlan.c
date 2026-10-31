@@ -82,6 +82,8 @@ struct zxnpu_wlan {
 	void *fwdl_buf;
 	dma_addr_t fwdl_buf_dma;
 	u32 fwdl_cidx;
+	bool fwdl_ring_armed;
+	bool mcu_ring_armed;
 	void *rx_ring;		/* 32 x 36 descriptors */
 	dma_addr_t rx_ring_dma;
 	void *rx_buf;		/* 32 x 1700 buffers with 16B RXD */
@@ -577,6 +579,32 @@ static void zxnpu_mcu_fill_desc(void *ring, dma_addr_t ring_dma, u32 slot,
 	put_unaligned_le32(0x40000000u | ((len & 0x3fff) << 16), d + 4);
 }
 
+/* mt76_dma_queue_reset + sync_idx semantics for one TX ring: unused
+ * descriptors carry DMA_DONE (bit31) so the engine skips them; indices
+ * zeroed; ring_size/desc_base programmed last (mt76 order). Runs once
+ * per ring via the armed flag. */
+static void zxnpu_wlan_queue_init(struct zxnpu_wlan *w, int ring)
+{
+	void *desc = ring ? w->mcu_ring : w->fwdl_ring;
+	dma_addr_t desc_dma = ring ? w->mcu_ring_dma : w->fwdl_ring_dma;
+	u32 reg = ZXNPU_WFDMA_TX_RING0 + ZXNPU_WFDMA_RING_STRIDE * ring;
+	int i;
+
+	if (ring ? w->mcu_ring_armed : w->fwdl_ring_armed)
+		return;
+	for (i = 0; i < ZXNPU_MCU_RING_DEPTH; i++)
+		put_unaligned_le32(0x80000000u, (u8 *)desc +
+				   i * ZXNPU_MCU_DESC_SIZE + 4);
+	zxnpu_main_cr_write(w, reg + 8, 0);
+	zxnpu_main_cr_write(w, reg + 12, 0);
+	zxnpu_main_cr_write(w, reg + 4, ZXNPU_MCU_RING_DEPTH);
+	zxnpu_main_cr_write(w, reg, (u32)desc_dma);
+	if (ring)
+		w->mcu_ring_armed = true;
+	else
+		w->fwdl_ring_armed = true;
+}
+
 /*
  * ring 0 = qid16 FWDL (0x18024400), ring 1 = qid17 MCU_WM (0x18024410).
  * GetRealPortQueueID (0x1C112C) sends type 0xEE to chip_cap[0x162] (the
@@ -602,6 +630,7 @@ static int zxnpu_mcu_submit_ring(struct zxnpu_wlan *w, int ring,
 	}
 	if (!desc || !buf || len <= 0 || len > ZXNPU_MCU_BUF_SIZE)
 		return -EINVAL;
+	zxnpu_wlan_queue_init(w, ring);
 	slot = (*cidx) % ZXNPU_MCU_RING_DEPTH;
 	memset(buf, 0, ZXNPU_MCU_BUF_SIZE);
 	memcpy(buf, msg, len);
