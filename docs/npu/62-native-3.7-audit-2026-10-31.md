@@ -803,3 +803,30 @@ ASSURED 全是本机出向/管理流（不过 forward 链）；nft flowtable 只
 
 **R-D 收官状态**：有线硬件加速（SBRG hash + PPE flow offload）编程
 路径全通、双源背书、nft/nf_conntrack 双层实证。
+
+## 39. R-A 复活：mt76 完整对照（3.27）——关键修正 + 剩余单点（2026-10-31）
+
+**mt76 源码完整对照（dma.c/init.c/mmio.c/pci.c）收获**：
+1. **desc 字段序（权威）**：`struct mt76_desc { buf0; ctrl; buf1; info }`
+   ——**ctrl 在 +4**。3.25 错挪 +12 已修回；3.19-3.24（36B）时 ctrl
+   位形在 +4 位置本来是对的，只是 stride 错。
+2. **WFDMA0_RST（0xd4100）复位序列缺失**：mt7915_dma_disable(rst=true)
+   脉冲 bit4|bit5（LOGIC_RST|DMASHDL_ALL_RST），活系统读回 0x30（置位态
+   = 解除复位）。已补入 submit 路径（crw 亦验证可写）。
+3. **INT_SOURCE（0xd4200）W1C 清零**：init_hardware 前奏
+   `mt76_wr(INT_SOURCE_CSR, ~0)`。已补入。
+4. prefetch 表（EXT_CTRL +0x600 区 PREFETCH(base<<16|depth)）、队列
+   regs = BAR + 0xd4300 + qid*0x10、kick=cpu_idx 32 位标量——均与实测
+   一致（无需改）。
+
+**3.27 实测**：RST=0x30 ✓、FWDL 后 DIDX 仍 0、TOP_MISC=0。
+
+**剩余单点（收敛完成）**：mt76 能跑通的前提链中，我们唯一没有复刻的
+= **mcu_init 之前的 PCIe/MCU 交互前置**——mt7915_pci_probe 里 hif2
+（第二功能 790a）的联合初始化：vendor/mt76 都把 7906+790a 当**一个
+dev 的两个 BAR 集**（hif1=7906 BAR、hif2=790a BAR +0x4000 偏移语义），
+而我们两个独立 dev。mt76 的 GLO_CFG/环寄存器全在 hif1（7906），hif2
+只加 hif1_ofs 用于 band1。**下一实验**：把 FWDL 提交经由 7906 功能的
+BAR（0000:01:00.0，base=0x10300000）——我们现在所有环写在 790a 的
+BAR0！790a BAR0 翻译窗与 7906 不同（790a 的 0xD4xxx ≠ 7906 的 0xD4xxx）。
+活系统只有 7906 承载全部环（0x18024xxx→7906 BAR）——我们发错功能了！
