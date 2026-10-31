@@ -853,3 +853,30 @@ BAR0！790a BAR0 翻译窗与 7906 不同（790a 的 0xD4xxx ≠ 7906 的 0xD4xx
 3. 终极手段仍是 PCIe 总线分析/厂商源码级
 
 **资产**：3.27-rc2 双门禁过 ALL-PASS 在机；全套工具链；doc 62 §13-§40。
+
+## 41. R-A 全窗差分收敛：22 静态差异 → 7 项 → DMASHDL 组配置定性（3.28，2026-10-31）
+
+**方法论突破**：全窗差分（我们 0xd4000-0xd6fff 1536 寄存器 vs 活系统
+174 非零逐项）→ 22 静态差异 → init 后复扫收敛到 **7 项真实差异**：
+- 0xd42a0（ours=03000000 live=01000000，bit24）
+- 0xd42e0（live=0x15）
+- **0xd6100=038a037a / 0xd6140=00100a55**（DMASHDL 组配置——connac2
+  的 DMASHDL 子块在 BAR 0xd6000 区；vendor 从 hif_init 之外的路径配，
+  mt792x 系 mt76 有 DMASHDL_GROUP_QUOTA/Q_MAP 定义（0x7c026000+ofs，
+  同构寄存器族）
+- 0xd7560（INT 相关位差）
+- 0xd82a0/0xd82e0（WFDMA1/PCIE1 区，band1 相关）
+- 0xde000-0xde040（live=1/0x2f/0x00880910，未命名区）
+
+**crw 写活值验证**：0xd6100/0xd6140/0xd42e0 写**不粘**（回读 0），
+0xd42a0 部分粘（bit24 被过滤）——写粘性受时钟门/位场约束，
+**直接 crw 无法补配**，需要走 vendor 的配置路径（DMASHDL 配置函数）。
+
+**vendor 反汇编搜索**：0x037a/0x038a 常量仅命中 RA 相关误中；
+DMASHDL 配置函数符号未显式存在（inline 或查表写）。
+
+**下一步**：① vendor init 里搜批量 str 到 [rN, #0x100+0x6xxx] 模式
+（组配置循环写入特征）② 或对比 5.1 上加载前后差异（需可卸载重载——
+不可行）③ 或反汇编 chip_show_pse_info/pse 相关函数反推 DMASHDL 布局
+④ mt76 的 mt792x DMASHDL 组初始化序列做语义参照（GROUP_QUOTA/Q_MAP
+写入值风格）。
