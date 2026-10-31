@@ -43,6 +43,14 @@
 #define ZXNPU_WFDMA_RING_LO	0x18024640	/* six rings 0x18024640-0x18024650 */
 #define ZXNPU_WFDMA_RING_HI	0x18024680	/* six rings 0x18024680-0x18024694 */
 #define ZXNPU_WFDMA_RING_ENA	0x18024260
+/* mt7916_reg[] (mt76 mmio.c): INT_SOURCE_CSR=0xd4200 is write-1-clear;
+ * mt7915_init_hardware clears all pending sources before arming DMA.
+ * WFDMA0_RST=0x18024100: bits 4/5 (LOGIC_RST/DMASHDL_ALL_RST) read back
+ * set on the live vendor box - reset-asserted-on-write, self-clearing
+ * engine reset per mt7915_dma_disable(rst=true). */
+#define ZXNPU_WFDMA_INT_SOURCE	0x18024200
+#define ZXNPU_WFDMA_RST		0x18024100
+#define ZXNPU_WFDMA_RST_ALL	0x00000030u
 #define ZXNPU_WFDMA_PCIE_CFG	0x180242f4
 #define ZXNPU_WFDMA_PCIE_CFG2	0x180282f4
 #define ZXNPU_WFDMA_TX_BASE	0x1802702c
@@ -532,13 +540,12 @@ static void zxnpu_wlan_bus_scan(struct zxnpu_wlan *w)
  * The old layout wrote the bookkeeping view into the hardware words, so the
  * DMA fetched a descriptor whose buffer address and length were garbage and
  * DIDX never moved (3.19). */
-/* The WFDMA DMA consumes 16-BYTE descriptors (mt76 struct mt76_desc /
- * pci_init_txrx_ring_mem's "[0]=16 size constant"), NOT the 36-byte
- * host bookkeeping stride the ring regs are read with. Layout:
- *   word0 = buf0 DMA, word1 = buf1 (0), word2 = info (addr high bits),
- *   word3 = ctrl = SD_LEN0 (len << 16, bits 29-16) | LAST_SEC0 (bit 30).
- * The 36-byte stride put ctrl where buf1 belongs, so the DMA read
- * ctrl=0 - no length, nothing fetched, DIDX frozen (3.19-3.24). */
+/* The WFDMA DMA consumes 16-BYTE descriptors (mt76 struct mt76_desc,
+ * authoritative field order):
+ *   +0 buf0 = payload DMA, +4 ctrl = SD_LEN0(len<<16, bits 29-16) |
+ *   LAST_SEC0(bit 30), +8 buf1 = 0, +12 info = addr-high (0 on 32-bit).
+ * (3.25 had ctrl at +12 - wrong word; 3.19-3.24 had the right word but
+ * a 36-byte stride.) */
 static void zxnpu_mcu_fill_desc(void *ring, dma_addr_t ring_dma, u32 slot,
 				u32 buf_dma, u32 len)
 {
@@ -546,7 +553,7 @@ static void zxnpu_mcu_fill_desc(void *ring, dma_addr_t ring_dma, u32 slot,
 
 	memset(d, 0, ZXNPU_MCU_DESC_SIZE);
 	put_unaligned_le32(buf_dma, d + 0);
-	put_unaligned_le32(0x40000000u | ((len & 0x3fff) << 16), d + 12);
+	put_unaligned_le32(0x40000000u | ((len & 0x3fff) << 16), d + 4);
 }
 
 /*
@@ -598,6 +605,11 @@ static int zxnpu_mcu_submit_ring(struct zxnpu_wlan *w, int ring,
 		/* hif_set_WFDMA(2): WFDMA_EN | TX DMA EN */
 		zxnpu_cr_write(w, ZXNPU_WFDMA_GLO_CFG, glo | 0x5);
 	}
+	/* mt7915_dma_disable(rst=true) / init_hardware prologue: pulse the
+	 * WFDMA reset (self-clearing, reads back set on the live box) and
+	 * clear every pending interrupt source (INT_SOURCE is W1C). */
+	zxnpu_cr_write(w, ZXNPU_WFDMA_RST, ZXNPU_WFDMA_RST_ALL);
+	zxnpu_cr_write(w, ZXNPU_WFDMA_INT_SOURCE, ~0u);
 	zxnpu_cr_write(w, reg, (u32)desc_dma);
 	zxnpu_cr_write(w, reg + 4, ZXNPU_MCU_RING_DEPTH);
 	(*cidx)++;
