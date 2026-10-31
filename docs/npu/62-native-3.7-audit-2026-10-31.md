@@ -490,3 +490,15 @@ Bus error）——翻译表运行期读取不可行。
 2. 0x0D004204/0x0D008204（7906/790A 各自的窗口 base 常量）语义
 3. 用重建的映射重定位 {base, cidx/didx} BAR 偏移 → 3.25 重写
 工具就绪：3.23 ALL-PASS（crw b 直写 + 全部前序），5.1 只读合规。
+
+## 24. 3.24 续：chip_hif_pci_data_ring_assign 定位（下轮首靶）
+
+- LANCHOR0 锚名歧义（编译器局部锚全模块复用）——按名追踪死路，改用
+  完整反汇编（/tmp/mt7916-full.dis 867351 行，已在 WSL）+ 脚本过滤
+  （_scratch/lanch*.py、ringinit2.py）。
+- pci_init_txrx_ring_mem 解码发现：**chip_hif_pci_data_ring_assign**
+  （0x143CA0，pci_core_ops 表函数）= 数据环寄存器分配器——ring+36
+  （cidx 寄存器逻辑地址）应在此或其调用链设置。
+- 下轮首靶：解码 chip_hif_pci_data_ring_assign → ring+36/+40 的
+  逻辑地址公式 → 结合 chip_cap 窗口表（0x0D004204 base）重建映射
+  → 3.25 重写环寄存器地址 → DIDX 判定。
