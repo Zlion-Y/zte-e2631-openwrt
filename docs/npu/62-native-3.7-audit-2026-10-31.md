@@ -533,3 +533,20 @@ Bus error）——翻译表运行期读取不可行。
 - mcu-dl 的命令（SemGet/AddressLen/Finish）改走 qid16（ROM FWDL 环）
 - 每阶段 GLO_CFG 强制（0x1030b857）再写寄存器
 - DIDX 判定：qid16 cidx/did 对进即可确认 ROM 消费
+
+## 27. 3.24：§26 修正全部落码，布局对齐活系统，DIDX 仍冻——下轮系统性对照（2026-10-31）
+
+**落码**：0x10 步进复活（撤销 0x20 重写）、CNT=128（撤销 512）、全流量
+qid16（MCU_RING_NR=0）、提交路径回原版（base/CNT/cidx@+0/4/8、didx@+12）。
+实测：base=4e04e000 ✓、CNT=0x80=128 ✓（与活 FWDL 环一致！）、
+cidx=0x14=20（17 chunks + 3 cmds）✓——**布局与活系统完全对齐**。
+DIDX 仍 0，fw-state=0。
+
+**剩余差异清单（下轮系统性对照，22 写逐项回读 vs 活值）**：
+1. wfdma-init 的每写回读 vs 活系统对应寄存器值（GLO_CFG 已证收敛，
+   其余 21 写从未逐一验证效果）
+2. PCIe 窗寄存器：init 只写 0x282f4=0x811c0000；"第二 MAC 代用 0x82xx"
+   可能指值（0x821c0000）——两寄存器 × 两值矩阵未扫完
+3. 门铃（bar2+0x108）时机/值（上一轮未完成）
+4. 描述符 buf_dma 域核对（活 ring base=4a6c7000 vs 我们 4e04e000，
+   同 0x4xxxxxxxx 域 ✓ 但 desc 内的 buf 指针未对照）
