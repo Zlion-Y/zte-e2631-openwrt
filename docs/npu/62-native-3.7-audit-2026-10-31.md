@@ -506,3 +506,10 @@ Bus error）——翻译表运行期读取不可行。
   vtbl 基寄存器歧义误中 bgnd_scan_ipi_cr_init（雷达检测，无关）——
   下轮须以 mt7916_init 的 chip_ops 填充序列精确定位 [0x28C] 实现
   （walk str 序列按偏移配对，勿信 vtbl 的基名标注）。
+- §25 里程碑：[0x28C] 填充实锤 = bgnd_scan_ipi_cr_init（雷达）——
+  **chip_hif_pci_data_ring_assign 非 ring+36 产地**（红鲱鱼三号）；
+  pci_init_txrx_ring_mem 全 807 指令扫过：ring+36..51 = 初始化清零，
+  地址构造不在其中。**doc 14 §6.4 原注生效**：环寄存器编程在
+  multi_hif_entry_* 系（alloc/get_by_id/gid/rid，0x15bee4-0x15c12c）
+  ——7906/790A init 调的 multi_hif_entry_id_get 同族。下轮解码该族
+  找环寄存器地址赋值。
