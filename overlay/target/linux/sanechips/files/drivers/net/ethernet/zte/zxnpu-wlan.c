@@ -1936,7 +1936,10 @@ static int zxnpu_wlan_probe(struct pci_dev *pdev,
 	ret = pcim_enable_device(pdev);
 	if (ret)
 		return ret;
-	ret = pcim_iomap_regions(pdev, BIT(0) | BIT(1) | BIT(2),
+	/* MT7916 has three 64-bit BARs at indices 0, 2, 4 (BAR 1/3/5 are the
+	 * upper halves). Requesting BIT(1) causes EINVAL because BAR 1 is
+	 * not an independent resource on a 64-bit BAR device. */
+	ret = pcim_iomap_regions(pdev, BIT(0) | BIT(2) | BIT(4),
 				 "zxnpu-wlan");
 	if (ret)
 		return ret;
