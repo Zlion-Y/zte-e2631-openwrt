@@ -722,3 +722,32 @@ fw_own(dev, r1):                              // r1 = 1 pause / 0 resume?
 双形式）/rd2/分段下载工具链；doc 62 §13-§35 完整记录；mt76+mt7916.ko
 双源反汇编就绪。R-A 剩余 = MCU 消费机制一个未知域，需新的观测手段
 （总线分析或 vendor 源码）。
+
+## 36. R-D 集成面盘点：PPE flow offload 全套机械已在库（2026-10-31）
+
+zx279128s-ppe.c（baseline 编译单元，CONFIG_ZX279128S_ETH=n 后未编译）
+内含**完整 PPE flow offload 机械**（vendor 逆向成果）：
+- zx_ppe_start：寄存器保存/重编程（zx_ppe_regs/vals）、CLA V4 规则/
+  索引、包修改器 cmd/sub、MAC 表+trap 更新、bitmaps 清零
+- zx_ppe_flow_add/del/stats：子网分配/下一跳/FLOW 表 3 word/CLA hash
+  9 word 写入、rhashtable cookie 管理、错误回滚链
+- zx_ppe_stop：trap 恢复 + 表销毁 + 寄存器回滚
+
+**依赖面**：adapter（共享头同型 ✓：ports/base/ppe_flows/ppe_flow_used/
+ppe_nh_used/ppe_hash_used/ppe_count/ppe_lock）、zx_update_traps/
+zx_update_mac_tables（**main.c 符号，baseline 禁用后缺失——需 native
+版或桩**）、zx_pp_write/zx_ppe_alloc（ppe.c 自含）。
+
+**集成方案定案（方案 1）**：
+1. Makefile：zxnative-eth-y += zx279128s-ppe.o（ppe.c 并入 native 编译）
+2. 补 zx_update_traps/zx_update_mac_tables 的 native 语义版本
+   （native 已有自家 MAC 表逻辑——对接或桩化后由 zxna_ 自己维护 trap）
+3. zxna_probe：rhashtable_init(&a->ppe_flows)（baseline 在其 probe 做）
+4. zxna_setup_tc：offload=1 时 FLOW_CLS_REPLACE 首流触发 zx_ppe_start
+   → zx_ppe_flow_add；DESTROY → zx_ppe_flow_del（最后流 zx_ppe_stop）
+   STATS → zx_ppe_flow_stats
+5. 验收：nft flowtable 建立后 HW 卸载计数非零 + iperf 吞吐 + 断电重启
+   后 MAC/转发不回归
+
+**约束**：baseline 回像方案排除（会破 3.12 MAC defer 修复的竞争窗口）。
+R-A（FWDL）挂起待新观测维度，与本轮并行不悖。
