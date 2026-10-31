@@ -502,3 +502,7 @@ Bus error）——翻译表运行期读取不可行。
 - 下轮首靶：解码 chip_hif_pci_data_ring_assign → ring+36/+40 的
   逻辑地址公式 → 结合 chip_cap 窗口表（0x0D004204 base）重建映射
   → 3.25 重写环寄存器地址 → DIDX 判定。
+- §24 补记：chip_hif_pci_data_ring_assign = chip_ops[0x28C] 转发；
+  vtbl 基寄存器歧义误中 bgnd_scan_ipi_cr_init（雷达检测，无关）——
+  下轮须以 mt7916_init 的 chip_ops 填充序列精确定位 [0x28C] 实现
+  （walk str 序列按偏移配对，勿信 vtbl 的基名标注）。
