@@ -702,3 +702,23 @@ fw_own(dev, r1):                              // r1 = 1 pause / 0 resume?
 2. crw 18060020 1（= 0xE0020）
 3. 读 fw-state / 0xd440c DIDX → mcu-dl p.bin
 
+
+## 35. fw_own 重放结果 + R-A 状态终评（2026-10-31）
+
+**fw_own 重放（crw）**：0x18060010←0x1806、0x18060020←0x1 均落地
+（回读 0x4——寄存器位场过滤），mcu-dl 后 **DIDX 仍 0**。TOP_MISC=0。
+
+**R-A 状态终评（21 轮后）**：
+- 已闭环：三层寻址（逻辑 CR→mac_io→WFDMA0 窗→BAR，mt76 权威互证）、
+  环布局（0x10 步进 BASE/CNT/CIDX/DIDX，活值逐位）、使能序列（五环+
+  GLO+INT+信用表）、描述符（mt76 16B 格式逐位）、流程（全 qid16+門铃
+  排除+fw_own 重放）
+- 冻结点：**WFDMA DMA 引擎对 MCU 环的取数**——ROM 阶段 MCU 不消费
+  我们的描述符，且 MCU 零中断
+- 剩余候选（需更深层手段）：① chip_cap 运行期翻译表（STRICT_DEVMEM
+  封锁）② vendor SDK 私有 MCU hold/时钟序列 ③ PCIe 总线级分析
+
+**交接清单**：3.25 双门禁过 ALL-PASS 在机；有线完整服役；crw（CR+bar
+双形式）/rd2/分段下载工具链；doc 62 §13-§35 完整记录；mt76+mt7916.ko
+双源反汇编就绪。R-A 剩余 = MCU 消费机制一个未知域，需新的观测手段
+（总线分析或 vendor 源码）。
