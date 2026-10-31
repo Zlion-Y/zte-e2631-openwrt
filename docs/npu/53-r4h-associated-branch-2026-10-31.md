@@ -81,3 +81,21 @@ mbss/BssCoex 字符串；另一组 0x1cc0 = TMAC 块）——objdump 重定位�
 
 完整字段矩阵（cipher id 枚举、key material 偏移）= R4k；真机首帧对照
 后按需补全（与清单 36 的关联步骤同步）。
+
+## 8. R4k：cipher 枚举矩阵解码（fill_wtbl_key_info_struc_v2 完整）
+
+`fill_wtbl_key_info_struc_v2`(0x11EDCC, r0=key cfg / r1=key info 出 /
+r6=sec config)：
+
+- **cipher ID 映射**（sec_cfg+96 → keyinfo+8）：
+  `==5 → 1`、`==13 → 2`、`==16 → 3`（WTBL 密钥类型枚举；命名按 mt76
+  connac2 同族推断：1=WEP 类、2=TKIP 类、3=AES/CCMP 类——[推断] 标注）；
+- **密钥索引计数器**：keyinfo+4/+5 每 key 递增（11eeb8）；
+- **材质拷贝**：os_move_mem ×5，源含 sec_cfg+16（密钥数据区）与
+  sec_cfg+131（PMF/第二钥位），长度 36（0x24）；
+- **共享键分支**：head `(r0[0] & ~2) == 1` → 0x11EF7C 特殊路径；
+- hex_dump_with_cat_and_lvl ×3 = 密钥材质调试转储。
+
+**密钥块布局闭环**：cipher 枚举源（sec_cfg+96）→ 类型映射 → 索引计数
+→ 材质拷贝全部有指令地址。R4l（可选）= sec_cfg+96 枚举值的完整命名表
+（真机 key-set 流程对照后按需）。
