@@ -834,7 +834,7 @@ static int zxna_ioctl(struct net_device *netdev, struct ifreq *ifr, int cmd)
  * touched until the real flow programming lands in a later round.
  */
 static bool zxnative_offload;
-module_param_named(offload, zxnative_offload, bool, 0444);
+module_param_named(offload, zxnative_offload, bool, 0644);
 MODULE_PARM_DESC(offload, "arm the PPE flow offload (register snapshot, V4 rules, packet modifier, trap/MAC flip)");
 
 static int zxna_setup_tc(struct net_device *netdev, enum tc_setup_type type,
