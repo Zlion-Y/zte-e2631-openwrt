@@ -323,3 +323,22 @@ cidx 正常递增（FWDL qid16 cidx=0x33=51 次 FwScatter 写入），DMA 引擎
    时钟门/错误标志/hold 状态寄存器（活值 0x72/0xd2 所在域，肯定有活寄存器）
 2. chip_ops[0xC8]（pause/resume）与 [0xFB8]（FWDL 模式）语义——MCU hold/release
 3. PLE/PSE 队列映射（DMA 目的地未配置则 TX DMA 停摆）
+
+## 16. FWDL 模式门控排除 + 活值新发现（2026-10-31）
+
+- **connac top（0xF0000 窗）活/我逐位一致**（0x72/1/0xd2/1/0xd2/1/…
+  /0x20638）——纯静态表，无时钟/hold 寄存器差异。
+- **[0xFB8]=ctrl_fw_state_v2 = 纯软件同步器**（等 FwSyncValue→
+  MtCmdRestartDLReq/MtCmdPowerOnWiFiSys——后者为**空函数 no-op**）。
+  FWDL"模式进入"非门控。
+- **[0xC8] 槽填充者未定**（mt7916_init 里 #200 偏移未命中）；fw 子表基址
+  = priv+0xEFE000（0xfac=load_patch_v1、0xfb0=parse_fw_v1/2/3、
+  0xfb4=parse_patch_v1/2、0xfb8=ctrl_fw_state_v2——vtbl map 铁证）。
+- **活系统环深 = 512**（0xD4300 区每 0x10=base/cnt=0x200/cidx/didx，
+  全部环预置 CNT=512；我们写 64——下轮对齐试）。
+- 0xD7000 = WFDMA0 基区（cr[1802702c/30] 的 TX/RX 窗配置落点）。
+
+**DIDX 冻结剩余嫌疑（收敛后）**：① 环深 64 vs 512；② GLO_CFG bit10/bit1
+（活值 0x402 位差，写活值被硬件位过滤——bit0/bit1 疑似 self-clearing/
+RO）；③ per-ring enable 寄存器位置未定（0xD4300 非它）；④ MCU hold。
+排查工具：crw + 活系统 /tmp/rd 双侧对照。
