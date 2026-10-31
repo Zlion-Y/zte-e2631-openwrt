@@ -1,19 +1,20 @@
 --- a/drivers/net/ethernet/zte/Kconfig
 +++ b/drivers/net/ethernet/zte/Kconfig
-@@ -74,4 +74,17 @@
+@@ -73,4 +73,18 @@
+ 	  register writes also require commit=1.
  
  	  If unsure, say Y on this board.
- 
 +
 +config ZXNATIVE_ETH
 +	bool "ZTE ZX279128S native wired data plane (P2)"
 +	depends on OF && PHYLINK
 +	help
 +	  Standalone vendor-behaviour rewrite of the switch/GMAC/DMA data
-+	  path, linked in place of the baseline vendor-port driver (which
-+	  this image no longer builds). The MAC of every port lives in an
-+	  nvmem cell of the flash partition layout, so the probe defers
-+	  until the MTD stack is up and retries then.
++	  path, in place of the baseline vendor-port driver (CONFIG off in
++	  this image - the native rewrite owns the GMAC, doc 62 A1). Port
++	  MACs live in an nvmem cell of the flash partition layout, so the
++	  probe defers until the MTD stack is up; the deferred retry then
++	  brings the real addresses. enable=0 at boot declines the probe.
 +
 +	  If unsure, say Y on this board.
 +
