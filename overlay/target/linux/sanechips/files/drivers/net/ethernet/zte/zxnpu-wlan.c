@@ -509,19 +509,25 @@ static void zxnpu_wlan_bus_scan(struct zxnpu_wlan *w)
 #define ZXNPU_FW_MAX_REGIONS	16
 #define ZXNPU_PATCH_HDR		30
 
+/* The 36B ring item has two overlapping views: the host-side bookkeeping
+ * (pci_init_txrx_ring_mem: [0]=16, [4]=cur VA, [12]=skb, [28]=next) and the
+ * hardware view the WFDMA DMA actually reads, written by
+ * pci_kick_out_cmd_msg (0x1E19C0):
+ *   word0 (+0)  = payload buffer DMA address (copied from item +20)
+ *   word1 (+4)  = 0x40 << 24 | len << 16 - byte7 bit6 is the last-segment
+ *                 flag, bytes 6-7 carry the length (same encoding as the
+ *                 RXD buffer header, doc 14 §6.4)
+ * The old layout wrote the bookkeeping view into the hardware words, so the
+ * DMA fetched a descriptor whose buffer address and length were garbage and
+ * DIDX never moved (3.19). */
 static void zxnpu_mcu_fill_desc(void *ring, dma_addr_t ring_dma, u32 slot,
 				u32 buf_dma, u32 len)
 {
 	u8 *d = (u8 *)ring + slot * ZXNPU_MCU_DESC_SIZE;
-	u32 next = (slot + 1) % ZXNPU_MCU_RING_DEPTH;
 
 	memset(d, 0, ZXNPU_MCU_DESC_SIZE);
-	put_unaligned_le32(16, d + 0);
-	put_unaligned_le32(buf_dma, d + 4);
-	put_unaligned_le32(buf_dma + len, d + 8);
-	put_unaligned_le32(buf_dma, d + 12);
-	put_unaligned_le32(len, d + 24);
-	put_unaligned_le32(ring_dma + next * ZXNPU_MCU_DESC_SIZE, d + 28);
+	put_unaligned_le32(buf_dma, d + 0);
+	put_unaligned_le32(0x40000000u | (len << 16), d + 4);
 }
 
 /*
@@ -847,14 +853,10 @@ static void zxnpu_wlan_data_init(struct zxnpu_wlan *w, bool commit)
 		dma_addr_t bd = w->drx_buf_dma + i * ZXNPU_DATA_BUF_SIZE;
 
 		memset(d, 0, ZXNPU_MCU_DESC_SIZE);
-		put_unaligned_le32(16, d + 0);
-		put_unaligned_le32(bd, d + 4);
-		put_unaligned_le32(bd + ZXNPU_DATA_BUF_SIZE, d + 8);
-		put_unaligned_le32(bd, d + 12);
-		put_unaligned_le32(ZXNPU_DATA_BUF_SIZE, d + 24);
-		put_unaligned_le32(w->drx_ring_dma +
-				   ((i + 1) % ZXNPU_DATA_DEPTH) * ZXNPU_MCU_DESC_SIZE,
-				   d + 28);
+		/* hardware ring-item view: word0 = buffer DMA, word1 =
+		 * 0x40<<24 | buffer size << 16 (pci_kick_out_cmd_msg layout) */
+		put_unaligned_le32(bd, d + 0);
+		put_unaligned_le32(0x40000000u | (ZXNPU_DATA_BUF_SIZE << 16), d + 4);
 
 		memset(buf, 0, ZXNPU_MCU_RXD_SIZE);
 		put_unaligned_le32(bd, buf);
@@ -1209,14 +1211,8 @@ static void zxnpu_wlan_rx_init(struct zxnpu_wlan *w, bool commit)
 		dma_addr_t bd = w->rx_buf_dma + i * ZXNPU_MCU_RX_BUF_SIZE;
 
 		memset(d, 0, ZXNPU_MCU_DESC_SIZE);
-		put_unaligned_le32(16, d + 0);
-		put_unaligned_le32(bd, d + 4);
-		put_unaligned_le32(bd + ZXNPU_MCU_RX_BUF_SIZE, d + 8);
-		put_unaligned_le32(bd, d + 12);
-		put_unaligned_le32(ZXNPU_MCU_RX_BUF_SIZE, d + 24);
-		put_unaligned_le32(w->rx_ring_dma +
-				   ((i + 1) % ZXNPU_MCU_RX_DEPTH) * ZXNPU_MCU_DESC_SIZE,
-				   d + 28);
+		put_unaligned_le32(bd, d + 0);
+		put_unaligned_le32(0x40000000u | (ZXNPU_MCU_RX_BUF_SIZE << 16), d + 4);
 
 		memset(buf, 0, ZXNPU_MCU_RXD_SIZE);
 		put_unaligned_le32(bd, buf);

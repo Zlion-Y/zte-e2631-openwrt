@@ -306,3 +306,20 @@ desc+5=len 低字节、desc+7|=0x40|len 高——**与我们 fill_desc 的
 1. TX 描述符格式对齐 kick_out_cmd_msg/fwdl_msg 逐字段重解（[20]/[5]/[7]）
 2. per-ring 使能/GLO_CFG bit10（活值 0x402 位差：bit10+bit1）
 3. PLE 队列映射与 MCU hold 状态（TOP_MISC=0 的语义再证）
+
+## 15. 3.20：环项硬件视图落地，DIDX 仍冻——排查域转移（2026-10-31）
+
+**已落地**：pci_kick_out_cmd_msg 逐字段解码 → 环项双视图定性（软件簿记
+vs 硬件视图）；fill_desc + RX 两环 init 全部换硬件视图
+（word0=buf_dma、word1=0x40000000|len<<16）；3.20 双门禁过 ALL-PASS。
+
+**实测**：修正后 mcu-dl DIDX 仍冻（0 advanced）；GLO_CFG 写活值
+（crw 1030bc55）无效——硬件读回带位过滤（bit0/bit1）；提交后抓态：
+cidx 正常递增（FWDL qid16 cidx=0x33=51 次 FwScatter 写入），DMA 引擎
+就是不取。remap L0 寄存器不在 0xfe000 区（全零）。
+
+**下轮排查域（按优先级）**：
+1. connac top（0xF0000 窗 = 0x1800xxxx 域）与活系统系统性对照——找
+   时钟门/错误标志/hold 状态寄存器（活值 0x72/0xd2 所在域，肯定有活寄存器）
+2. chip_ops[0xC8]（pause/resume）与 [0xFB8]（FWDL 模式）语义——MCU hold/release
+3. PLE/PSE 队列映射（DMA 目的地未配置则 TX DMA 停摆）
