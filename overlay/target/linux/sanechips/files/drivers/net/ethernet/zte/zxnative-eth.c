@@ -1054,6 +1054,12 @@ static int zxna_probe(struct platform_device *pdev)
 				eth_hw_addr_random(netdev);
 			netdev->netdev_ops = &zxna_netdev_ops;
 			netdev->ethtool_ops = &zxna_ethtool_ops;
+			/* nft flowtable offload gates on tc_can_offload():
+			 * without NETIF_F_HW_TC the kernel never calls
+			 * zxna_setup_tc (TC_SETUP_FT), so the PPE never
+			 * arms - the 3.26 first-run gap. */
+			netdev->hw_features |= NETIF_F_HW_TC;
+			netdev->features |= NETIF_F_HW_TC;
 			netdev->min_mtu = 68;
 			netdev->max_mtu = 1500;
 			priv = netdev_priv(netdev);
