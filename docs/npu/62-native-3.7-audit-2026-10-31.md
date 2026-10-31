@@ -448,3 +448,26 @@ rx-init、未读应答 → 流程停等。FwScatter 51 块（FWDL 环）消费 0
 2. 本 boot 内多次 mcu-dl 后全窗快照对比，找出"动的计数器"真身
 3. RX 事件环（rx-init 已跑）无事件——ROM 阶段应答可能不走 RX 环，
    改查 PCIe INT（设备中断状态寄存器）确认 MCU 是否回过中断
+
+## 22. 世界观修正：消费从未发生（2026-10-31）
+
+三连修正：
+1. **门铃 = 红鲱鱼**：chip_trigger_int_to_mcu 的调用方 = HwRecoveryFromError/
+   MtfAsicTxCapAndRateTableUpdate/mt_ate_tx_unsubscribe——错误恢复/TX-cap/
+   ATE 专用，正常命令路径不敲门铃（与我们无门铃一致）。
+2. **"did=9" = 自我污染**：0xa5a5a5a5 & 0x000F0000 = 0x00090000——写粘性
+   地图的 a5 写入被寄存器位过滤（可写位仅 0x000F0000），"9"是 a5 的第
+   9 nibble。**MCU 从未消费任何命令**。
+3. **全窗快照差分 = 零变化**：mcu-dl 前后 0xD 窗 2KB 逐字节一致——本
+   boot 内硬件状态完全静止（连 cidx 都没变，因 0xd4b20 写不粘）。
+
+**/dev/mem 路线封死**：vendor 内核 STRICT_DEVMEM（去 O_SYNC 重试仍
+Bus error）——翻译表运行期读取不可行。
+
+**下轮（翻译表的静态路线）**：
+1. mt7916_init 反汇编找 chip_cap 窗口表填充（大常量 str 到
+   [chipcap+4..0x40]），静态重建 逻辑地址→物理 映射
+2. 用映射表重定位 {base, cidx/didx} 的真实 BAR 偏移
+3. kcore 路线备选（vendor /proc/kcore 存在性待查）
+工具状态：3.23 双门禁过 ALL-PASS（crw b 形式 + 全部前序）；5.1 探测
+全程只读合规。
