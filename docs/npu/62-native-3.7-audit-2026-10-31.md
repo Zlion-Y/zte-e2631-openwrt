@@ -550,3 +550,25 @@ DIDX 仍 0，fw-state=0。
 3. 门铃（bar2+0x108）时机/值（上一轮未完成）
 4. 描述符 buf_dma 域核对（活 ring base=4a6c7000 vs 我们 4e04e000，
    同 0x4xxxxxxxx 域 ✓ 但 desc 内的 buf 指针未对照）
+
+## 28. 22 写对照完成：信用表索引差 1 修正（仍不够），下轮 dump 活描述符环（2026-10-31）
+
+**对照结果**：
+- RING_LO 区（0xd4640-50）活值 =(6..10)<<22|4 ✓ 与我们一致
+- **RING_HI 区（0xd4680-94）活值 =(0..5)<<22|4** —— doc 13 表的 (1..6)
+  偏移差 1！我们首环 credit 写 0x00400004，活 = 0x00000004。已用 crw
+  修正为活值（回读全粘）。
+- GLO_CFG 强制 0x1030bc55（回读 0x...57，bit0/1 读过滤）
+- 修正后 mcu-dl：cidx=0x28 继续前进，**DIDX 仍 0**
+
+**排除完备清单**：布局（0x10 步进 BASE/CNT/CIDX/DIDX ✓ 活值逐位一致）、
+信用表（已改活值 ✓）、使能（0x24260=00010001 ✓）、GLO_CFG（≈活值 ✓）、
+INT_ENA（0x24240=ffffffff ✓）、PCIe 窗（两寄存器两值已试）、门铃（非命
+令路径）。
+
+**剩余唯一未知 = DMA 取描述符时的内容校验**。下轮首刀：dump vendor 活
+描述符环内容（live FWDL base=4a6c7000 DRAM，36B×N）对照我们的 fill_desc
+——STRICT_DEVMEM 封 /dev/mem，路线：① vendor 的 ring dump 调试接口
+（/proc 或 iwpriv）② 5.1 上 kcore ③ 我方盒先确认 desc 内容（win 读
+4e088000？——DRAM 不在 BAR 内，需设备侧 /dev/mem 或驱动内读）。
+我方驱动加 dmp 命令读 mcu_ring 前几项最快。
