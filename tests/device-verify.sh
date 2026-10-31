@@ -40,8 +40,10 @@ KREL=$($SSH uname -r 2>/dev/null)
 sec "V2 boot health"
 OOPS=$($SSH dmesg 2>/dev/null | grep -ciE 'oops|panic|BUG:|WARNING:|task .* blocked')
 [ "$OOPS" -le 1 ] && ok "no oops/panic in dmesg ($OOPS hits)" || bad "$OOPS oops/warning hits in dmesg"
-ERRS=$($SSH dmesg 2>/dev/null | grep -ciE '\berror\b|\bfail(ed|ure)?\b')
-$SSH dmesg 2>/dev/null | grep -iE '\berror\b|\bfail(ed|ure)?\b' | head -5
+# "Failed to create device link" lines are the known-benign first MAC-read
+# attempt before the nvmem layout binds (doc 62 A1) - filtered out.
+ERRS=$($SSH dmesg 2>/dev/null | grep -viE 'Failed to create device link' | grep -ciE '\berror\b|\bfail(ed|ure)?\b')
+$SSH dmesg 2>/dev/null | grep -viE 'Failed to create device link' | grep -iE '\berror\b|\bfail(ed|ure)?\b' | head -5
 [ "$ERRS" -le 3 ] && ok "dmesg error count tolerable ($ERRS)" || bad "$ERRS dmesg errors (list above)"
 MEM=$($SSH free 2>/dev/null | awk '/^Mem:/{print $7}')
 [ -n "$MEM" ] && [ "$MEM" -gt 100000 ] && ok "mem available ${MEM}kB" || bad "low memory: $MEM"

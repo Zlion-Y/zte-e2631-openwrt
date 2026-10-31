@@ -370,19 +370,19 @@ echo "native: .config stripped of the open-source wireless drivers (refusals wri
 # npu branch: the scaffold is the branch's identity and has no MMIO access, so
 # unlike FFE it is always built. The kernel-build wiring ships as patch 037;
 # the symbol choice is pinned here so a fresh tree cannot silently drop it.
-NATIVE_MARK="# E2631: native wired data plane (P2, built-in, enable=0)"
+NATIVE_MARK="# E2631: native wired data plane (P2, built-in, owns the GMAC)"
 if [ -f "$TREE/target/linux/sanechips/patches-6.18/043-zte-add-the-ZX279128S-native-wired-driver.patch" ]; then
 	awk '$0 !~ /^CONFIG_ZXNATIVE_ETH=/ && $0 !~ /native wired data plane/' "$CFG" > "$CFG.tmp" && mv "$CFG.tmp" "$CFG"
 	printf '%s
 ' "$NATIVE_MARK" 'CONFIG_ZXNATIVE_ETH=y' >> "$CFG"
-	echo "kernel config: native wired data plane (P2) built-in, runtime opt-in"
+	echo "kernel config: native wired data plane (P2) built-in, owns the GMAC"
 fi
-ETH_MARK="# E2631: wired hardware layer (021, vendor-native data plane)"
+ETH_MARK="# E2631: baseline wired driver OFF (021 stays for zx279128s-eth.h;"
+ETH_MARK2="# E2631: the native rewrite owns the GMAC - see doc 62 A1"
 if [ -f "$TREE/target/linux/sanechips/patches-6.18/021-net-ethernet-zte-Add-ZX279128S-Ethernet-switch-drive.patch" ]; then
-	awk -v m="$ETH_MARK" '$0 != m && $0 != "CONFIG_ZX279128S_ETH=y" && $0 != "# CONFIG_ZX279128S_ETH is not set"' "$CFG" > "$CFG.tmp" && mv "$CFG.tmp" "$CFG"
-	printf '%s
-' "$ETH_MARK" 'CONFIG_ZX279128S_ETH=y' >> "$CFG"
-	echo "kernel config: wired hardware layer ON"
+	awk -v m="$ETH_MARK" -v m2="$ETH_MARK2" '$0 != m && $0 != m2 && $0 != "CONFIG_ZX279128S_ETH=y" && $0 != "# CONFIG_ZX279128S_ETH is not set"' "$CFG" > "$CFG.tmp" && mv "$CFG.tmp" "$CFG"
+	printf '%s\n' "$ETH_MARK" "$ETH_MARK2" '# CONFIG_ZX279128S_ETH is not set' >> "$CFG"
+	echo "kernel config: baseline wired driver OFF (native rewrite owns the GMAC)"
 fi
 NPU_MARK="# E2631: npu scaffold (see apply.sh / npu branch)"
 if [ -f "$TREE/target/linux/sanechips/patches-6.18/042-zte-add-the-ZX279128S-NPU-wiring.patch" ]; then
@@ -534,7 +534,7 @@ assert "native wired driver wiring patch present" \
 assert "native wired driver enabled in the target config" grep -q '^CONFIG_ZXNATIVE_ETH=y$' "$CFG"
 assert "wired hardware layer patch present" \
 	test -f "$TREE/target/linux/sanechips/patches-6.18/021-net-ethernet-zte-Add-ZX279128S-Ethernet-switch-drive.patch"
-assert "wired hardware layer enabled in target config" grep -q '^CONFIG_ZX279128S_ETH=y$' "$CFG"
+assert "baseline wired driver disabled in target config" grep -q '^# CONFIG_ZX279128S_ETH is not set$' "$CFG"
 assert "npu scaffold source present" \
 	test -f "$TREE/target/linux/sanechips/files/drivers/net/ethernet/zte/zx279128s-npu.c"
 assert "npu scaffold wiring patch present" \

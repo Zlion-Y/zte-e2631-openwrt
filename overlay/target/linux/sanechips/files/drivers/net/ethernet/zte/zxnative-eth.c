@@ -916,7 +916,7 @@ static int zxna_probe(struct platform_device *pdev)
 	struct device *dev = &pdev->dev;
 	struct device_node *ports;
 	struct zx_eth_adapter *a;
-	int i, ret, registered = 0, mac_wait;
+	int i, ret, registered = 0;
 	bool napi_added = false;
 
 	if (!zxnative_enable)
@@ -993,19 +993,19 @@ static int zxna_probe(struct platform_device *pdev)
 			if (!of_property_read_string(np, "label", &label))
 				strscpy(netdev->name, label, IFNAMSIZ);
 			/* The MAC lives in an nvmem cell of the flash partition
-			 * layout; its supplier binds later than this probe
-			 * runs (3.10 measured: probe at 0.22s, supplier ready
-			 * by 0.9s), and a plain failure here silently made
-			 * every port random-MAC. Retry the defer window
-			 * briefly instead of deferring the whole probe -
-			 * that would let the baseline driver steal the node
-			 * in the boot race (it registers right after). */
-			ret = -ENODATA;
-			for (mac_wait = 0; mac_wait < 20; mac_wait++) {
-				ret = of_get_mac_address(np, mac);
-				if (ret != -EPROBE_DEFER)
-					break;
-				msleep(100);
+			 * layout. That supplier binds only after the MTD stack
+			 * probes - after ALL built-in initcalls - so no amount
+			 * of in-probe waiting helps (3.11 proved it: 8s of
+			 * msleep still deferred). Defer the whole probe and
+			 * let the deferred retry run once the layout is up;
+			 * safe from the boot race because the baseline driver
+			 * is no longer in the image (doc 62 A1). */
+			ret = of_get_mac_address(np, mac);
+			if (ret == -EPROBE_DEFER) {
+				of_node_put(np);
+				dev_err_probe(dev, ret, "%pOF: MAC nvmem not ready\n",
+					      np);
+				goto unreg;
 			}
 			if (!ret)
 				eth_hw_addr_set(netdev, mac);
