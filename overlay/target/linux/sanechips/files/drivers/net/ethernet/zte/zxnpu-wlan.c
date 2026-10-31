@@ -1975,6 +1975,21 @@ static ssize_t zxnpu_wlan_ctl_write(struct file *file, const char __user *ubuf,
 		zxnpu_wlan_mcuwin(w);
 	} else if (!strncmp(cmd, "win ", 4)) {
 		zxnpu_wlan_win_read(w, cmd + 4);
+	} else if (!strncmp(cmd, "crw ", 4)) {
+		/* commit-gated single CR write: "crw <addr-hex> <val-hex>".
+		 * The experiment tool for the FWDL bring-up loop (PCIe window
+		 * variants, per-ring enables) without a rebuild per try. */
+		u32 a, v;
+
+		if (!zxnpu_wlan_commit) {
+			zxnpu_wlan_append(w, "crw refused: set zxnpu_wlan.commit=1\n");
+		} else if (sscanf(cmd + 4, "%x %x", &a, &v) == 2) {
+			zxnpu_cr_write(w, a, v);
+			zxnpu_wlan_append(w, "crw [%08x] <- %08x; readback %08x\n",
+					  a, v, zxnpu_cr_read(w, a));
+		} else {
+			zxnpu_wlan_append(w, "usage: crw <addr-hex> <val-hex>\n");
+		}
 	} else if (!strncmp(cmd, "scan", 4) &&
 		   (cmd[4] == '\0' || cmd[4] == '\n')) {
 		zxnpu_wlan_bus_scan(w);
@@ -2117,7 +2132,7 @@ done_bss:
 			zxnpu_wlan_append(w, "commit refused: set zxnpu_wlan.commit=1\n");
 		zxnpu_wlan_wfdma(w, commit);
 	} else {
-		zxnpu_wlan_append(w, "commands: l1profile | ack-expect | data-init | data-recv | dataplane | probe | scan | win <bar> <off> [n] | fw | plan | mcu | rings | mcuwin | mcu-send | mcu-cmd | mcu-dl | mcu-dl-regions | fw-start | fw-info | fw-audit | fw-state | fw-plan wm|wa | fw-dl wm|wa | rx-init | mcu-recv | commit\n");
+		zxnpu_wlan_append(w, "commands: l1profile | ack-expect | data-init | data-recv | dataplane | probe | scan | win <bar> <off> [n] | crw <a> <v> | fw | plan | mcu | rings | mcuwin | mcu-send | mcu-cmd | mcu-dl | mcu-dl-regions | fw-start | fw-info | fw-audit | fw-state | fw-plan wm|wa | fw-dl wm|wa | rx-init | mcu-recv | commit\n");
 	}
 	mutex_unlock(&w->lock);
 	return count;

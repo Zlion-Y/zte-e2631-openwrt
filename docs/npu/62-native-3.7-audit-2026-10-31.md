@@ -282,3 +282,27 @@ vendor 软件链：mac_io → mt_mac_cr_range_mapping（bss 窗口表，翻译�
 **状态判定**：三段 remap 全通、访问层闭环；芯片 = ROM 引导完成、
 WFDMA 配置残值在、固件未下载。下一步 = FWDL 链真跑（step2：
 mcu-dl patch → fw-dl wm → fw-dl wa → fw-state 应变 7）。
+
+## 14. FWDL 首跑：DIDX 冻结隔离 + 环项格式新证（3.19，2026-10-31）
+
+**已跑通**：环寄存器全可读（0xD 段对位实锤）；wfdma-init 22 写生效
+（GLO_CFG 1010b857→1030b857 ≈ 活值 0x1030bc55）；patch 下载软件链完整
+（auto dst=04000000 offset=30，8642B，环基址 4e048000 已编程，SemGet/
+AddressLen/FwScatter/Finish 全部经 qid17/qid16 发出）。
+
+**硬点：DIDX=0 纹丝不动**（MCU/WFDMA 未消费描述符）。已排除：
+访问层（经 remap 读数≈活值）、WFDMA init（GLO_CFG 收敛活值）、
+PCIe 窗变体（0x242f4=0x811c0000、0x282f4=0x821c0000 均写进回读一致）。
+活系统直读对照：bar0+0x24208/0x242f4/0x246xx 直读全零——直映区就是死区，
+remap 窗才是真寄存器（我们的访问已与 vendor 行为一致）。
+
+**新证（pci_kick_out_fwdl_msg 解码）**：vendor FWDL 环项填写 =
+desc[12]=skb、desc[16]=0、desc[20]=buf_dma（RtmpDrvPciMapSingle）、
+desc+5=len 低字节、desc+7|=0x40|len 高——**与我们 fill_desc 的
+[24]=len/[28]=next 布局不同**（kick_out_cmd_msg 与 kick_out_fwdl_msg
+两环格式可能不同）。3.19 新增 crw 实验工具（commit 门控单写+回读）。
+
+**下轮嫌疑清单（按优先级）**：
+1. TX 描述符格式对齐 kick_out_cmd_msg/fwdl_msg 逐字段重解（[20]/[5]/[7]）
+2. per-ring 使能/GLO_CFG bit10（活值 0x402 位差：bit10+bit1）
+3. PLE 队列映射与 MCU hold 状态（TOP_MISC=0 的语义再证）
