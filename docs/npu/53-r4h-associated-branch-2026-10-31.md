@@ -99,3 +99,19 @@ r6=sec config)：
 **密钥块布局闭环**：cipher 枚举源（sec_cfg+96）→ 类型映射 → 索引计数
 → 材质拷贝全部有指令地址。R4l（可选）= sec_cfg+96 枚举值的完整命名表
 （真机 key-set 流程对照后按需）。
+
+## 9. R4l：密钥安装调用上下文（WPAGroupRekeyByWdev）
+
+`chip_ops[0x2A0]`（fill_key_install_cmd_v2，mt7916_init@1a0438）的调用者
+= **`WPAGroupRekeyByWdev`(0x0AA68)**——WPA 组密钥轮换定时器：
+
+- 读 wdev+596 标志（bits 496 掩码 = key 信息位域）；
+- 组键轮换定时器 RTMPSetTimer(1000ms)；
+- `HcIsRadioAcq` 无线占用检查 → 取消定时器分支；
+- 结尾清 wdev+676/796（轮换状态复位）。
+
+**SetKey 同步点闭环**：单播钥 = 关联路径（per-STA ctx + P5 关联管理）；
+组钥 = `WPAGroupRekeyByWdev` 定时器 → chip_ops[0x2A0] → MCU 命令。
+P5 的 wlanmgr 需实现这两个入口的 ctx 镜像同步。
+
+R4l 关闭（枚举命名 [推断] 已标注，真值对照真机）。
