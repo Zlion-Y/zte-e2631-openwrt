@@ -503,7 +503,7 @@ static void zxnpu_wlan_bus_scan(struct zxnpu_wlan *w)
  * through ring 0. */
 #define ZXNPU_MCU_RING_NR	0
 #define ZXNPU_MCU_RING_REG	(ZXNPU_WFDMA_TX_RING0 + 0x10 * ZXNPU_MCU_RING_NR)
-#define ZXNPU_MCU_DESC_SIZE	36
+#define ZXNPU_MCU_DESC_SIZE	16
 /* The live vendor FWDL ring runs 128 deep (CNT=0x80 at 0x18024404,
  * doc 62 §26) - mirror it. */
 #define ZXNPU_MCU_RING_DEPTH	128
@@ -532,6 +532,13 @@ static void zxnpu_wlan_bus_scan(struct zxnpu_wlan *w)
  * The old layout wrote the bookkeeping view into the hardware words, so the
  * DMA fetched a descriptor whose buffer address and length were garbage and
  * DIDX never moved (3.19). */
+/* The WFDMA DMA consumes 16-BYTE descriptors (mt76 struct mt76_desc /
+ * pci_init_txrx_ring_mem's "[0]=16 size constant"), NOT the 36-byte
+ * host bookkeeping stride the ring regs are read with. Layout:
+ *   word0 = buf0 DMA, word1 = buf1 (0), word2 = info (addr high bits),
+ *   word3 = ctrl = SD_LEN0 (len << 16, bits 29-16) | LAST_SEC0 (bit 30).
+ * The 36-byte stride put ctrl where buf1 belongs, so the DMA read
+ * ctrl=0 - no length, nothing fetched, DIDX frozen (3.19-3.24). */
 static void zxnpu_mcu_fill_desc(void *ring, dma_addr_t ring_dma, u32 slot,
 				u32 buf_dma, u32 len)
 {
@@ -539,7 +546,7 @@ static void zxnpu_mcu_fill_desc(void *ring, dma_addr_t ring_dma, u32 slot,
 
 	memset(d, 0, ZXNPU_MCU_DESC_SIZE);
 	put_unaligned_le32(buf_dma, d + 0);
-	put_unaligned_le32(0x40000000u | (len << 16), d + 4);
+	put_unaligned_le32(0x40000000u | ((len & 0x3fff) << 16), d + 12);
 }
 
 /*

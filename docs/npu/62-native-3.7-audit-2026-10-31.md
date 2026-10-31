@@ -634,3 +634,24 @@ mt76 master 的 mt7915/mmio.c `mt7916_reg[]` 表（与我们实测逐项互证�
 （mt76 的 ROM FWDL 用 MCUQ_FWDL 环 + MCU Command/Semaphore 流程，
 mt76 mcu.c 的 mt7916 分支有 ROM 阶段细节——下轮解码 mcu.c 的
 mt7915_mcu_send_message 与 fw download 序列）。
+
+## 32. 3.25：mt76 格式描述符落地，DIDX 仍冻——排查完备度评估（2026-10-31）
+
+**落码**：DESC_SIZE 36→16（mt76 struct mt76_desc 权威格式：buf0/buf1/
+info/ctrl）；ctrl = SD_LEN0(len<<16)|LAST_SEC0(bit30) 在 +12（此前写错
+位）；fill_desc 重写。3.25 双门禁过 ALL-PASS。
+
+**实测**：CNT=128 ✓、cidx=20 前进 ✓、**DIDX 仍 0**、INT_SOURCE/
+MASK（0xd4200/04）全零——MCU 从未回过任何中断。TOP_MISC=0。
+
+**完备度**：访问层（三段 remap+权威地址图）、布局（0x10 步进 BASE/CNT/
+CIDX/DIDX）、使能（五环+GLO_CFG+INT_ENA+信用表对齐活值）、描述符
+（mt76 格式）、流程（全 qid16）——**全部 vendor/mt76 双源背书**。
+剩余唯一未知 = **ROM 固件自身的状态机期望**（MCU 侧消费前提）。
+
+**下轮候选（按性价比）**：
+1. chip_ops[0xC8]（MCU pause/resume）语义解码——vendor 下载前显式
+   暂停 MCU，暗示 MCU 默认态非"等固件"（可能 crashed/idle-hold）
+2. connac top 0x1800xxxx 域的 MCU hold 寄存器扫描（0xF0000 窗活，
+   可写试验：top cfg 的 SW reset/hold 位）
+3. PERST/电源序列复核：gpio enable/reset 时序重放后再探
