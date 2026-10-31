@@ -671,9 +671,34 @@ mt7916_init 的 chip_ops（r3 表，820B）填充图（符号已归因）：
 - pause/resume 符号搜索零命中——[0xC8] 的实现函数名不含 pause/resume
   （doc 14 的"暂停/恢复 ✓"为语义标注非符号名）
 
-**下轮**：
-1. mt_load_fw 反汇编精读 [0xC8] 调用上下文（r1 参数 = 1 暂停 / 0 恢复），
-   反推 [0xC8] 函数指针来源（mt_load_fw 里 ldr rX, [chip_ops, #0xC8]
-   前的取基址指令链）
-2. 计算偏移存储搜索：mt7916_init 里 str [r3, rN] 形式
-3. 若 [0xC8] = fw_own/hold 类——对照 mt76 的 mt7915_mcu_fw_own 语义
+**§34 fw_own 解码（0x19EBB0，chip_ops[0xC8] 实现候选）**：
+
+```
+fw_own(dev, r1):                              // r1 = 1 pause / 0 resume?
+    chip_cap = hc_get_chip_cap(); hif = hc_get_hif_ctrl()
+    if (([chipcap+0x984] & ~4) == 1) return   // fw sync 已在特定态则跳过
+    // 首写：mac_io_write32(0x18060010, 0x1806)   ← r1=0x1806!
+    //   （逻辑地址 0x18060010 = TOP_MISC 区 +0x10！值为 0x1806 = L1 remap 目标？）
+    sync = get_fw_sync_value()
+    [hif+0xD49] = 0                            // 软件标记
+    if (sync <= 3):
+        if (r1 == 0) return                    // r1=0（resume）在 sync<=3 时直接返回
+        // r1=1（pause）且 sync<=3：
+        mac_io_write32(0x18060020, 1)          ← 第二写：0x18060020 = 1
+        [hif+0xD4A] = 0
+```
+
+**寄存器写序列（crw 可重放）**：
+- **0x18060010 <- 0x1806**（无条件首写——0x1806 值 = TOP_MISC 段地址！
+  疑似把 L1 remap 重指向 0x1806 或触发 fw_own 状态机）
+- **0x18060020 <- 0x1**（sync<=3 且 r1=1 时——fw_own 请求位！）
+  （两写均经 mac_io → mt_mac_cr_range_mapping → 翻译落点）
+
+**与 0xE00F0 读数的对照**：0xd4b04 = 0x00010001 亦在 0xd4b 区——
+0x18060020 的物理落点或即 0xE020（remap 窗内 +0x20）！
+
+**crw 重放序列（下轮）**：
+1. crw 18060010 1806（经 L0 翻译？0x1806 段 = 0xE0000 窗——写 0xE0010）
+2. crw 18060020 1（= 0xE0020）
+3. 读 fw-state / 0xd440c DIDX → mcu-dl p.bin
+
