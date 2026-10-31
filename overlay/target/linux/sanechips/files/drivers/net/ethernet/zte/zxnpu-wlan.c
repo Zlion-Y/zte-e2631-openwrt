@@ -494,7 +494,10 @@ static void zxnpu_wlan_bus_scan(struct zxnpu_wlan *w)
 #define ZXNPU_MCU_RING_NR	1
 #define ZXNPU_MCU_RING_REG	(ZXNPU_WFDMA_TX_RING0 + 0x10 * ZXNPU_MCU_RING_NR)
 #define ZXNPU_MCU_DESC_SIZE	36
-#define ZXNPU_MCU_RING_DEPTH	64
+/* The live vendor system pre-set CNT=512 on every ring (0xD4300 region,
+ * doc 62 §16); a 64-deep ring mismatches whatever the ROM/DMA validates
+ * against, so mirror the vendor depth. */
+#define ZXNPU_MCU_RING_DEPTH	512
 #define ZXNPU_MCU_BUF_SIZE	4096
 #define ZXNPU_MCU_TYPE_PATCH	0x10
 #define ZXNPU_MCU_CMD_PATCH	0x17

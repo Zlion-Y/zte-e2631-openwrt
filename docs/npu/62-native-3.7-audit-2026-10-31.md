@@ -342,3 +342,48 @@ cidx 正常递增（FWDL qid16 cidx=0x33=51 次 FwScatter 写入），DMA 引擎
 （活值 0x402 位差，写活值被硬件位过滤——bit0/bit1 疑似 self-clearing/
 RO）；③ per-ring enable 寄存器位置未定（0xD4300 非它）；④ MCU hold。
 排查工具：crw + 活系统 /tmp/rd 双侧对照。
+
+## 17. 总路线图 v2（双硬件加速 + 可用固件，2026-10-31 定案）
+
+**范围定义**
+- 有线 HW 加速 = SBRG hash 表 + PPE flow offload（nft flowtable 硬件路径，
+  已逆向的 sbrg 套件接入 zxnative-eth 的 setup_tc）
+- 无线 HW 加速 = WFDMA 环 DMA（进行中）+ TXD 硬件模板 + IDM skb 直通（后期）
+- 固件可用性判定 = ① 有线 LAN/WAN 双向 ≥ 基线（vendor 参考 395M/CPU7
+## 17. 总路线图 v2（双硬件加速 + 可用固件，2026-10-31 定案）
+
+**范围定义**
+- 有线 HW 加速 = SBRG hash 表 + PPE flow offload（nft flowtable 硬件路径，已逆向的 sbrg 套件接入 zxnative-eth 的 setup_tc）
+- 无线 HW 加速 = WFDMA 环 DMA（进行中）+ TXD 硬件模板 + IDM skb 直通（后期）
+- 固件可用性判定 = ① 有线 LAN/WAN 双向 >= 基线（vendor 参考 395M/CPU7%）② 无线可关联可上网 ③ HW 加速计数非零 ④ device-verify ALL-PASS ⑤ 双门禁过 ⑥ 长稳 >=24h 无 oops
+
+**迭代轮次**
+- R-A 无线 FWDL：环深 512 -> DIDX -> patch/WM/WA -> fw-state=7
+- R-B 无线控制面：BSS bring-up -> 可关联
+- R-C 无线数据面 P5：802.11->802.3、wcid->VAP -> ping 通
+- R-D 有线加速：PPE offload 接入 -> flowtable 硬件计数
+- R-E 无线加速：TXD 模板 + 吞吐
+- R-F 总验收：六项判定全绿
+每轮验收标准随轮写入；验证方式 = device-verify + 轮专项命令。
+
+## 18. 环寄存器真实布局破译（活系统对齐扫描，2026-10-31）
+
+活系统 0xD 窗 64KB 对齐扫描（0x20 步长，185 非零寄存器）推翻我们的
+0x10 步进模型：
+
+- **TX/RX 环 base 每 0x20 步进**：0xd4400/20/40 = 4a6df000/4a748000/
+  4a6e1000（TX qid16-18），0xd4500/20/40 = 4a0b8000/4a0bc000/4a758000（RX）
+- **cidx/didx = 16 位打包对**，在 0xd4b00+ 区域：0xd4b00=002e002e（FWDL
+  cidx=didx=0x2e）、0xd4b20=02990299、0xd4b40=00ca00ca（各环进度）
+- **INT_ENA 真身 = 0x18024240**（活值 ffffffff；我们写的 0x1802420c 活=0）
+- 0xd4100=0x30/0xd4120=ffff0000/0xd4260=00010001/0xd42a0=01000000/
+  0xd42e0=0x15 = GLO/配置区活值
+- 0xd6020/40=01ff0010（掩码 512-1 = 环深 512 又证）；0xd7000+=WFDMA0；
+  0xd8000+=0xd4000 结构镜像（band1/WFDMA1）；0xdd000=deadfeed 魔数
+
+**DIDX 冻结根因（终）**：我们写的 cidx 地址（0xd4408）不是硬件读的位置
+——硬件 cidx 在 0xd4bxx 打包对，DMA 看到的 cidx 恒 0。
+
+**3.22 规格**：以 pci_kick_out_cmd_msg 尾部的硬件 cidx 写地址 + 稠密读
+交叉，重绘 {base, cnt, cidx/didx} 精确偏移表；重写 rings/submit 的
+寄存器地址与步长；预期 mcu-dl DIDX 立即应答。
