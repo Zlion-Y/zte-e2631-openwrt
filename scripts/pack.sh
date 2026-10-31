@@ -24,7 +24,16 @@ while [ $# -gt 0 ]; do
 	*) die "unknown argument: $1 (usage: pack.sh --dir <build dir> [--out f])" ;;
 	esac
 done
-[ -n "$DIR" ] || die "--dir <build dir> is required (the build.sh --no-pack output)"
+[ -n "$DIR" ] || {
+	# Newest build-* by mtime. A hardcoded date in the caller's glob once
+	# kept matching the previous day's tree across midnight, so a "3.29"
+	# package shipped a 3.28 rootfs (sixteen flashes chased a write bug
+	# that was never there). Defaulting to the newest tree removes the
+	# chance to make that mistake by hand.
+	DIR=$(ls -dt "$E2631_OUT"/build-* 2>/dev/null | head -1)
+	[ -n "$DIR" ] || die "no --dir given and no build-* under $E2631_OUT"
+	say "no --dir given; packing the newest tree: $(basename "$DIR")"
+}
 case "$DIR" in /*) ;; *) DIR="$PWD/$DIR" ;; esac
 [ -d "$DIR/payload" ] || die "$DIR holds no payload - pass the build dir collect.sh wrote"
 
