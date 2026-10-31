@@ -880,3 +880,29 @@ DMASHDL 配置函数符号未显式存在（inline 或查表写）。
 不可行）③ 或反汇编 chip_show_pse_info/pse 相关函数反推 DMASHDL 布局
 ④ mt76 的 mt792x DMASHDL 组初始化序列做语义参照（GROUP_QUOTA/Q_MAP
 写入值风格）。
+
+## 42. 刷写链路根因修复 + 3.29 真机运行（2026-11-01）
+
+**十六次刷写失败的真正原因（不是写入，是打包）**：
+调用方用 `ls -dt ../out/build-20261031-*` 选构建目录，跨过午夜后该
+glob 仍匹配 10/31 的旧树 → 包 = 3.28 的 rootfs + 3.29 的版本字符串。
+逐字节证据：包 header 记录 rFileOff=0x400214，该处 0x960000 字节
+md5=3182c8c9，与设备 mtd7 完全一致，而 payload root md5=3ddb4ce9。
+期间排除的假象：mtd 写入持久性测试（写随机模式到 slot1 安全偏移，
+重启后仍在 → MTD 写一直有效）；busybox `dd count=150` 管道读不可靠
+（与分块读结论矛盾，改用文件落盘 + cmp 才可信）。
+
+**修复**：
+- `scripts/pack.sh`：无 `--dir` 时自动取 mtime 最新的 `build-*`，
+  默认路径不再依赖调用方拼日期
+- 新增 `tests/build-latest.sh`：构建 → 断言 build 树 rootfs 内版本 ==
+  overlay 版本（不符即拒绝打包）→ 打包 → 刷入 → 核查
+
+**3.29 真机运行**（device-verify ALL-PASS），含本轮全部修正：
+16B 描述符（ctrl@+4）、WFDMA0_RST 脉冲、INT_SOURCE W1C、CR 经主功能
+BAR 转发、**connac2 MCU TXD 命令头（60B，cid/pkt_type 0xa0，payload@60）**
+—— 实测 `submit qid16 slot=19 len=60`（此前为 24B Andes 头 len=28）。
+
+**DIDX 仍 0**：命令格式已与 mt76 权威实现一致，但 WFDMA 引擎仍未取
+描述符。剩余方向：DMASHDL 组配置（活值 0xd6100=038a037a /
+0xd6140=00100a55，crw 写不粘）+ ROM 阶段 DMA 使能前提。
