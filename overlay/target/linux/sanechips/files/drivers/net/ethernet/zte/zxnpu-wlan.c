@@ -2004,6 +2004,27 @@ static ssize_t zxnpu_wlan_ctl_write(struct file *file, const char __user *ubuf,
 		zxnpu_wlan_mcuwin(w);
 	} else if (!strncmp(cmd, "win ", 4)) {
 		zxnpu_wlan_win_read(w, cmd + 4);
+	} else if (!strncmp(cmd, "crw b", 5)) {
+		/* bar-direct form: "crw b<bar> <off> <val>" - the doorbell
+		 * (0x54000108 logical) lives outside the CR window and its
+		 * physical home is one of the BARs; write and read back. */
+		unsigned int bar;
+		unsigned long off;
+		u32 v;
+		void __iomem *p;
+		resource_size_t len;
+
+		if (!zxnpu_wlan_commit) {
+			zxnpu_wlan_append(w, "crw refused: set zxnpu_wlan.commit=1\n");
+		} else if (sscanf(cmd + 5, "%u %lx %x", &bar, &off, &v) == 3 &&
+			   bar <= 2 && (p = zxnpu_wlan_bar_of(w, bar, &len)) &&
+			   off + 4 <= len) {
+			writel(v, p + off);
+			zxnpu_wlan_append(w, "crw b%u+%lx <- %08x; readback %08x\n",
+					  bar, off, v, readl(p + off));
+		} else {
+			zxnpu_wlan_append(w, "usage: crw b<bar 0..2> <off> <val>\n");
+		}
 	} else if (!strncmp(cmd, "crw ", 4)) {
 		/* commit-gated single CR write: "crw <addr-hex> <val-hex>".
 		 * The experiment tool for the FWDL bring-up loop (PCIe window

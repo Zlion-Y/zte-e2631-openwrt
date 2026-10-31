@@ -430,3 +430,21 @@ rx-init、未读应答 → 流程停等。FwScatter 51 块（FWDL 环）消费 0
 3. 完整 patch 流 → fw-dl wm → fw-dl wa → fw-state 应 = 7
 4. poll 修正：did 在 0xd4b00 高半（ring1）；tx0/FWDL 的 did 位置在
    RX 联动后重定位
+
+## 21. 3.23：门铃寄存器定位 + 消费计数未动（2026-10-31）
+
+- **pci_trigger_int_to_mcu 解码**：mac_io_write32(逻辑 0x54000108, val)
+  ——门铃在 CR 窗外，我们从未写过（crw 旧式被界检丢弃）。
+- **3.23 crw 增 bar 直写形式**（crw b<bar> <off> <val>）；实测 b1+0x108
+  （=bar2+0x108，即 mcuwin 时代读出 0x47474747 的位置）**写粘回读一致**
+  ——真实寄存器；b0+0x108 不粘。
+- **实验**：mcu-dl 后门铃 b1+108 写 1/0x10 → FWDL 环 didx 仍 0、
+  0xd4b00 对=0（本 boot 消费计数未动；上 boot 的 9 未能复现——计数
+  寄存器/条件仍未知）。
+
+**下轮**：
+1. 门铃值语义：解码 chip_trigger_int_to_mcu 的调用方（值=队列/cause）
+   与调用时机（每 submit 后 or bulk 后）
+2. 本 boot 内多次 mcu-dl 后全窗快照对比，找出"动的计数器"真身
+3. RX 事件环（rx-init 已跑）无事件——ROM 阶段应答可能不走 RX 环，
+   改查 PCIe INT（设备中断状态寄存器）确认 MCU 是否回过中断
