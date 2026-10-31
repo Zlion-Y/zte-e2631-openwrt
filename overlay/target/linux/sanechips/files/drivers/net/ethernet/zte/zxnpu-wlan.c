@@ -4,10 +4,11 @@
  *
  * This driver deliberately binds only the companion PCIe function
  * 14c3:790a, which mt76 leaves unbound in the current single-HIF image. It is
- * a probe/firmware audit stage, not an AP driver: with enable=0 it refuses the
- * device, and even when enabled it only enables PCI, maps the BARs, reads
- * config space and checks the vendor firmware files. No MT7916 register is
- * written yet.
+ * a probe/firmware audit stage, not an AP driver: with enable=0 it parks the
+ * device (probe succeeds, the proc/VAP control plane exists, but no PCI or
+ * BAR access happens), and even when enabled it only enables PCI, maps the
+ * BARs, reads config space and checks the vendor firmware files. No MT7916
+ * register is written yet.
  */
 
 #include <linux/crc32.h>
@@ -87,6 +88,10 @@ struct zxnpu_wlan {
 	u32 drx_cidx;
 	struct zxnpu_vap *vaps[ZXNPU_VAP_MAX];
 	char status[4096];
+	/* persistent probe evidence (identity, BARs, firmware CRCs): status[]
+	 * is per-ctl-command scratch and used to lose this on the first
+	 * command after boot. */
+	char probe_log[2048];
 };
 
 static struct zxnpu_wlan *zxnpu_wlan_singleton;
@@ -110,6 +115,19 @@ static void zxnpu_wlan_append(struct zxnpu_wlan *w, const char *fmt, ...)
 	va_end(args);
 }
 
+/* same bounds, but into the persistent probe log */
+static void zxnpu_wlan_pl_append(struct zxnpu_wlan *w, const char *fmt, ...)
+{
+	va_list args;
+	size_t len = strlen(w->probe_log);
+
+	if (len >= sizeof(w->probe_log) - 1)
+		return;
+	va_start(args, fmt);
+	vsnprintf(w->probe_log + len, sizeof(w->probe_log) - len, fmt, args);
+	va_end(args);
+}
+
 static void zxnpu_wlan_audit_firmware(struct zxnpu_wlan *w)
 {
 	int i;
@@ -121,13 +139,13 @@ static void zxnpu_wlan_audit_firmware(struct zxnpu_wlan *w)
 		ret = request_firmware_direct(&fw, zxnpu_fw_names[i],
 					      &w->pdev->dev);
 		if (ret) {
-			zxnpu_wlan_append(w, "fw %s: missing (%d)\n",
-					  zxnpu_fw_names[i], ret);
+			zxnpu_wlan_pl_append(w, "fw %s: missing (%d)\n",
+					     zxnpu_fw_names[i], ret);
 			continue;
 		}
-		zxnpu_wlan_append(w, "fw %s: %zu bytes crc32=%08x\n",
-				  zxnpu_fw_names[i], fw->size,
-				  crc32_le(~0U, fw->data, fw->size) ^ ~0U);
+		zxnpu_wlan_pl_append(w, "fw %s: %zu bytes crc32=%08x\n",
+				     zxnpu_fw_names[i], fw->size,
+				     crc32_le(~0U, fw->data, fw->size) ^ ~0U);
 		release_firmware(fw);
 	}
 }
@@ -285,19 +303,24 @@ static void zxnpu_wlan_rings(struct zxnpu_wlan *w)
  */
 static void zxnpu_wlan_mcuwin(struct zxnpu_wlan *w)
 {
+	/* MT7916 owns 64-bit BARs at indices 0, 2, 4; w->bar[i] mirrors that
+	 * (table[1] is the upper half of BAR0 and was never requested). */
+	static const unsigned int bar_idx[3] = { 0, 2, 4 };
 	int i;
 
 	zxnpu_wlan_append(w, "mcu window probe (read-only):\n");
 	for (i = 0; i < 3; i++) {
-		resource_size_t len = pci_resource_len(w->pdev, i);
-		unsigned long flags = pci_resource_flags(w->pdev, i);
+		resource_size_t len = pci_resource_len(w->pdev, bar_idx[i]);
+		unsigned long flags = pci_resource_flags(w->pdev, bar_idx[i]);
 
 		if (!w->bar[i] || !(flags & IORESOURCE_MEM) || len < 0x10c) {
 			zxnpu_wlan_append(w, "  bar%d: unmapped/short (len %llu flags %lx)\n",
-					  i, (unsigned long long)len, flags);
+					  bar_idx[i], (unsigned long long)len,
+					  flags);
 			continue;
 		}
-		zxnpu_wlan_append(w, "  bar%d: +0=%08x +8=%08x +0x108=%08x\n", i,
+		zxnpu_wlan_append(w, "  bar%d: +0=%08x +8=%08x +0x108=%08x\n",
+				  bar_idx[i],
 				  readl(w->bar[i]),
 				  readl(w->bar[i] + 8),
 				  readl(w->bar[i] + 0x108));
@@ -379,6 +402,10 @@ static int zxnpu_mcu_submit_ring(struct zxnpu_wlan *w, int ring,
 	u32 reg = ZXNPU_WFDMA_TX_RING0 + 0x10 * ring;
 	u32 slot, didx, prev;
 
+	if (!w->bar[0]) {
+		zxnpu_wlan_append(w, "  parked: enable=0 (reload with enable=1)\n");
+		return 0;
+	}
 	if (!desc || !buf || len <= 0 || len > ZXNPU_MCU_BUF_SIZE)
 		return -EINVAL;
 	slot = (*cidx) % ZXNPU_MCU_RING_DEPTH;
@@ -478,7 +505,9 @@ static void zxnpu_wlan_mcu_regions(struct zxnpu_wlan *w, const char *args,
 			zxnpu_wlan_append(w, "  bad region '%s'\n", line);
 			break;
 		}
-		if (off + len > fw->size) {
+		if (len > fw->size || off > fw->size - len) {
+			/* subtraction form: off+len would wrap on huge %lx
+			 * values and hand the DMA engine a wild pointer */
 			zxnpu_wlan_append(w, "  region beyond file: %s\n", line);
 			break;
 		}
@@ -850,8 +879,8 @@ struct zxnpu_vap {
 };
 
 static bool zxnpu_wlan_vap;
-module_param_named(vap, zxnpu_wlan_vap, bool, 0444);
-MODULE_PARM_DESC(vap, "register the two VAP netdevs (wlan0/wlan5g0) at probe");
+module_param_named(vap, zxnpu_wlan_vap, bool, 0644);
+MODULE_PARM_DESC(vap, "register the two VAP netdevs (wlan0/wlan5g0) at probe; writable because the driver is built in - set it, then remove+rescan the PCI device to re-probe");
 
 static int zxvap_open(struct net_device *ndev)
 {
@@ -1141,8 +1170,10 @@ static void zxnpu_wlan_mcu_dl(struct zxnpu_wlan *w, const char *args, bool commi
 	}
 	if (nargs < 2) {
 		/* parse_patch_v1 strips exactly 30 header bytes: the image sent to
-		 * the MCU starts at +0x1E and still contains the 0x11223344 word. */
-		if (fw->size > ZXNPU_PATCH_HDR &&
+		 * the MCU starts at +0x1E and still contains the 0x11223344 word.
+		 * The guard must cover the reads at +0x20..+0x27, not just the
+		 * 30-byte strip (a 31-35 byte blob used to pass). */
+		if (fw->size >= 0x28 &&
 		    get_unaligned_le32(fw->data + 0x20) == 0x11223344) {
 			dst = get_unaligned_le32(fw->data + 0x24);
 			offset = ZXNPU_PATCH_HDR;
@@ -1260,7 +1291,9 @@ static int zxnpu_fw_parse(const struct firmware *fw,
 		regs[i].len = get_unaligned_le32(e + 20);
 		regs[i].feature = e[24];
 		regs[i].off = off;
-		if (off + regs[i].len > fw->size)
+		/* subtraction form: the image-supplied len could wrap the u32
+		 * sum and scatter-download past the firmware buffer */
+		if (regs[i].len > fw->size || off > fw->size - regs[i].len)
 			return -EINVAL;
 		off += regs[i].len;
 	}
@@ -1524,8 +1557,12 @@ static void zxnpu_wlan_fw_detail(struct zxnpu_wlan *w)
 					  get_unaligned_le32(fw->data + 24),
 					  get_unaligned_le32(fw->data + 28),
 					  get_unaligned_le32(fw->data + 32));
-		zxnpu_wlan_append(w, "%s: first16=%*phN size=%zu\n", names[i],
-				  16, fw->data, fw->size);
+		if (fw->size >= 16)
+			zxnpu_wlan_append(w, "%s: first16=%*phN size=%zu\n",
+					  names[i], 16, fw->data, fw->size);
+		else
+			zxnpu_wlan_append(w, "%s: first16=(truncated) size=%zu\n",
+					  names[i], fw->size);
 		release_firmware(fw);
 	}
 }
@@ -1705,6 +1742,17 @@ static int zxnpu_wlan_status_show(struct seq_file *s, void *unused)
 	return 0;
 }
 
+/* persistent probe evidence: identity, BARs, firmware CRCs (doc 62 B4/B5) */
+static int zxnpu_wlan_probe_show(struct seq_file *s, void *unused)
+{
+	struct zxnpu_wlan *w = zxnpu_wlan_singleton;
+
+	if (!w)
+		return 0;
+	seq_printf(s, "%s", w->probe_log);
+	return 0;
+}
+
 /* parse 12 hex digits into a MAC (sta-add) */
 static int zxvap_parse_mac(const char *s, u8 *out)
 {
@@ -1747,6 +1795,9 @@ static ssize_t zxnpu_wlan_ctl_write(struct file *file, const char __user *ubuf,
 	memset(w->status, 0, sizeof(w->status));
 	if (!strncmp(cmd, "probe", 5)) {
 		zxnpu_wlan_probe_regs(w);
+	} else if (!strncmp(cmd, "fw-audit", 8)) {
+		zxnpu_wlan_audit_firmware(w);
+		zxnpu_wlan_append(w, "fw-audit: written to the persistent probe log (/proc/zx-csp-wlan/probe)\n");
 	} else if (!strncmp(cmd, "fw-state", 8)) {
 		zxnpu_wlan_fw_state(w, zxnpu_wlan_commit);
 	} else if (!strncmp(cmd, "fw-plan ", 8)) {
@@ -1761,7 +1812,11 @@ static ssize_t zxnpu_wlan_ctl_write(struct file *file, const char __user *ubuf,
 		zxnpu_wlan_fw_detail(w);
 	} else if (!strncmp(cmd, "plan", 4)) {
 		zxnpu_wlan_wfdma(w, false);
-	} else if (!strncmp(cmd, "mcu", 3)) {
+	} else if (!strncmp(cmd, "mcu", 3) &&
+		   (cmd[3] == '\0' || cmd[3] == '\n')) {
+		/* exact match only: a bare prefix here shadowed mcuwin,
+		 * mcu-cmd, mcu-dl, mcu-dl-regions, mcu-recv and mcu-send,
+		 * leaving the whole MCU surface dead (doc 62 finding). */
 		zxnpu_wlan_mcu_plan(w);
 	} else if (!strncmp(cmd, "l1profile", 9)) {
 		zxnpu_wlan_l1profile(w);
@@ -1910,7 +1965,7 @@ done_bss:
 			zxnpu_wlan_append(w, "commit refused: set zxnpu_wlan.commit=1\n");
 		zxnpu_wlan_wfdma(w, commit);
 	} else {
-		zxnpu_wlan_append(w, "commands: l1profile | ack-expect | data-init | data-recv | dataplane | probe | fw | plan | mcu | rings | mcuwin | mcu-send | mcu-cmd | mcu-dl | mcu-dl-regions | fw-start | fw-info | fw-state | fw-plan wm|wa | fw-dl wm|wa | rx-init | mcu-recv | commit\n");
+		zxnpu_wlan_append(w, "commands: l1profile | ack-expect | data-init | data-recv | dataplane | probe | fw | plan | mcu | rings | mcuwin | mcu-send | mcu-cmd | mcu-dl | mcu-dl-regions | fw-start | fw-info | fw-audit | fw-state | fw-plan wm|wa | fw-dl wm|wa | rx-init | mcu-recv | commit\n");
 	}
 	mutex_unlock(&w->lock);
 	return count;
@@ -1930,77 +1985,103 @@ static int zxnpu_wlan_probe(struct pci_dev *pdev,
 	u16 command, status;
 	int i, ret;
 
-	if (!zxnpu_wlan_enable)
-		return -ENODEV;
-
-	ret = pcim_enable_device(pdev);
-	if (ret)
-		return ret;
-	/* MT7916 has three 64-bit BARs at indices 0, 2, 4 (BAR 1/3/5 are the
-	 * upper halves). Requesting BIT(1) causes EINVAL because BAR 1 is
-	 * not an independent resource on a 64-bit BAR device. */
-	ret = pcim_iomap_regions(pdev, BIT(0) | BIT(2) | BIT(4),
-				 "zxnpu-wlan");
-	if (ret)
-		return ret;
-
 	w = devm_kzalloc(&pdev->dev, sizeof(*w), GFP_KERNEL);
 	if (!w)
 		return -ENOMEM;
 	w->pdev = pdev;
-	dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(32));
 	mutex_init(&w->lock);
-	w->mcu_ring = dmam_alloc_coherent(&pdev->dev,
-					  ZXNPU_MCU_RING_DEPTH * ZXNPU_MCU_DESC_SIZE,
-					  &w->mcu_ring_dma, GFP_KERNEL);
-	w->mcu_buf = dmam_alloc_coherent(&pdev->dev, ZXNPU_MCU_BUF_SIZE,
-					 &w->mcu_buf_dma, GFP_KERNEL);
-	w->fwdl_ring = dmam_alloc_coherent(&pdev->dev,
-					   ZXNPU_MCU_RING_DEPTH * ZXNPU_MCU_DESC_SIZE,
-					   &w->fwdl_ring_dma, GFP_KERNEL);
-	w->fwdl_buf = dmam_alloc_coherent(&pdev->dev, ZXNPU_MCU_BUF_SIZE,
-					  &w->fwdl_buf_dma, GFP_KERNEL);
-	w->rx_ring = dmam_alloc_coherent(&pdev->dev,
-					 ZXNPU_MCU_RX_DEPTH * ZXNPU_MCU_DESC_SIZE,
-					 &w->rx_ring_dma, GFP_KERNEL);
-	w->rx_buf = dmam_alloc_coherent(&pdev->dev,
-					ZXNPU_MCU_RX_DEPTH * ZXNPU_MCU_RX_BUF_SIZE,
-					&w->rx_buf_dma, GFP_KERNEL);
-	w->dtx_ring = dmam_alloc_coherent(&pdev->dev,
-					  ZXNPU_DATA_DEPTH * ZXNPU_MCU_DESC_SIZE,
-					  &w->dtx_ring_dma, GFP_KERNEL);
-	w->drx_ring = dmam_alloc_coherent(&pdev->dev,
-					  ZXNPU_DATA_DEPTH * ZXNPU_MCU_DESC_SIZE,
-					  &w->drx_ring_dma, GFP_KERNEL);
-	w->drx_buf = dmam_alloc_coherent(&pdev->dev,
-					 ZXNPU_DATA_DEPTH * ZXNPU_DATA_BUF_SIZE,
-					 &w->drx_buf_dma, GFP_KERNEL);
-	w->dband_ring = dmam_alloc_coherent(&pdev->dev,
-					    ZXNPU_DATA_DEPTH * ZXNPU_MCU_DESC_SIZE,
-					    &w->dband_ring_dma, GFP_KERNEL);
-	for (i = 0; i < 3; i++)
-		w->bar[i] = pcim_iomap_table(pdev)[i];
 
-	pci_read_config_byte(pdev, PCI_REVISION_ID, &revision);
-	pci_read_config_word(pdev, PCI_COMMAND, &command);
-	pci_read_config_word(pdev, PCI_STATUS, &status);
-	zxnpu_wlan_append(w, "vendor=%04x device=%04x revision=%02x\n",
-			  pdev->vendor, pdev->device, revision);
-	zxnpu_wlan_append(w, "command=%04x status=%04x bars=%d\n",
-			  command, status, pci_select_bars(pdev,
-			  IORESOURCE_MEM));
-	for (i = 0; i < 3; i++)
-		zxnpu_wlan_append(w, "bar%d: start=%pa len=%pa%s\n", i,
-				  &pdev->resource[i].start,
-				  &pdev->resource[i].end,
-				  w->bar[i] ? "" : " (unmapped)");
-	zxnpu_wlan_append(w, "state: G3 skeleton, no MT7916 register written\n");
+	/* The control plane must exist even when parked: probe succeeds with
+	 * enable=0 and only skips the PCI/BAR stage, so /proc/zx-csp-wlan/
+	 * and the VAP netdevs are always up and ctl reports why the hardware
+	 * path is absent. Parked probe writes no hardware register. */
+	if (zxnpu_wlan_enable) {
+		ret = pcim_enable_device(pdev);
+		if (ret)
+			return ret;
+		/* MT7916 has three 64-bit BARs at indices 0, 2, 4 (BAR 1/3/5
+		 * are the upper halves). Requesting BIT(1) causes EINVAL
+		 * because BAR 1 is not an independent resource on a 64-bit
+		 * BAR device. */
+		ret = pcim_iomap_regions(pdev, BIT(0) | BIT(2) | BIT(4),
+					 "zxnpu-wlan");
+		if (ret)
+			return ret;
+
+		dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(32));
+		w->mcu_ring = dmam_alloc_coherent(&pdev->dev,
+						  ZXNPU_MCU_RING_DEPTH * ZXNPU_MCU_DESC_SIZE,
+						  &w->mcu_ring_dma, GFP_KERNEL);
+		w->mcu_buf = dmam_alloc_coherent(&pdev->dev, ZXNPU_MCU_BUF_SIZE,
+						 &w->mcu_buf_dma, GFP_KERNEL);
+		w->fwdl_ring = dmam_alloc_coherent(&pdev->dev,
+						   ZXNPU_MCU_RING_DEPTH * ZXNPU_MCU_DESC_SIZE,
+						   &w->fwdl_ring_dma, GFP_KERNEL);
+		w->fwdl_buf = dmam_alloc_coherent(&pdev->dev, ZXNPU_MCU_BUF_SIZE,
+						  &w->fwdl_buf_dma, GFP_KERNEL);
+		w->rx_ring = dmam_alloc_coherent(&pdev->dev,
+						 ZXNPU_MCU_RX_DEPTH * ZXNPU_MCU_DESC_SIZE,
+						 &w->rx_ring_dma, GFP_KERNEL);
+		w->rx_buf = dmam_alloc_coherent(&pdev->dev,
+						ZXNPU_MCU_RX_DEPTH * ZXNPU_MCU_RX_BUF_SIZE,
+						&w->rx_buf_dma, GFP_KERNEL);
+		w->dtx_ring = dmam_alloc_coherent(&pdev->dev,
+						  ZXNPU_DATA_DEPTH * ZXNPU_MCU_DESC_SIZE,
+						  &w->dtx_ring_dma, GFP_KERNEL);
+		w->drx_ring = dmam_alloc_coherent(&pdev->dev,
+						  ZXNPU_DATA_DEPTH * ZXNPU_MCU_DESC_SIZE,
+						  &w->drx_ring_dma, GFP_KERNEL);
+		w->drx_buf = dmam_alloc_coherent(&pdev->dev,
+						 ZXNPU_DATA_DEPTH * ZXNPU_DATA_BUF_SIZE,
+						 &w->drx_buf_dma, GFP_KERNEL);
+		w->dband_ring = dmam_alloc_coherent(&pdev->dev,
+						    ZXNPU_DATA_DEPTH * ZXNPU_MCU_DESC_SIZE,
+						    &w->dband_ring_dma, GFP_KERNEL);
+		/* one NULL here must not reach the ring-BASE programming:
+		 * data-init would hand hardware a garbage DMA base (doc 62
+		 * finding 7). devm unwinds whatever did allocate. */
+		if (!w->mcu_ring || !w->mcu_buf || !w->fwdl_ring ||
+		    !w->fwdl_buf || !w->rx_ring || !w->rx_buf ||
+		    !w->dtx_ring || !w->drx_ring || !w->drx_buf ||
+		    !w->dband_ring)
+			return -ENOMEM;
+		/* w->bar[i] mirrors the real 64-bit BAR indices 0/2/4;
+		 * table[1] would be BAR0's upper half (never requested). */
+		w->bar[0] = pcim_iomap_table(pdev)[0];
+		w->bar[1] = pcim_iomap_table(pdev)[2];
+		w->bar[2] = pcim_iomap_table(pdev)[4];
+
+		pci_read_config_byte(pdev, PCI_REVISION_ID, &revision);
+		pci_read_config_word(pdev, PCI_COMMAND, &command);
+		pci_read_config_word(pdev, PCI_STATUS, &status);
+		zxnpu_wlan_pl_append(w, "vendor=%04x device=%04x revision=%02x\n",
+				     pdev->vendor, pdev->device, revision);
+		zxnpu_wlan_pl_append(w, "command=%04x status=%04x bars=%d\n",
+				     command, status, pci_select_bars(pdev,
+				     IORESOURCE_MEM));
+		for (i = 0; i < 3; i++) {
+			/* real BAR indices are 0/2/4 (64-bit BARs) */
+			unsigned int ridx = i * 2;
+
+			zxnpu_wlan_pl_append(w, "bar%d: start=%pa len=%pa%s\n",
+					     ridx,
+					     &pdev->resource[ridx].start,
+					     &pdev->resource[ridx].end,
+					     w->bar[i] ? "" : " (unmapped)");
+		}
+		zxnpu_wlan_probe_regs(w);
+	} else {
+		zxnpu_wlan_pl_append(w, "parked: enable=0, no PCI/BAR access (reload with enable=1)\n");
+	}
+	zxnpu_wlan_pl_append(w, "state: G3 skeleton, no MT7916 register written\n");
 	zxnpu_wlan_audit_firmware(w);
 
 	dir = proc_mkdir("zx-csp-wlan", NULL);
 	if (dir) {
 		if (!proc_create_single("status", 0444, dir,
 					zxnpu_wlan_status_show) ||
+		    !proc_create_single("probe", 0444, dir,
+					zxnpu_wlan_probe_show) ||
 		    !proc_create("ctl", 0200, dir, &zxnpu_wlan_ctl_ops)) {
 			proc_remove(dir);
 			dir = NULL;
@@ -2015,11 +2096,33 @@ static int zxnpu_wlan_probe(struct pci_dev *pdev,
 	return 0;
 }
 
+static void zxnpu_wlan_vaps_exit(struct zxnpu_wlan *w)
+{
+	int i;
+
+	for (i = 0; i < ZXNPU_VAP_MAX; i++) {
+		struct zxnpu_vap *vap = w->vaps[i];
+
+		if (!vap)
+			continue;
+		unregister_netdev(vap->ndev);
+		netif_napi_del(&vap->napi);
+		free_netdev(vap->ndev);
+		w->vaps[i] = NULL;
+	}
+}
+
 static void zxnpu_wlan_remove(struct pci_dev *pdev)
 {
 	struct zxnpu_wlan *w = pci_get_drvdata(pdev);
 
-	if (w && w->proc)
+	if (!w)
+		return;
+	/* VAPs are alloc_netdev (not devm): leave them registered and the
+	 * enable-toggle remove/rescan iteration would free the adapter under
+	 * live netdevs with dangling ->w pointers (doc 62 finding 2). */
+	zxnpu_wlan_vaps_exit(w);
+	if (w->proc)
 		proc_remove(w->proc);
 	zxnpu_wlan_singleton = NULL;
 }

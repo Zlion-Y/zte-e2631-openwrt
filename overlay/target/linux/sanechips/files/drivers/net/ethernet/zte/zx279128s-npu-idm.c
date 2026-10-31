@@ -472,6 +472,7 @@ static int zxnpu_idm_probe(struct platform_device *pdev)
 	if (!ndev)
 		return -ENOMEM;
 	SET_NETDEV_DEV(ndev, &pdev->dev);
+	eth_hw_addr_random(ndev);	/* never leave a zero-MAC netdev around */
 	strscpy(ndev->name, "zxnpu0", IFNAMSIZ);
 	ndev->netdev_ops = &zxnpu_idm_netdev_ops;
 	ndev->min_mtu = ETH_MIN_MTU;

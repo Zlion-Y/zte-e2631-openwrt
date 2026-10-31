@@ -70,27 +70,12 @@ say "images collected into $BUILDDIR"
 
 if [ "$NOPACK" = 1 ]; then
 	say "--no-pack: packing left to you"
-	say "  node host/release.mjs --dir $BUILDDIR --out $E2631_OUT/e2631-openwrt-$STAMP.bin"
+	say "  bash scripts/pack.sh --dir $BUILDDIR --out $E2631_OUT/e2631-openwrt-$STAMP.bin"
 	exit 0
 fi
 
-e2631_need_cmd node "pack the image into the vendor upgrade format" || exit 1
-if ! node -e 'const z=require("node:zlib");if(typeof z.crc32!=="function")process.exit(1)' 2>/dev/null; then
-	die "node $(node -v) has no zlib.crc32 - the packer needs Node 20.15+ (22 LTS recommended)"
-fi
-[ -n "$E2631_TEMPLATE" ] || die "no version-header template and no default either.
-       env.sh supplies seed/vendor-verhdr-8b8.bin, which ships in this repository -
-       unset E2631_TEMPLATE to get it back, or point it at an official package
-       (BUILD.md, 'the template'). 'bash scripts/build.sh --no-pack' also works."
-# A relative value in .env is taken against E2631_WORK, the way host/release.mjs
-# resolves it too, so one .env works for a shell run and a node run alike.
-case "$E2631_TEMPLATE" in ""|/*) ;; *) E2631_TEMPLATE="$E2631_WORK/$E2631_TEMPLATE" ;; esac
-[ -f "$E2631_TEMPLATE" ] || die "E2631_TEMPLATE=$E2631_TEMPLATE does not exist.
-       If you did not move it, the shipped header slice is missing from your clone:
-       'git checkout -- seed/vendor-verhdr-8b8.bin'. BUILD.md, 'the template', covers
-       cutting your own from an official package."
-
 OUT="$E2631_OUT/e2631-openwrt-$STAMP.bin"
-say "packing with template $(basename "$E2631_TEMPLATE")"
-node host/release.mjs --dir "$BUILDDIR" --template "$E2631_TEMPLATE" --out "$OUT"
+# pack.sh owns template resolution, the node checks and the slot-header
+# version stamping (single source: the overlay e2631-version file).
+bash scripts/pack.sh --dir "$BUILDDIR" --out "$OUT"
 say "package: $OUT"

@@ -75,7 +75,7 @@ cp "$HERE/tools/mkfactory.mjs" "$TREE/tools/e2631-mkfactory.mjs"
 # is not executable.
 for f in sbin/e2631-probe sbin/e2631-trial sbin/e2631-commit sbin/e2631-leds sbin/e2631-hb \
 	 sbin/e2631-linkspeed sbin/e2631-wlan-probe sbin/e2631-wifi-on sbin/e2631-wifi-ap sbin/e2631-fwstate \
-	 sbin/e2631-upgrade sbin/e2631-netune-apply sbin/wlanmgr \
+	 sbin/e2631-upgrade sbin/e2631-netune-apply sbin/wlanmgr sbin/native-eth \
 	 sbin/e2631-wanport \
 	 sbin/e2631-userdata-status sbin/e2631-userdata-firstboot sbin/e2631-userdata-init \
 	 etc/init.d/e2631-trial etc/init.d/e2631-leds etc/init.d/e2631-hb etc/init.d/e2631-userdata \

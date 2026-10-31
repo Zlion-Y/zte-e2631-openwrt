@@ -169,8 +169,9 @@ static void zxna_port_enable(struct zx_eth_adapter *a, int port, bool enable)
 /* MAC in the layout of the switch MAC registers: bytes 2-5, then 0-1 */
 static void zxna_mac_words(const u8 *mac, u32 w[2])
 {
-	w[0] = mac[2] << 24 | mac[3] << 16 | mac[4] << 8 | mac[5];
-	w[1] = mac[0] << 8 | mac[1];
+	w[0] = (u32)mac[2] << 24 | (u32)mac[3] << 16 |
+	       (u32)mac[4] << 8 | mac[5];
+	w[1] = (u32)mac[0] << 8 | mac[1];
 }
 
 /*
@@ -912,6 +913,7 @@ static int zxna_probe(struct platform_device *pdev)
 	struct device_node *ports;
 	struct zx_eth_adapter *a;
 	int i, ret, registered = 0;
+	bool napi_added = false;
 
 	if (!zxnative_enable)
 		return -ENODEV;
@@ -1042,6 +1044,7 @@ static int zxna_probe(struct platform_device *pdev)
 	zxna_update_mac_tables(a);
 
 	netif_napi_add(a->ports[i], &a->napi, zxna_poll);
+	napi_added = true;
 	hrtimer_setup(&a->tx_timer, zxna_tx_timer, CLOCK_MONOTONIC,
 		      HRTIMER_MODE_REL);
 	ret = devm_request_irq(dev, a->irq, zxna_isr, 0, dev_name(dev), a);
@@ -1080,6 +1083,8 @@ unreg:
 			phylink_destroy(priv->phylink);
 		}
 	}
+	if (napi_added)
+		netif_napi_del(&a->napi);
 	zxna_hw_reset(a);
 put_ports:
 	of_node_put(ports);
@@ -1093,12 +1098,29 @@ static void zxna_remove(struct platform_device *pdev)
 
 	if (!a)
 		return;
-	for (i = 0; i < ZX_NUM_PORTS; i++)
-		if (a->ports[i]) {
-			unregister_netdev(a->ports[i]);
-			break;
-		}
+	/* The unbind/rebind cycle is a normal iteration step on the device
+	 * (enable flip + rebind), so every port must leave the registry and
+	 * every async entry (IRQ mask, tx hrtimer, shared NAPI, phylink) must
+	 * be retired before devm frees the adapter: unregistering only the
+	 * first port used to leave the other three dangling on freed memory.
+	 * NAPI is deleted AFTER the unregister loop so a still-up port's
+	 * ndo_stop can napi_disable it one last time. */
 	writel(~0, a->base + ZX_TM_INT_MASK);
+	hrtimer_cancel(&a->tx_timer);
+	for (i = 0; i < ZX_NUM_PORTS; i++) {
+		struct zx_eth_priv *priv;
+
+		if (!a->ports[i])
+			continue;
+		unregister_netdev(a->ports[i]);
+		priv = netdev_priv(a->ports[i]);
+		if (priv->phylink) {
+			phylink_disconnect_phy(priv->phylink);
+			phylink_destroy(priv->phylink);
+			priv->phylink = NULL;
+		}
+	}
+	netif_napi_del(&a->napi);
 	zxna_hw_reset(a);
 }
 

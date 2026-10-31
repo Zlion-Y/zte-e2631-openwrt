@@ -31,6 +31,7 @@ case "$1" in
 	recv)    run "mcu-recv" ;;
 	drecv)   run "data-recv" ;;
 	fwstate) run "fw-state" ;;
+	audit)   run "fw-audit" ;;
 	probe)   run "probe" ;;
 	help)    run "commands" ;;
 	commit)  shift; run "$*" ;;
@@ -129,9 +130,9 @@ case "$1" in
 		# offline verification: print the ctl command each subcommand sends
 		echo "status:status expect:ack-expect l1p:l1profile rings:rings"
 		echo "plane:dataplane recv:mcu-recv drecv:data-recv fwstate:fw-state"
-		echo "probe:probe step2:mcu-dl step3:data-init"
+		echo "probe:probe audit:fw-audit step2:mcu-dl step3:data-init"
 		;;
-	*)	echo "usage: wlanmgr <status|expect|l1p|rings|plane|recv|drecv|fwstate|probe|profile|bssplan|help|selftest>"
+	*)	echo "usage: wlanmgr <status|expect|l1p|rings|plane|recv|drecv|fwstate|audit|probe|profile|bssplan|help|selftest>"
 		echo "       wlanmgr step1|step2|step3   (checklist 36 sequences)"
 		echo "       wlanmgr commit <cmd>        (gated register writes)"
 		;;

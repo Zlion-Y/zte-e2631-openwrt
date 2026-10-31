@@ -1,0 +1,38 @@
+#!/bin/bash
+# Flash native-wired-3.9 to the device and run the full post-flash sweep.
+# Route: e2631-fwslot upgrade (in-place rewrite of the RUNNING slot = the
+# OpenWrt slot). NEVER install/flash - the other slot holds the vendor
+# system (forbidden to touch). Read-only until the explicit upgrade line.
+set -eu
+DEV=${1:-root@192.168.1.1}
+PKG=${2:-../out/native-wired-3.9/e2631-openwrt-native-wired-3.9.bin}
+SSH="ssh -o BatchMode=yes $DEV"
+SCP="scp -o BatchMode=yes"
+
+[ -f "$PKG" ] || { echo "package missing: $PKG"; exit 1; }
+echo "== local sha256"
+sha256sum "$PKG"
+
+echo "== transfer"
+$SCP "$PKG" "$DEV:/tmp/e2631-3.9.bin"
+
+echo "== on-device gate: e2631-fwslot check"
+$SSH "e2631-fwslot check /tmp/e2631-3.9.bin"
+
+echo "== on-device gate: upgrade-check"
+$SSH "e2631-fwslot upgrade-check"
+
+echo "== in-place upgrade of the running slot"
+$SSH "e2631-fwslot upgrade /tmp/e2631-3.9.bin"
+
+echo "== reboot"
+$SSH "reboot" || true
+
+echo "== waiting for the box to come back (max 150s)"
+for i in $(seq 1 50); do
+	sleep 3
+	$SSH -o ConnectTimeout=3 echo up >/dev/null 2>&1 && break
+done
+
+echo "== post-flash full verification"
+bash tests/device-verify.sh "$DEV"
