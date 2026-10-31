@@ -610,3 +610,27 @@ mt/tm/wifi 条目；**iwpriv 无任何 wifi 网口**（MTK SDK 网口未创建�
   36B 环项；WFDMA 引擎（0xd7000）仅固件后生效
 - 获取：base 树 feeds 或上游 mt76 master（git/web）
 - 产出：对照表 → 修正我们的 ROM 阶段描述符与环地址 → DIDX
+
+## 31. mt76 mt7916_reg[] 权威地址图——三层寻址全闭合（2026-10-31）
+
+mt76 master 的 mt7915/mmio.c `mt7916_reg[]` 表（与我们实测逐项互证）：
+- **WFDMA0_ADDR = 0xd4000**（WFDMA0 引擎基 = bus 0x180d4000）
+- **WFDMA0_PCIE1_ADDR = 0xd8000**（band1 镜像——我们 0xd8000 区发现吻合）
+- **WFDMA_EXT_CSR_ADDR = 0xd7000**（TX/RX base 窗配置 0xd702c/30 吻合）
+- **INT_SOURCE/MASK_CSR = 0xd4200/04**（中断状态——PCIe INT 核对点）
+- **INT_MCU_CMD_SOURCE = 0xd41f0**
+- MT_MCUQ_RING_BASE(q) = MT_Q_BASE + 0x300 = **0xd4300**（环基址寄存器
+  数组，每队列 4B）；MT_MCUQ_EXT_CTRL(q) = Q_BASE+0x600+q*4（0xd4600 区
+  = 我们看到的 credit/使能值区！）
+- MT7916 全队列 WFDMA0（dma_config else 分支）；q_id：FWDL=16、MCU_WM=17
+- GLO_CFG 位义：TX_DMA_EN=bit0、RX_DMA_EN=bit2（与我们 |=0x5 一致）
+- MtfAsicGetFwSyncValue/chip_ops 表 = vendor SDK 私有，mt76 无此层
+
+**架构定性**：vendor 的 0x18024xxx 逻辑地址经 mac_io 翻译落到 WFDMA0
+（0xD4xxx 物理）——三层寻址（逻辑 CR → mac_io 翻译 → WFDMA0 窗→BAR）
+全闭合。我们的环寄存器写入位置正确。
+
+**DIDX 仍冻的最后嫌疑收敛为**：ROM 阶段 MCU 对 MCU 环的消费机制
+（mt76 的 ROM FWDL 用 MCUQ_FWDL 环 + MCU Command/Semaphore 流程，
+mt76 mcu.c 的 mt7916 分支有 ROM 阶段细节——下轮解码 mcu.c 的
+mt7915_mcu_send_message 与 fw download 序列）。
