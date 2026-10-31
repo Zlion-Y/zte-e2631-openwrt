@@ -88,6 +88,24 @@ case "$1" in
 		echo "[$B]"
 		sed -n "/^\[$B\]/,/^\[/p" "$F" | grep '=' | head -20
 		;;
+	bss-up)
+		# wlanmgr bss-up <band>: read the conf file and stage the BSS
+		# via ctl (closes the conf -> bss-set -> driver loop). Requires
+		# commit=1 for the data-init write.
+		shift; B=${1:-b0}
+		need_commit "bss-up" || exit 1
+		F=${WLANMGR_CONF:-/etc/wireless/zte-native.conf}
+		[ -f "$F" ] || { echo "$F missing (conf-write first)"; exit 1; }
+		SEC=$(sed -n "/^\[$B\]/,/^\[/p" "$F" | grep '=' | head -20)
+		[ -n "$SEC" ] || { echo "band $B not in config"; exit 1; }
+		SSID=$(echo "$SEC" | grep '^SSID=' | head -1 | cut -d= -f2)
+		CH=$(echo "$SEC" | grep '^Channel=' | head -1 | cut -d= -f2)
+		[ -z "$CH" ] && CH=1
+		echo "bss-up: band=$B ssid='$SSID' ch=$CH"
+		echo "data-init" > "$CTL" && cat "$CTL"
+		BN=${B#b}; echo "bss-set $BN $CH $SSID" > "$CTL" && cat "$CTL"
+		echo "bss-up: staged (beacon programming in P5 after fw-state=7)"
+		;;
 	conf-write)
 		# wlanmgr conf-write <band> <key> <value>: update the BSS config
 		shift; B=$1; K=$2; V=$3
