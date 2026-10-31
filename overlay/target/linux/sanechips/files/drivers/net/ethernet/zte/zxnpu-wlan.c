@@ -785,6 +785,8 @@ static void zxnpu_wlan_data_tx(struct zxnpu_wlan *w)
 	zxnpu_wlan_append(w, "    +31/+40 s8 sta+14 | +45 sta+41 | +48 sta+3528 (typed)@N@");
 	zxnpu_wlan_append(w, "    +52 sta+3420 | +53 =1 | zeros +6/+9/+11/+12/+15/+17/+20/+21@N@");
 	zxnpu_wlan_append(w, "  offload/mgmt path: HcGetMgmtQueueIdx/BcnQueueIdx +@N@");
+	zxnpu_wlan_append(w, "  cipher map (R4k): sec_cfg+96 5->1/13->2/16->3 keyinfo+8@N@");
+	zxnpu_wlan_append(w, "  (WEP/TKIP/AES-CCMP classes, [推断] mt76 naming)@N@");
 	zxnpu_wlan_append(w, "  asic_write_tmac_info_fixed_rate(0x142404) = dispatch,@N@");
 	zxnpu_wlan_append(w, "  mtf_write_tmac_info_fixed_rate(0x1B3018) = real TXD assembler:@N@");
 	zxnpu_wlan_append(w, "  TMAC(52B) -> TXD words: r4+12 bit31+u12(lsl16), r4+20 flags@N@");
@@ -1812,13 +1814,37 @@ static ssize_t zxnpu_wlan_ctl_write(struct file *file, const char __user *ubuf,
 		else
 			zxnpu_wlan_append(w, "sta-add: VAP %u absent (vap=1)\n",
 					  band);
-		if (wcid >= 0)
-			zxnpu_wlan_append(w, "sta-add: mac %pM wcid %d band %u\n",
-					  amac, wcid, band);
-		else
+		if (wcid >= 0) {
+			/* link the STA to its BSS: the association state
+			 * machine start (free -> associated); the protect
+			 * flag propagates from the band block (doc 53 §1). */
+			zxna_bss[band].active = true;
+			zxnpu_wlan_append(w, "sta-add: mac %pM wcid %d band %u bss%s\n",
+					  amac, wcid, band,
+					  zxna_bss[band].active ?
+					  " linked" : "");
+		} else {
 			zxnpu_wlan_append(w, "sta-add: failed (%d)\n", wcid);
+		}
 done_ctl:
 		zxnpu_wlan_append(w, "\n");
+	} else if (!strncmp(cmd, "key-set ", 8)) {
+		/* key-set <wcid>: mark the per-STA key mirror installed
+		 * (the fill_wtbl_key_info_struc_v2 command path sends the
+		 * material to the firmware; the host mirror tracks it).
+		 * Real key material arrives with P5 association. */
+		unsigned int wcid;
+		int found = 0;
+
+		if (sscanf(cmd + 8, "%u", &wcid) == 1 &&
+		    wcid > 0 && wcid < ZXNPU_WCID_MAX &&
+		    zxna_ctx[wcid].state == ZXNPU_CTX_MAGIC) {
+			zxna_ctx[wcid].key_set = true;
+			found = 1;
+		}
+		zxnpu_wlan_append(w, "key-set: wcid %u %s\n", wcid,
+				  found ? "marked key-set" :
+				  "not associated (sta-add first)");
 	} else if (!strncmp(cmd, "sta-del ", 8)) {
 		unsigned int wcid;
 
