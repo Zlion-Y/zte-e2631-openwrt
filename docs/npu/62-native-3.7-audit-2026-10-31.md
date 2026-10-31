@@ -751,3 +751,28 @@ zx_update_mac_tables（**main.c 符号，baseline 禁用后缺失——需 nativ
 
 **约束**：baseline 回像方案排除（会破 3.12 MAC defer 修复的竞争窗口）。
 R-A（FWDL）挂起待新观测维度，与本轮并行不悖。
+
+## 37. 3.26 R-D 落地：PPE flow offload 集成完成，flowtable 建立（2026-10-31）
+
+**集成（方案 1 全部落地）**：
+- 043 Makefile：zxnative-eth-y += zx279128s-ppe.o（ppe.o 并入 native）
+- zx-ffe-ops.h：zx_ppe_init/start/stop 声明
+- ppe.c：zx_ppe_init（rhashtable_init）、zx_ppe_stop 去 static
+- zxnative-eth.c：include seam 头、zx_eth_is_port（native ops 判定）、
+  zx_set_trap_dmac 转发器、probe zx_ppe_init、zxna_setup_tc 完整接线
+  （offload=1 门控；首流 zx_ppe_start → flow_add/del/stats 直调）
+- offload 参数 0444→0644
+
+**构建**：3 轮纠错（两处断串 drvfs 伪影、is_port 前向引用、trap_dmac
+转发器、param mode）→ BUILD_RC=0 → 3.26 刷入 ALL-PASS。
+
+**实机状态**：offload=Y、nft flowtable ft 建立（flags offload + 四端口
+挂载 + counter）、`meta l4proto {tcp,udp} flow add @ft` 规则在位、
+fw4 重启后网络正常（WAN 1.2ms、厂 MAC 不回归）。
+
+**TC_SETUP_FT 未触发原因（待真双向转发流）**：conntrack 里的 33 条
+ASSURED 全是本机出向/管理流（不过 forward 链）；nft flowtable 只对
+"已确认双向的转发流"下发 TC_SETUP_FT。需要第二测试主机（LAN 侧）
+对 WAN 侧跑 iperf/dhclient 之类的真转发流——单主机拓扑无法产生。
+**验收门槛（nft flowtable counter packets 非 0 + zx_ppe_start dmesg）**
+保持，待具备双主机拓扑时补测。
