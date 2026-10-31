@@ -387,3 +387,24 @@ RO）；③ per-ring enable 寄存器位置未定（0xD4300 非它）；④ MCU 
 **3.22 规格**：以 pci_kick_out_cmd_msg 尾部的硬件 cidx 写地址 + 稠密读
 交叉，重绘 {base, cnt, cidx/didx} 精确偏移表；重写 rings/submit 的
 寄存器地址与步长；预期 mcu-dl DIDX 立即应答。
+
+## 19. 3.22：真实布局落码 + 写粘性新线索（2026-10-31）
+
+**落码**：环寄存器地址全改真布局——TX base=0x18024400+0x20n（64 位
+lo/hi 对）、cidx 写 0x18024B00+0x20n（32 位标量 slot，vendor 尾部同款）、
+INT_ENA=0x18024240、wfdma-init 增五环使能 0x18024260+4i=0x00010001；
+rings 命令按新布局显示（base lo/hi + idx 对区）。
+
+**实验**：cidx 写 0x18024b20 回读=0（不粘）；但区域呈每 0x20 块 +8 处
+0x00070000 重复值。同时注意：旧地址 0xd4408 的写**是粘的**（3.21 rings
+显示 cidx=17）——即 0xd4408=软件影子可写，DMA 不消费；0xd4bxx 对区
+word0 写不粘（可能只读视图/写法错/half-word 语义）。
+
+**下轮（干净单变量实验）**：
+1. crw 逐个写候选寄存器（0xd4b08 的 0x70000 位场、0xd4260 使能回读、
+   0xd4204=FEF0000F 区）写后立读，找出"写粘且引发 didx 动"的地址
+2. kick_out 尾部写的是 ring+36 的**逻辑地址**——经 mac_io 翻译后的
+   物理可能非 0x18024b20；翻译表（bss LANCHOR0）读取路线：
+   /proc/kcore（若 vendor 有）或 rd 去 O_SYNC 重试
+3. FWDL 前置：活系统 ring base 4a6df000 vs 我们 4e080000——DMA 可达域
+   核对（dma-ranges 0x40000000 窗）

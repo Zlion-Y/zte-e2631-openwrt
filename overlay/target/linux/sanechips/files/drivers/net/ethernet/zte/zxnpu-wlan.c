@@ -39,9 +39,10 @@
 #define ZXNPU_CR_BASE		0x18000000u
 #define ZXNPU_CR(off)		((off) - ZXNPU_CR_BASE)
 #define ZXNPU_WFDMA_GLO_CFG	0x18024208
-#define ZXNPU_WFDMA_INT_ENA	0x1802420c
+#define ZXNPU_WFDMA_INT_ENA	0x18024240
 #define ZXNPU_WFDMA_RING_LO	0x18024640	/* six rings 0x18024640-0x18024650 */
 #define ZXNPU_WFDMA_RING_HI	0x18024680	/* six rings 0x18024680-0x18024694 */
+#define ZXNPU_WFDMA_RING_ENA	0x18024260
 #define ZXNPU_WFDMA_PCIE_CFG	0x180242f4
 #define ZXNPU_WFDMA_PCIE_CFG2	0x180282f4
 #define ZXNPU_WFDMA_TX_BASE	0x1802702c
@@ -298,16 +299,29 @@ static void zxnpu_wlan_probe_regs(struct zxnpu_wlan *out,
  * caller asks for it.
  */
 /*
- * WFDMA ring register blocks, from chip_show_dma_info (mt7916.ko 0x1A9188):
- * TX rings 0..4 live at 0x18024400 + 0x10*n and RX rings 0..5 at
- * 0x18024500 + 0x10*n; each block is BASE/CNT/CPU_IDX/DMA_IDX. The second
- * MAC generation mirrors the same blocks at +0x4000 (0x1802_84xx/85xx).
+ * WFDMA ring registers, from the live-system aligned scan (doc 62 §18)
+ * plus pci_kick_out_cmd_msg's tail write hif_io_write32([ring+36], slot):
+ * each TX/RX ring owns a 0x20-stride slot; the BASE (64-bit, low word at
+ * +0x18024400 + n*0x20, high word follows) and the CPU/DMA indices live in
+ * SEPARATE regions - the indices are a 16-bit packed pair at
+ * 0x18024B00 + n*0x20 (FWDL pair read 0x2e/0x2e on the live box). The
+ * 0x10-stride BASE/CNT/CIDX/DIDX model this driver started with was a
+ * misalignment and kept DIDX frozen (3.19-3.21).
  */
 #define ZXNPU_WFDMA_TX_RING0	0x18024400
 #define ZXNPU_WFDMA_RX_RING0	0x18024500
+#define ZXNPU_WFDMA_RING_STRIDE	0x20
+#define ZXNPU_WFDMA_IDX_BASE	0x18024b00
 #define ZXNPU_WFDMA_TX_RINGS	5
 #define ZXNPU_WFDMA_RX_RINGS	6
 #define ZXNPU_WFDMA_BAND1	0x4000
+
+/* packed pair: low 16 bits = CPU index written as a scalar (the vendor
+ * writes the raw slot number with a 32-bit store), high 16 = DMA index. */
+static u32 zxnpu_ring_idx_reg(int ring)
+{
+	return ZXNPU_WFDMA_IDX_BASE + ring * ZXNPU_WFDMA_RING_STRIDE;
+}
 
 static void zxnpu_wlan_dump_ring(struct zxnpu_wlan *w, const char *tag,
 				 u32 base)
@@ -324,18 +338,28 @@ static void zxnpu_wlan_rings(struct zxnpu_wlan *w)
 {
 	int i;
 
-	zxnpu_wlan_append(w, "wfdma rings (read-only):\n");
+	zxnpu_wlan_append(w, "wfdma rings (0x20 stride, base lo/hi):\n");
 	for (i = 0; i < ZXNPU_WFDMA_TX_RINGS; i++)
 		zxnpu_wlan_dump_ring(w, "tx",
-				     ZXNPU_WFDMA_TX_RING0 + 0x10 * i);
+				     ZXNPU_WFDMA_TX_RING0 +
+				     ZXNPU_WFDMA_RING_STRIDE * i);
 	for (i = 0; i < ZXNPU_WFDMA_RX_RINGS; i++)
 		zxnpu_wlan_dump_ring(w, "rx",
-				     ZXNPU_WFDMA_RX_RING0 + 0x10 * i);
+				     ZXNPU_WFDMA_RX_RING0 +
+				     ZXNPU_WFDMA_RING_STRIDE * i);
+	zxnpu_wlan_append(w, "wfdma idx pairs (packed cid/did 16-bit):\n");
+	for (i = 0; i < ZXNPU_WFDMA_TX_RINGS + ZXNPU_WFDMA_RX_RINGS; i++)
+		zxnpu_wlan_append(w, "  %s%d %08x: %08x\n",
+				  i < ZXNPU_WFDMA_TX_RINGS ? "tx" : "rx",
+				  i < ZXNPU_WFDMA_TX_RINGS ? i :
+				  i - ZXNPU_WFDMA_TX_RINGS,
+				  zxnpu_ring_idx_reg(i),
+				  zxnpu_cr_read(w, zxnpu_ring_idx_reg(i)));
 	zxnpu_wlan_append(w, "wfdma rings, +0x4000 mirror:\n");
 	for (i = 0; i < ZXNPU_WFDMA_TX_RINGS; i++)
 		zxnpu_wlan_dump_ring(w, "tx",
 				     ZXNPU_WFDMA_TX_RING0 + ZXNPU_WFDMA_BAND1 +
-				     0x10 * i);
+				     ZXNPU_WFDMA_RING_STRIDE * i);
 	for (i = 0; i < ZXNPU_WFDMA_RX_RINGS; i++)
 		zxnpu_wlan_dump_ring(w, "rx",
 				     ZXNPU_WFDMA_RX_RING0 + ZXNPU_WFDMA_BAND1 +
@@ -549,7 +573,8 @@ static int zxnpu_mcu_submit_ring(struct zxnpu_wlan *w, int ring,
 	void *buf = ring ? w->mcu_buf : w->fwdl_buf;
 	dma_addr_t buf_dma = ring ? w->mcu_buf_dma : w->fwdl_buf_dma;
 	u32 *cidx = ring ? &w->mcu_cidx : &w->fwdl_cidx;
-	u32 reg = ZXNPU_WFDMA_TX_RING0 + 0x10 * ring;
+	u32 reg = ZXNPU_WFDMA_TX_RING0 + ZXNPU_WFDMA_RING_STRIDE * ring;
+	u32 idx = zxnpu_ring_idx_reg(ring);
 	u32 slot, didx, prev;
 
 	if (!w->bar[0]) {
@@ -564,13 +589,12 @@ static int zxnpu_mcu_submit_ring(struct zxnpu_wlan *w, int ring,
 	zxnpu_mcu_fill_desc(desc, desc_dma, slot, (u32)buf_dma, len);
 	dma_wmb();
 
-	prev = zxnpu_cr_read(w, reg + 12);
+	prev = zxnpu_cr_read(w, idx) & 0xffff;
 	if (verbose)
-		zxnpu_wlan_append(w, "  submit qid%d slot=%u len=%d: base=%08x cnt=%u cidx=%u didx=%u\n",
+		zxnpu_wlan_append(w, "  submit qid%d slot=%u len=%d: base=%08x idx@%08x=%08x\n",
 				  ring ? 17 : 16, slot, len,
 				  zxnpu_cr_read(w, reg),
-				  zxnpu_cr_read(w, reg + 4),
-				  zxnpu_cr_read(w, reg + 8), prev);
+				  idx, zxnpu_cr_read(w, idx));
 	if (!commit) {
 		zxnpu_wlan_append(w, "  dry run: set zxnpu_wlan.commit=1 to write\n");
 		return 0;
@@ -582,17 +606,23 @@ static int zxnpu_mcu_submit_ring(struct zxnpu_wlan *w, int ring,
 		/* hif_set_WFDMA(2): WFDMA_EN | TX DMA EN */
 		zxnpu_cr_write(w, ZXNPU_WFDMA_GLO_CFG, glo | 0x5);
 	}
+	/* 64-bit base: low word at the ring slot, high word next (both
+	 * 0-worthy on this 32-bit DMA platform, the slot is 0x20 wide). */
 	zxnpu_cr_write(w, reg, (u32)desc_dma);
-	zxnpu_cr_write(w, reg + 4, ZXNPU_MCU_RING_DEPTH);
+	zxnpu_cr_write(w, reg + 4, 0);
 	(*cidx)++;
-	zxnpu_cr_write(w, reg + 8, *cidx);
-	if (!readl_poll_timeout(w->bar[0] + zxnpu_cr_bar_off(reg + 12), didx,
-				(didx % ZXNPU_MCU_RING_DEPTH) ==
+	/* the vendor writes the raw slot number as a 32-bit scalar
+	 * (pci_kick_out_cmd_msg tail: hif_io_write32([ring+36], [ring+40])) */
+	zxnpu_cr_write(w, idx, *cidx);
+	if (!readl_poll_timeout(w->bar[0] + zxnpu_cr_bar_off(idx), didx,
+				((didx >> 16) & 0xffff) ==
 				(*cidx % ZXNPU_MCU_RING_DEPTH), 100, 50000))
-		zxnpu_wlan_append(w, "  didx advanced to %u\n", didx);
+		zxnpu_wlan_append(w, "  didx advanced to %u\n",
+				  (didx >> 16) & 0xffff);
 	else
 		zxnpu_wlan_append(w, "  didx still %u (last was %u)\n",
-				  zxnpu_cr_read(w, reg + 12), prev);
+				  (zxnpu_cr_read(w, idx) >> 16) & 0xffff,
+				  prev);
 	return 0;
 }
 
