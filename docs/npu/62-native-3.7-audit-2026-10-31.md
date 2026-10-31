@@ -269,3 +269,16 @@ vendor 软件链：mac_io → mt_mac_cr_range_mapping（bss 窗口表，翻译�
 读到真实状态；FWDL 链（mcu-dl patch → fw-dl wm/wa）在正确窗口上执行。
 **事故教训追加**：3.16 桥窗拓宽无罪但也没解决（prefetch 窗理论证伪——
 真问题是访问模型错位）；活系统 GLO_CFG=0 曾误导（实为偏移错位）。
+
+## 13. 3.17/3.18：CR 层三段 remap 落地，WFDMA 段全活（2026-10-31）
+
+3.17 首版段掩码错（0xfff00000 把 0x18024208 归入 0x1800 段），但 0xF0000
+窗已读出活值（0x72/0xd2 与活系统一致）。3.18 掩码修 0xffff0000：
+- cr[18024208]=**0x1010b850**（bar0+d4208，GLO_CFG 引导态）
+- cr[1802702c/30]=0x00800000/0x7d00（TX/RX 窗配置）
+- TOP_MISC（0xE0000 窗）=0 —— **固件未跑（正常，等 FWDL）**
+- fw-state 的 L1 remap 写改为读改写（保留高 16 位段条目）
+
+**状态判定**：三段 remap 全通、访问层闭环；芯片 = ROM 引导完成、
+WFDMA 配置残值在、固件未下载。下一步 = FWDL 链真跑（step2：
+mcu-dl patch → fw-dl wm → fw-dl wa → fw-state 应变 7）。

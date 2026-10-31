@@ -165,20 +165,39 @@ static void zxnpu_wlan_audit_firmware(struct zxnpu_wlan *w)
 	}
 }
 
+/* Logical CR address -> BAR0 offset, through the three remap segments the
+ * boot ROM has already programmed (doc 62 §12; verified against the live
+ * vendor system: GLO_CFG 0x18024208 answers at bar0+0xd4208, MT_TOP_MISC
+ * 0x180600f0 at bar0+0xe00f0). The 1MB BAR0 is NOT a 1:1 map of
+ * 0x1800_0000 - the old flat offset read dead space. */
+static u32 zxnpu_cr_bar_off(u32 cr)
+{
+	switch (cr & 0xffff0000) {
+	case 0x18020000:
+		return 0xd0000 + (cr & 0xffff);
+	case 0x18060000:
+		return 0xe0000 + (cr & 0xffff);
+	case 0x18000000:
+		return 0xf0000 + (cr & 0xffff);
+	default:
+		return cr - ZXNPU_CR_BASE;
+	}
+}
+
 static u32 zxnpu_cr_read(struct zxnpu_wlan *w, u32 cr)
 {
-	u32 off = ZXNPU_CR(cr);
+	u32 off = zxnpu_cr_bar_off(cr);
 
-	if (!w->bar[0] || (resource_size_t)off + 4 > pci_resource_len(w->pdev, 0))
+	if (!w->bar[0] || off + 4 > 0x100000)
 		return 0;
 	return readl(w->bar[0] + off);
 }
 
 static void zxnpu_cr_write(struct zxnpu_wlan *w, u32 cr, u32 val)
 {
-	u32 off = ZXNPU_CR(cr);
+	u32 off = zxnpu_cr_bar_off(cr);
 
-	if (!w->bar[0] || (resource_size_t)off + 4 > pci_resource_len(w->pdev, 0))
+	if (!w->bar[0] || off + 4 > 0x100000)
 		return;
 	writel(val, w->bar[0] + off);
 }
@@ -212,8 +231,17 @@ static void zxnpu_bar0_write(struct zxnpu_wlan *w, u32 off, u32 val)
 
 static u32 zxnpu_fw_state_read(struct zxnpu_wlan *w)
 {
-	zxnpu_bar0_write(w, ZXNPU_HIF_REMAP_L1_MT7916, ZXNPU_TOP_MISC >> 16);
-	(void)zxnpu_bar0_read(w, ZXNPU_HIF_REMAP_L1_MT7916);
+	u32 remap = zxnpu_bar0_read(w, ZXNPU_HIF_REMAP_L1_MT7916);
+	u32 want = ZXNPU_TOP_MISC >> 16;
+
+	/* L1 packs two 16-bit segment targets (live value 0x18001806 = the
+	 * 0xf0000 window maps 0x1800xxxx, the 0xe0000 window 0x1806xxxx).
+	 * The boot ROM has already set it up, so only rewrite when the low
+	 * half misses, and keep the high half - a full-width write used to
+	 * break the second window. */
+	if ((remap & 0xffff) != want)
+		zxnpu_bar0_write(w, ZXNPU_HIF_REMAP_L1_MT7916,
+				 (remap & 0xffff0000) | want);
 	return zxnpu_bar0_read(w, ZXNPU_L1_REMAP_BASE +
 			       (ZXNPU_TOP_MISC & 0xffff)) & 0x7;
 }
@@ -254,8 +282,9 @@ static void zxnpu_wlan_probe_regs(struct zxnpu_wlan *out,
 			  hw->is_main ? "7906 main" : "790a comp",
 			  (unsigned long long)pci_resource_len(hw->pdev, 0));
 	for (i = 0; i < ARRAY_SIZE(ids); i++)
-		zxnpu_wlan_append(out, "  cr[%08x]=%08x\n", ids[i],
-				  zxnpu_cr_read(hw, ids[i]));
+		zxnpu_wlan_append(out, "  cr[%08x]=%08x (bar0+%05x)\n", ids[i],
+				  zxnpu_cr_read(hw, ids[i]),
+				  zxnpu_cr_bar_off(ids[i]));
 }
 
 /*
@@ -548,7 +577,7 @@ static int zxnpu_mcu_submit_ring(struct zxnpu_wlan *w, int ring,
 	zxnpu_cr_write(w, reg + 4, ZXNPU_MCU_RING_DEPTH);
 	(*cidx)++;
 	zxnpu_cr_write(w, reg + 8, *cidx);
-	if (!readl_poll_timeout(w->bar[0] + ZXNPU_CR(reg + 12), didx,
+	if (!readl_poll_timeout(w->bar[0] + zxnpu_cr_bar_off(reg + 12), didx,
 				(didx % ZXNPU_MCU_RING_DEPTH) ==
 				(*cidx % ZXNPU_MCU_RING_DEPTH), 100, 50000))
 		zxnpu_wlan_append(w, "  didx advanced to %u\n", didx);
