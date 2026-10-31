@@ -201,3 +201,25 @@ StrictHostKeyChecking=no）。
 - 待办移交下轮：B1（7906 主功能绑定点亮芯片——FWDL 前置）、A5（native
   proc/ethtool 统计）、A4（init 自动化——现 native 即 boot 默认，无需）、
   P5 dataplane（依赖 B1）。
+
+## 10. B1 破案：芯片活着，窗口错位（3.13/3.14，2026-10-31）
+
+**3.13**：id_table 扩 7906+790a 双实例（main/comp 槽位、单一 ctl 面、
+双窗 CR 对比 probe）。真机：两实例都 probe 成功，7906/790a 的 1MB
+BAR0 全零。
+
+**突破（mcuwin 实测）**：`bar2: +0=00511163 +8=0000032f +0x108=47474747`
+——32KB BAR2 有活数据（"GGGG" 特征），芯片在线、PCIe 通路正常。
+1MB BAR0 读零 = 该窗内 HIF/WFDMA 区冷（WFDMA 未使能时环寄存器无响应），
+**不是芯片断电**（DTS 注释的 gpio enable 序列 host 驱动已实现）。
+
+**vendor 地址翻译层（mt7916.ko mt_physical_addr_map @0x1f6a88）**：
+mac_io 地址先过翻译（分段公式 + chip_cap 窗口表 + 0x7906 chip-id 检查），
+命中窗口后 = 窗内偏移 + 物理映射基址。vendor 双功能初始化对：
+- `mt7906_hif_ctrl_chip_init`：rx5/tx6 环、int 配置 0xFEF0000F/0x0D004204
+- `mt790A_hif_ctrl_chip_pcie1_init`：rx1/tx2 环、0xB0B00008/0x0D008204
+- IO 双路径：pci_map_io_* 与 **pci_io_remap_***（重映射机制实锤）
+
+**3.14（构建中）**：只读窗扫描器——`win <bar> <off> [n]` 任意窗直读、
+`scan` 双功能三 BAR 稀疏扫（非零命中汇总）。目标：定位 BAR2 32KB 的
+内容图谱（是否含 HIF/WFDMA 镜像或 remap 寄存器），为 FWDL 选路。

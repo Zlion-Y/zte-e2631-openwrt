@@ -33,6 +33,7 @@
 
 #define ZXNPU_WLAN_VENDOR	0x14c3
 #define ZXNPU_WLAN_DEVICE	0x790a
+#define ZXNPU_WLAN_DEVICE_MAIN	0x7906
 
 /* MT7916 MAC CR space starts at 0x18000000 and BAR0 maps it 1:1. */
 #define ZXNPU_CR_BASE		0x18000000u
@@ -48,7 +49,7 @@
 
 static bool zxnpu_wlan_enable;
 module_param_named(enable, zxnpu_wlan_enable, bool, 0644);
-MODULE_PARM_DESC(enable, "probe the 790a companion function and audit firmware files");
+MODULE_PARM_DESC(enable, "probe both MT7916 PCIe functions (7906 main + 790a comp) and audit firmware files");
 
 static bool zxnpu_wlan_commit;
 module_param_named(commit, zxnpu_wlan_commit, bool, 0644);
@@ -92,9 +93,23 @@ struct zxnpu_wlan {
 	 * is per-ctl-command scratch and used to lose this on the first
 	 * command after boot. */
 	char probe_log[2048];
+	bool is_main;		/* 7906 main function vs 790a companion */
 };
 
-static struct zxnpu_wlan *zxnpu_wlan_singleton;
+/* The MT7916 card exposes two PCIe functions of one die: 7906 (main) and
+ * 790a (companion). The vendor reverse work suggests the connac CR bus and
+ * the HIF ring window may split between them (doc 62 B1); the CR reads
+ * through 790a all returned zero, so both functions are bound and probed
+ * read-only to compare their windows side by side. */
+static struct zxnpu_wlan *zxnpu_wlan_main;
+static struct zxnpu_wlan *zxnpu_wlan_comp;
+
+/* the ctl surface talks to whichever instance owns the ring/CR work: prefer
+ * the companion (all prior evidence and ring constants came from it). */
+static struct zxnpu_wlan *zxnpu_wlan_active(void)
+{
+	return zxnpu_wlan_comp ?: zxnpu_wlan_main;
+}
 
 static const char * const zxnpu_fw_names[] = {
 	"zte/mt7916/WIFI_RAM_CODE_MT7916.bin",
@@ -222,7 +237,10 @@ static void zxnpu_wlan_fw_state(struct zxnpu_wlan *w, bool commit)
 			  st == 7 ? "ready (WM+WA)" : "unknown");
 }
 
-static void zxnpu_wlan_probe_regs(struct zxnpu_wlan *w)
+/* out receives the text; hw supplies the register window (the two PCIe
+ * functions of the MT7916 die may carry different bus windows - doc 62 B1). */
+static void zxnpu_wlan_probe_regs(struct zxnpu_wlan *out,
+				  struct zxnpu_wlan *hw)
 {
 	static const u32 ids[] = {
 		0x18000000, 0x18000008, 0x18000010, 0x18000028,
@@ -232,11 +250,12 @@ static void zxnpu_wlan_probe_regs(struct zxnpu_wlan *w)
 	};
 	int i;
 
-	zxnpu_wlan_append(w, "cr probe (bar0 len %llu):\n",
-			  (unsigned long long)pci_resource_len(w->pdev, 0));
+	zxnpu_wlan_append(out, "cr probe (%s, bar0 len %llu):\n",
+			  hw->is_main ? "7906 main" : "790a comp",
+			  (unsigned long long)pci_resource_len(hw->pdev, 0));
 	for (i = 0; i < ARRAY_SIZE(ids); i++)
-		zxnpu_wlan_append(w, "  cr[%08x]=%08x\n", ids[i],
-				  zxnpu_cr_read(w, ids[i]));
+		zxnpu_wlan_append(out, "  cr[%08x]=%08x\n", ids[i],
+				  zxnpu_cr_read(hw, ids[i]));
 }
 
 /*
@@ -324,6 +343,101 @@ static void zxnpu_wlan_mcuwin(struct zxnpu_wlan *w)
 				  readl(w->bar[i]),
 				  readl(w->bar[i] + 8),
 				  readl(w->bar[i] + 0x108));
+	}
+}
+
+/*
+ * Direct window readers (read-only, doc 62 B1 recon): the three BARs of
+ * each function carry different bus windows - the 1MB BAR0 reads zero on
+ * this cold chip while the 32KB BAR2 answers (0x00511163 / "GGGG" pattern).
+ * `win <bar> <off> [count]` dumps dwords from any mapped bar; `scan` walks
+ * every mapped bar of both functions sparsely and prints only non-zero
+ * hits, so one command maps out where the chip actually answers.
+ */
+static void __iomem *zxnpu_wlan_bar_of(struct zxnpu_wlan *w, int bar,
+				       resource_size_t *len)
+{
+	static const unsigned int ridx[3] = { 0, 2, 4 };
+	void __iomem *p;
+
+	if (bar < 0 || bar > 2)
+		return NULL;
+	p = w->bar[bar];
+	if (p && len)
+		*len = pci_resource_len(w->pdev, ridx[bar]);
+	return p;
+}
+
+static void zxnpu_wlan_win_read(struct zxnpu_wlan *w, const char *args)
+{
+	unsigned int bar, count = 1;
+	unsigned long off;
+	void __iomem *p;
+	resource_size_t len;
+	int n;
+
+	if (sscanf(args, "%u %lx %x", &bar, &off, &count) < 2 || bar > 2) {
+		zxnpu_wlan_append(w, "usage: win <bar 0..2> <off-hex> [count <=256]\n");
+		return;
+	}
+	if (count > 256)
+		count = 256;
+	p = zxnpu_wlan_bar_of(w, bar, &len);
+	if (!p || off + 4 > len) {
+		zxnpu_wlan_append(w, "win: bar%u unmapped or offset %lx beyond %llu\n",
+				  bar, off, (unsigned long long)len);
+		return;
+	}
+	for (n = 0; n < count && off + 4 <= len; n++, off += 4)
+		zxnpu_wlan_append(w, "bar%u+%05lx = %08x\n",
+				  bar, off, readl(p + off));
+}
+
+static void zxnpu_wlan_scan_bar(struct zxnpu_wlan *out, struct zxnpu_wlan *hw,
+				int bar, u32 stride, u32 limit)
+{
+	static const unsigned int ridx[3] = { 0, 2, 4 };
+	void __iomem *p = hw->bar[bar];
+	resource_size_t len;
+	u32 off, hits = 0;
+
+	if (!p)
+		return;
+	len = pci_resource_len(hw->pdev, ridx[bar]);
+	if (limit > len)
+		limit = len;
+	for (off = 0; off + 4 <= limit; off += stride) {
+		u32 v = readl(p + off);
+
+		if (v) {
+			if (hits < 16)
+				zxnpu_wlan_append(out, "  %s bar%d+%06x = %08x\n",
+						  hw->is_main ? "7906" : "790a",
+						  ridx[bar], off, v);
+			hits++;
+		}
+	}
+	zxnpu_wlan_append(out, "  %s bar%d: %u non-zero hits (stride %u, range %x)\n",
+			  hw->is_main ? "7906" : "790a", ridx[bar], hits,
+			  stride, limit);
+}
+
+static void zxnpu_wlan_bus_scan(struct zxnpu_wlan *w)
+{
+	struct zxnpu_wlan *other = (w == zxnpu_wlan_main) ?
+				   zxnpu_wlan_comp : zxnpu_wlan_main;
+
+	zxnpu_wlan_append(w, "bus scan (read-only, non-zero hits):\n");
+	/* scan the active instance first, then the other one if bound */
+	zxnpu_wlan_scan_bar(w, w, 0, 0x1000, 0x100000);
+	zxnpu_wlan_scan_bar(w, w, 1, 4, 0x200);
+	zxnpu_wlan_scan_bar(w, w, 1, 0x100, 0x8000);
+	zxnpu_wlan_scan_bar(w, w, 2, 4, 0x1000);
+	if (other) {
+		zxnpu_wlan_scan_bar(w, other, 0, 0x1000, 0x100000);
+		zxnpu_wlan_scan_bar(w, other, 1, 4, 0x200);
+		zxnpu_wlan_scan_bar(w, other, 1, 0x100, 0x8000);
+		zxnpu_wlan_scan_bar(w, other, 2, 4, 0x1000);
 	}
 }
 
@@ -1734,7 +1848,7 @@ static void zxnpu_wlan_l1profile(struct zxnpu_wlan *w)
 
 static int zxnpu_wlan_status_show(struct seq_file *s, void *unused)
 {
-	struct zxnpu_wlan *w = zxnpu_wlan_singleton;
+	struct zxnpu_wlan *w = zxnpu_wlan_active();
 
 	if (!w)
 		return 0;
@@ -1742,14 +1856,18 @@ static int zxnpu_wlan_status_show(struct seq_file *s, void *unused)
 	return 0;
 }
 
-/* persistent probe evidence: identity, BARs, firmware CRCs (doc 62 B4/B5) */
+/* persistent probe evidence: identity, BARs, firmware CRCs (doc 62 B4/B5);
+ * the main function's log is appended so one file covers both windows */
 static int zxnpu_wlan_probe_show(struct seq_file *s, void *unused)
 {
-	struct zxnpu_wlan *w = zxnpu_wlan_singleton;
+	struct zxnpu_wlan *w = zxnpu_wlan_active();
 
 	if (!w)
 		return 0;
 	seq_printf(s, "%s", w->probe_log);
+	if (zxnpu_wlan_main && zxnpu_wlan_main != w)
+		seq_printf(s, "--- 7906 main ---\n%s",
+			   zxnpu_wlan_main->probe_log);
 	return 0;
 }
 
@@ -1780,7 +1898,7 @@ static int zxvap_parse_mac(const char *s, u8 *out)
 static ssize_t zxnpu_wlan_ctl_write(struct file *file, const char __user *ubuf,
 				    size_t count, loff_t *ppos)
 {
-	struct zxnpu_wlan *w = zxnpu_wlan_singleton;
+	struct zxnpu_wlan *w = zxnpu_wlan_active();
 	char cmd[32];
 	bool commit;
 
@@ -1794,7 +1912,9 @@ static ssize_t zxnpu_wlan_ctl_write(struct file *file, const char __user *ubuf,
 	mutex_lock(&w->lock);
 	memset(w->status, 0, sizeof(w->status));
 	if (!strncmp(cmd, "probe", 5)) {
-		zxnpu_wlan_probe_regs(w);
+		zxnpu_wlan_probe_regs(w, w);
+		if (zxnpu_wlan_main && zxnpu_wlan_main != w)
+			zxnpu_wlan_probe_regs(w, zxnpu_wlan_main);
 	} else if (!strncmp(cmd, "fw-audit", 8)) {
 		zxnpu_wlan_audit_firmware(w);
 		zxnpu_wlan_append(w, "fw-audit: written to the persistent probe log (/proc/zx-csp-wlan/probe)\n");
@@ -1826,6 +1946,11 @@ static ssize_t zxnpu_wlan_ctl_write(struct file *file, const char __user *ubuf,
 		zxnpu_wlan_rings(w);
 	} else if (!strncmp(cmd, "mcuwin", 6)) {
 		zxnpu_wlan_mcuwin(w);
+	} else if (!strncmp(cmd, "win ", 4)) {
+		zxnpu_wlan_win_read(w, cmd + 4);
+	} else if (!strncmp(cmd, "scan", 4) &&
+		   (cmd[4] == '\0' || cmd[4] == '\n')) {
+		zxnpu_wlan_bus_scan(w);
 	} else if (!strncmp(cmd, "mcu-cmd ", 8)) {
 		zxnpu_wlan_mcu_cmd(w, cmd + 8, zxnpu_wlan_commit);
 	} else if (!strncmp(cmd, "mcu-dl-regions ", 15)) {
@@ -1965,7 +2090,7 @@ done_bss:
 			zxnpu_wlan_append(w, "commit refused: set zxnpu_wlan.commit=1\n");
 		zxnpu_wlan_wfdma(w, commit);
 	} else {
-		zxnpu_wlan_append(w, "commands: l1profile | ack-expect | data-init | data-recv | dataplane | probe | fw | plan | mcu | rings | mcuwin | mcu-send | mcu-cmd | mcu-dl | mcu-dl-regions | fw-start | fw-info | fw-audit | fw-state | fw-plan wm|wa | fw-dl wm|wa | rx-init | mcu-recv | commit\n");
+		zxnpu_wlan_append(w, "commands: l1profile | ack-expect | data-init | data-recv | dataplane | probe | scan | win <bar> <off> [n] | fw | plan | mcu | rings | mcuwin | mcu-send | mcu-cmd | mcu-dl | mcu-dl-regions | fw-start | fw-info | fw-audit | fw-state | fw-plan wm|wa | fw-dl wm|wa | rx-init | mcu-recv | commit\n");
 	}
 	mutex_unlock(&w->lock);
 	return count;
@@ -1989,6 +2114,7 @@ static int zxnpu_wlan_probe(struct pci_dev *pdev,
 	if (!w)
 		return -ENOMEM;
 	w->pdev = pdev;
+	w->is_main = pdev->device == ZXNPU_WLAN_DEVICE_MAIN;
 	mutex_init(&w->lock);
 
 	/* The control plane must exist even when parked: probe succeeds with
@@ -2069,30 +2195,43 @@ static int zxnpu_wlan_probe(struct pci_dev *pdev,
 					     &pdev->resource[ridx].end,
 					     w->bar[i] ? "" : " (unmapped)");
 		}
-		zxnpu_wlan_probe_regs(w);
+		zxnpu_wlan_probe_regs(w, w);
 	} else {
 		zxnpu_wlan_pl_append(w, "parked: enable=0, no PCI/BAR access (reload with enable=1)\n");
 	}
 	zxnpu_wlan_pl_append(w, "state: G3 skeleton, no MT7916 register written\n");
 	zxnpu_wlan_audit_firmware(w);
 
-	dir = proc_mkdir("zx-csp-wlan", NULL);
-	if (dir) {
-		if (!proc_create_single("status", 0444, dir,
-					zxnpu_wlan_status_show) ||
-		    !proc_create_single("probe", 0444, dir,
-					zxnpu_wlan_probe_show) ||
-		    !proc_create("ctl", 0200, dir, &zxnpu_wlan_ctl_ops)) {
-			proc_remove(dir);
-			dir = NULL;
+	/* one control surface: only the companion (active) instance publishes
+	 * /proc/zx-csp-wlan/ - the main function's evidence shows up in the
+	 * probe log and the dual-window cr dump instead */
+	if (!w->is_main) {
+		dir = proc_mkdir("zx-csp-wlan", NULL);
+		if (dir) {
+			if (!proc_create_single("status", 0444, dir,
+						zxnpu_wlan_status_show) ||
+			    !proc_create_single("probe", 0444, dir,
+						zxnpu_wlan_probe_show) ||
+			    !proc_create("ctl", 0200, dir, &zxnpu_wlan_ctl_ops)) {
+				proc_remove(dir);
+				dir = NULL;
+			}
 		}
+	} else {
+		dir = NULL;
+		zxnpu_wlan_pl_append(w, "func: 7906 main (control surface lives on the 790a instance)\n");
 	}
 	w->proc = dir;
-	zxnpu_wlan_singleton = w;
+	if (w->is_main)
+		zxnpu_wlan_main = w;
+	else
+		zxnpu_wlan_comp = w;
 	pci_set_drvdata(pdev, w);
-	zxnpu_wlan_vaps_init(w);
-	dev_info(&pdev->dev, "G3.2 ready (commit=%d vaps=%d)\n",
-		 zxnpu_wlan_commit, zxnpu_wlan_vap);
+	if (!w->is_main)
+		zxnpu_wlan_vaps_init(w);
+	dev_info(&pdev->dev, "G3.2 ready (%s commit=%d vaps=%d)\n",
+		 w->is_main ? "main" : "comp", zxnpu_wlan_commit,
+		 zxnpu_wlan_vap);
 	return 0;
 }
 
@@ -2124,10 +2263,14 @@ static void zxnpu_wlan_remove(struct pci_dev *pdev)
 	zxnpu_wlan_vaps_exit(w);
 	if (w->proc)
 		proc_remove(w->proc);
-	zxnpu_wlan_singleton = NULL;
+	if (w->is_main)
+		zxnpu_wlan_main = NULL;
+	else
+		zxnpu_wlan_comp = NULL;
 }
 
 static const struct pci_device_id zxnpu_wlan_ids[] = {
+	{ PCI_DEVICE(ZXNPU_WLAN_VENDOR, ZXNPU_WLAN_DEVICE_MAIN) },
 	{ PCI_DEVICE(ZXNPU_WLAN_VENDOR, ZXNPU_WLAN_DEVICE) },
 	{ }
 };
