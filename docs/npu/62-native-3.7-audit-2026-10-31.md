@@ -572,3 +572,22 @@ INT_ENA（0x24240=ffffffff ✓）、PCIe 窗（两寄存器两值已试）、门
 （/proc 或 iwpriv）② 5.1 上 kcore ③ 我方盒先确认 desc 内容（win 读
 4e088000？——DRAM 不在 BAR 内，需设备侧 /dev/mem 或驱动内读）。
 我方驱动加 dmp 命令读 mcu_ring 前几项最快。
+
+## 29. 描述符格式终审：与 vendor 逐位一致——问题定性转向硬件状态（2026-10-31）
+
+pci_kick_out_cmd_msg 逐字节重推（含 bfi/ubfx 位场）终审：
+- word0 = buf_dma（从本项 +20 复制）
+- word1 = byte4=0、byte5=orig5&0xC0、byte6=len&0xff、byte7=(orig7&0xC0)
+  |0x40|((len>>8)&0x3f)——零初始化环上 orig=0 → **word1=0x40000000|
+  len<<16，与我们的 fill_desc 逐位一致**
+- orig5/orig7 的保留位来自软件视图 [4]=curVA 的高位——硬件容忍，等价
+
+**结论**：描述符格式非问题。DMA 不消费 = **硬件状态问题**（ROM 阶段的
+WFDMA/队列状态、时钟、或 vendor init 中尚未复刻的一步）。
+
+**下轮路线（按优先级）**：
+1. 5.1 上枚举 vendor 调试接口找环 dump（iwpriv 列表、/proc/net、
+   /sys/kernel/debug）——对照环寄存器与描述符内容
+2. mt76 对照：connac2 ROM 阶段 WFDMA 是否默认活（mt76 无 vendor init
+   也能 FWDL——重查 mt76 mmio 初始化序列与我们差异）
+3. PCIe INT 状态寄存器（设备侧）核对 MCU 是否回过任何中断
