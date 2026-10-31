@@ -193,6 +193,27 @@ static u32 zxnpu_cr_bar_off(u32 cr)
 	}
 }
 
+/* CR access through the MAIN (7906) function's BAR: the live vendor box
+ * maps every ring register there (doc 62 §39); the companion's BAR0
+ * decodes a different window and its DMA never sees our descriptors.
+ * Falls back to the local BAR before the main function has probed. */
+static u32 zxnpu_cr_read(struct zxnpu_wlan *w, u32 cr);
+static void zxnpu_cr_write(struct zxnpu_wlan *w, u32 cr, u32 val);
+static u32 zxnpu_main_cr_read(struct zxnpu_wlan *w, u32 cr)
+{
+	if (zxnpu_wlan_main && zxnpu_wlan_main->bar[0] && !w->is_main)
+		return zxnpu_cr_read(zxnpu_wlan_main, cr);
+	return zxnpu_cr_read(w, cr);
+}
+static void zxnpu_main_cr_write(struct zxnpu_wlan *w, u32 cr, u32 val)
+{
+	if (zxnpu_wlan_main && zxnpu_wlan_main->bar[0] && !w->is_main) {
+		zxnpu_cr_write(zxnpu_wlan_main, cr, val);
+		return;
+	}
+	zxnpu_cr_write(w, cr, val);
+}
+
 static u32 zxnpu_cr_read(struct zxnpu_wlan *w, u32 cr)
 {
 	u32 off = zxnpu_cr_bar_off(cr);
@@ -587,13 +608,13 @@ static int zxnpu_mcu_submit_ring(struct zxnpu_wlan *w, int ring,
 	zxnpu_mcu_fill_desc(desc, desc_dma, slot, (u32)buf_dma, len);
 	dma_wmb();
 
-	prev = zxnpu_cr_read(w, reg + 12);
+	prev = zxnpu_main_cr_read(w, reg + 12);
 	if (verbose)
 		zxnpu_wlan_append(w, "  submit qid%d slot=%u len=%d: base=%08x cnt=%u cidx=%u didx=%u\n",
 				  ring ? 17 : 16, slot, len,
 				  zxnpu_cr_read(w, reg),
 				  zxnpu_cr_read(w, reg + 4),
-				  zxnpu_cr_read(w, reg + 8), prev);
+				  zxnpu_main_cr_read(w, reg + 8), prev);
 	if (!commit) {
 		zxnpu_wlan_append(w, "  dry run: set zxnpu_wlan.commit=1 to write\n");
 		return 0;
@@ -610,11 +631,13 @@ static int zxnpu_mcu_submit_ring(struct zxnpu_wlan *w, int ring,
 	 * clear every pending interrupt source (INT_SOURCE is W1C). */
 	zxnpu_cr_write(w, ZXNPU_WFDMA_RST, ZXNPU_WFDMA_RST_ALL);
 	zxnpu_cr_write(w, ZXNPU_WFDMA_INT_SOURCE, ~0u);
-	zxnpu_cr_write(w, reg, (u32)desc_dma);
-	zxnpu_cr_write(w, reg + 4, ZXNPU_MCU_RING_DEPTH);
+	zxnpu_main_cr_write(w, reg, (u32)desc_dma);
+	zxnpu_main_cr_write(w, reg + 4, ZXNPU_MCU_RING_DEPTH);
 	(*cidx)++;
-	zxnpu_cr_write(w, reg + 8, *cidx);
-	if (!readl_poll_timeout(w->bar[0] + zxnpu_cr_bar_off(reg + 12), didx,
+	zxnpu_main_cr_write(w, reg + 8, *cidx);
+	if (!readl_poll_timeout((zxnpu_wlan_main && !w->is_main ?
+				 zxnpu_wlan_main->bar[0] : w->bar[0]) +
+				zxnpu_cr_bar_off(reg + 12), didx,
 				(didx % ZXNPU_MCU_RING_DEPTH) ==
 				(*cidx % ZXNPU_MCU_RING_DEPTH), 100, 50000))
 		zxnpu_wlan_append(w, "  didx advanced to %u\n", didx);
