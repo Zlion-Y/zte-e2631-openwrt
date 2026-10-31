@@ -916,7 +916,7 @@ static int zxna_probe(struct platform_device *pdev)
 	struct device *dev = &pdev->dev;
 	struct device_node *ports;
 	struct zx_eth_adapter *a;
-	int i, ret, registered = 0;
+	int i, ret, registered = 0, mac_wait;
 	bool napi_added = false;
 
 	if (!zxnative_enable)
@@ -992,7 +992,22 @@ static int zxna_probe(struct platform_device *pdev)
 			SET_NETDEV_DEV(netdev, dev);
 			if (!of_property_read_string(np, "label", &label))
 				strscpy(netdev->name, label, IFNAMSIZ);
-			if (!of_get_mac_address(np, mac))
+			/* The MAC lives in an nvmem cell of the flash partition
+			 * layout; its supplier binds later than this probe
+			 * runs (3.10 measured: probe at 0.22s, supplier ready
+			 * by 0.9s), and a plain failure here silently made
+			 * every port random-MAC. Retry the defer window
+			 * briefly instead of deferring the whole probe -
+			 * that would let the baseline driver steal the node
+			 * in the boot race (it registers right after). */
+			ret = -ENODATA;
+			for (mac_wait = 0; mac_wait < 20; mac_wait++) {
+				ret = of_get_mac_address(np, mac);
+				if (ret != -EPROBE_DEFER)
+					break;
+				msleep(100);
+			}
+			if (!ret)
 				eth_hw_addr_set(netdev, mac);
 			else
 				eth_hw_addr_random(netdev);

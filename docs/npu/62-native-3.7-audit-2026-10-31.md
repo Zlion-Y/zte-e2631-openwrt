@@ -169,3 +169,23 @@ switch 观察（如本轮）+ wlanmgr step1。全过才进下一轮。
   ctl 运行期路径不受影响。
 - 两个固件文件（1.76MB 与 458KB）内容 0% 重叠却同 CRC32=2144df1c——
   记录为真实碰撞（~2^-32），审计同时打印 size 可区分，非 bug。
+
+## 8. 3.10 刷入：native 有线驱动首次真机服役（2026-10-31）
+
+**里程碑**：`gmac served by zxnative-eth`——链接顺序竞争生效，自研驱动
+从 boot 起承载全部 4 端口；wan/lan2 1Gbps、br-lan 转发、WAN 网关可达、
+IRQ 6011、softnet 零丢包、无 oops。基线从未被 probe（竞争干净）。
+
+**新发现（→3.11 修复）**：全部 netdev 随机 MAC。根因：native probe 在
+0.224s 执行，而 flash 分区 nvmem-layout（MAC 源）约 0.9s 就绪；
+`of_get_mac_address` 返回 -EPROBE_DEFER 被当普通失败 → 随机 MAC。
+4 条 "Failed to create device link (0x180)" 告警同根因。
+**修复**：probe 内有界重试（20×100ms）。内建 initcall 串行执行——
+重试的 msleep 同时阻塞基线注册，boot 竞争反而更稳固。
+（probe 级 -EPROBE_DEFER 是错误答案：defer 期间基线会抢绑节点。）
+
+**流程教训（脚本已修）**：原位写入后 busybox `reboot` 在被替换的
+运行 rootfs 上 I/O error 静默失败（`|| true` 掩盖）→ 改
+`sync; echo b > /proc/sysrq-trigger`；等待循环必须先等 SSH 掉线再等
+回归；每次新 rootfs 的 dropbear 主机密钥都会变（device-verify 已带
+StrictHostKeyChecking=no）。

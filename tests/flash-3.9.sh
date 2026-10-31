@@ -8,7 +8,7 @@ DEV=${1:-root@192.168.1.1}
 PKG=${2:-../out/native-wired-3.9/e2631-openwrt-native-wired-3.9.bin}
 SSH="ssh -o BatchMode=yes -o StrictHostKeyChecking=no $DEV"
 ssh-keygen -R 192.168.1.1 >/dev/null 2>&1 || true
-SCP="scp -O -o BatchMode=yes"
+SCP="scp -O -o BatchMode=yes -o StrictHostKeyChecking=no"
 
 [ -f "$PKG" ] || { echo "package missing: $PKG"; exit 1; }
 echo "== local sha256"
@@ -26,14 +26,21 @@ $SSH "e2631-fwslot upgrade-check"
 echo "== in-place upgrade of the running slot"
 $SSH "e2631-fwslot upgrade /tmp/e2631-3.9.bin"
 
-echo "== reboot"
-$SSH "reboot" || true
+echo "== reboot via sysrq (busybox reboot hit I/O errors on the freshly"
+echo "== rewritten running rootfs and silently failed once already)"
+$SSH "sync; echo b > /proc/sysrq-trigger" || true
 
-echo "== waiting for the box to come back (max 150s)"
+echo "== waiting for the box to go down (reboot actually happens)"
+for i in $(seq 1 20); do
+	sleep 3
+	$SSH -o ConnectTimeout=3 echo up >/dev/null 2>&1 || break
+done
+echo "== waiting for it to come back (max 150s)"
 for i in $(seq 1 50); do
 	sleep 3
 	$SSH -o ConnectTimeout=3 echo up >/dev/null 2>&1 && break
 done
+sleep 25	# let netifd/dropbear settle before the sweep
 
 echo "== post-flash full verification"
 bash tests/device-verify.sh "$DEV"

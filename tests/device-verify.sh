@@ -14,7 +14,7 @@
 #   V5 stability    - softnet drops, conntrack sane, logread error scan
 set -u
 DEV=${1:-root@192.168.1.1}
-SSH="ssh -o BatchMode=yes -o ConnectTimeout=8 $DEV"
+SSH="ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=8 $DEV"
 FAIL=0
 
 sec() { printf '\n== %s ==\n' "$1"; }
@@ -26,8 +26,13 @@ sec "V1 identity"
 VER=$($SSH cat /etc/e2631-version 2>/dev/null)
 [ -n "$VER" ] && ok "version file: $VER" || bad "no /etc/e2631-version"
 SLOT=$($SSH e2631-fwslot info 2>/dev/null | grep running)
-echo "$SLOT" | grep -q "$VER" && ok "running slot header matches version file" ||
-	bad "slot header stale: $SLOT"
+# only a non-empty VER may bless the slot header (an empty $VER makes
+# grep -q match anything - a false PASS)
+if [ -n "$VER" ] && echo "$SLOT" | grep -q "$VER"; then
+	ok "running slot header matches version file"
+else
+	bad "slot header stale/unreadable: $SLOT"
+fi
 KREL=$($SSH uname -r 2>/dev/null)
 [ -n "$KREL" ] && ok "kernel $KREL" || bad "uname failed"
 
