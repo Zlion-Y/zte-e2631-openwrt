@@ -924,13 +924,6 @@ static const struct ethtool_ops zxna_ethtool_ops = {
 	.get_ethtool_stats	= zxna_get_ethtool_stats,
 };
 
-/* ppe.c classifies ingress ports through this hook (declared in the shared
- * header); the native driver answers for its own netdev_ops. */
-bool zx_eth_is_port(const struct net_device *dev)
-{
-	return dev->netdev_ops == &zxna_netdev_ops;
-}
-
 static const struct net_device_ops zxna_netdev_ops = {
 	.ndo_open		= zxna_open,
 	.ndo_stop		= zxna_stop,
@@ -940,6 +933,14 @@ static const struct net_device_ops zxna_netdev_ops = {
 	.ndo_eth_ioctl		= zxna_ioctl,
 	.ndo_setup_tc		= zxna_setup_tc,
 };
+
+/* ppe.c classifies ingress ports through this hook (declared in the shared
+ * header); the native driver answers for its own netdev_ops. */
+bool zx_eth_is_port(const struct net_device *dev)
+{
+	return dev->netdev_ops == &zxna_netdev_ops;
+}
+
 
 /* ---- probe/remove --------------------------------------------------- */
 
