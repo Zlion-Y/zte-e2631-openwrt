@@ -1,14 +1,15 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * ZTE ZX279128S vendor-native MT7916 (CSP_WLAN) G3 skeleton.
+ * ZTE ZX279128S vendor-native MT7916 (CSP_WLAN) driver, R-A stage.
  *
- * This driver deliberately binds only the companion PCIe function
- * 14c3:790a, which mt76 leaves unbound in the current single-HIF image. It is
- * a probe/firmware audit stage, not an AP driver: with enable=0 it parks the
- * device (probe succeeds, the proc/VAP control plane exists, but no PCI or
- * BAR access happens), and even when enabled it only enables PCI, maps the
- * BARs, reads config space and checks the vendor firmware files. No MT7916
- * register is written yet.
+ * Binds both PCIe functions of the MT7916 die and follows mt76's split:
+ * 14c3:7906 is the main function that owns the hardware (BAR0, the wfsys
+ * reset that makes the MCU re-execute its ROM code, and the WFDMA rings),
+ * 14c3:790a is hif2 only. With enable=0 the driver parks the device (probe
+ * succeeds, the proc/VAP control plane exists, no PCI or BAR access), and
+ * even when enabled it writes no register during probe: the reset and the
+ * WFDMA bring-up are commit-gated ctl commands so a wedge cannot turn into
+ * a boot loop.
  */
 
 #include <linux/crc32.h>
@@ -115,11 +116,15 @@ struct zxnpu_wlan {
 static struct zxnpu_wlan *zxnpu_wlan_main;
 static struct zxnpu_wlan *zxnpu_wlan_comp;
 
-/* the ctl surface talks to whichever instance owns the ring/CR work: prefer
- * the companion (all prior evidence and ring constants came from it). */
+/* The control surface talks to the instance that owns the hardware: the
+ * main function (7906). mt76's mt7915_pci_probe treats 7906 as the device
+ * and 790a as hif2 only - and the wfsys reset, which is what makes the MCU
+ * re-run its ROM code, is only performed on the main function. Everything
+ * below therefore runs on zxnpu_wlan_main once it has probed; the companion
+ * stays bound as evidence/secondary window. */
 static struct zxnpu_wlan *zxnpu_wlan_active(void)
 {
-	return zxnpu_wlan_comp ?: zxnpu_wlan_main;
+	return zxnpu_wlan_main ?: zxnpu_wlan_comp;
 }
 
 static const char * const zxnpu_fw_names[] = {
@@ -176,23 +181,103 @@ static void zxnpu_wlan_audit_firmware(struct zxnpu_wlan *w)
 	}
 }
 
-/* Logical CR address -> BAR0 offset, through the three remap segments the
- * boot ROM has already programmed (doc 62 §12; verified against the live
- * vendor system: GLO_CFG 0x18024208 answers at bar0+0xd4208, MT_TOP_MISC
- * 0x180600f0 at bar0+0xe00f0). The 1MB BAR0 is NOT a 1:1 map of
- * 0x1800_0000 - the old flat offset read dead space. */
+/* CR addressing, following mt76 (mt7915/mmio.c __mt7915_reg_addr +
+ * __mt7915_reg_remap_addr) rather than a fixed window table:
+ *
+ *  - the WFDMA0 / WFDMA_EXT_CSR block (0x1802_xxxx) is decoded directly at
+ *    bar0+0xd0000. That is the same translation as mt76's mt7916_reg[]
+ *    (WFDMA0_ADDR = 0xd4000), and it is what the live vendor box answers:
+ *    0x18024208 -> bar0+0xd4208;
+ *  - everything else goes through the L1 window: write (addr >> 16) into
+ *    MT_HIF_REMAP_L1_MT7916[15:0], read it back so the write is pushed
+ *    through the HIF, then touch bar0+0xe0000+(addr & 0xffff).
+ *
+ * The boot ROM leaves L1 pointed at 0x1806, which is why a fixed table
+ * (0x1806->0xe0000, 0x1800->0xf0000) looked right: MT_TOP_MISC read back
+ * fine while MT_TOP_PWR_CTRL through the invented 0xf0000 window was dead.
+ * The wfsys reset needs L1 base 0x7000 (MT_WF_SUBSYS_RST 0x7000_2600) and
+ * PCIe interrupt enable needs 0x7403, so the base has to be per access.
+ */
+static u32 zxnpu_bar0_read(struct zxnpu_wlan *w, u32 off)
+{
+	if (!w->bar[0] || (resource_size_t)off + 4 > pci_resource_len(w->pdev, 0))
+		return 0;
+	return readl(w->bar[0] + off);
+}
+
+static void zxnpu_bar0_write(struct zxnpu_wlan *w, u32 off, u32 val)
+{
+	if (!w->bar[0] || (resource_size_t)off + 4 > pci_resource_len(w->pdev, 0))
+		return;
+	writel(val, w->bar[0] + off);
+}
+
+#define ZXNPU_HIF_REMAP_L1_MT7916	0x000fe260
+#define ZXNPU_HIF_REMAP_BASE_L1		0x000e0000
+
+/* Point the L1 window at a 64 KiB segment. mt76 keeps the high half of the
+ * register intact (it holds a second field), writes only [15:0] and reads
+ * back to push. */
+static void zxnpu_l1_select(struct zxnpu_wlan *w, u16 base)
+{
+	u32 v = zxnpu_bar0_read(w, ZXNPU_HIF_REMAP_L1_MT7916);
+
+	if ((v & 0xffff) == base)
+		return;
+	zxnpu_bar0_write(w, ZXNPU_HIF_REMAP_L1_MT7916,
+			 (v & 0xffff0000) | base);
+	zxnpu_bar0_read(w, ZXNPU_HIF_REMAP_L1_MT7916);
+}
+
+/* Directly decoded bar0 block (no remap register involved). */
+static bool zxnpu_cr_direct(u32 cr)
+{
+	return (cr & 0xffff0000) == 0x18020000;
+}
+
+/* mt7916_reg_map[] (mt76 mt7915/mmio.c): fixed physical->bar0 translations
+ * for the blocks that are cheaper to decode directly than through L1. Only
+ * the entries this driver needs so far; get_mac/efuse work will add the WF
+ * LMAC blocks.
+ */
+struct zxnpu_reg_map {
+	u32 phys;
+	u32 maps;
+	u32 size;
+};
+static const struct zxnpu_reg_map zxnpu_reg_map[] = {
+	{ 0x00400000, 0x80000, 0x10000 },	/* WF_MCU_SYSRAM */
+	{ 0x00410000, 0x90000, 0x10000 },	/* WF_MCU_SYSRAM (configure cr) */
+	{ 0x820c0000, 0x08000, 0x04000 },	/* WF_UMAC_TOP (PLE) */
+	{ 0x820c8000, 0x0c000, 0x02000 },	/* WF_UMAC_TOP (PSE) */
+	{ 0x820cc000, 0x0e000, 0x02000 },	/* WF_UMAC_TOP (PP) */
+	{ 0x820d0000, 0x30000, 0x10000 },	/* WF_LMAC_TOP (WF_WTBLON) */
+};
+
+/* bar0 offset from the map table, or -1 when the address is not covered. */
+static u32 zxnpu_cr_mapped_off(u32 cr)
+{
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(zxnpu_reg_map); i++) {
+		u32 ofs;
+
+		if (cr < zxnpu_reg_map[i].phys)
+			continue;
+		ofs = cr - zxnpu_reg_map[i].phys;
+		if (ofs >= zxnpu_reg_map[i].size)
+			continue;
+		return zxnpu_reg_map[i].maps + ofs;
+	}
+	return (u32)-1;
+}
+
+/* bar0 offset for the directly decoded block; -1 for everything else. */
 static u32 zxnpu_cr_bar_off(u32 cr)
 {
-	switch (cr & 0xffff0000) {
-	case 0x18020000:
+	if (zxnpu_cr_direct(cr))
 		return 0xd0000 + (cr & 0xffff);
-	case 0x18060000:
-		return 0xe0000 + (cr & 0xffff);
-	case 0x18000000:
-		return 0xf0000 + (cr & 0xffff);
-	default:
-		return cr - ZXNPU_CR_BASE;
-	}
+	return (u32)-1;
 }
 
 /* CR access through the MAIN (7906) function's BAR: the live vendor box
@@ -218,33 +303,40 @@ static void zxnpu_main_cr_write(struct zxnpu_wlan *w, u32 cr, u32 val)
 
 static u32 zxnpu_cr_read(struct zxnpu_wlan *w, u32 cr)
 {
-	u32 off = zxnpu_cr_bar_off(cr);
+	u32 off;
 
-	if (!w->bar[0] || off + 4 > 0x100000)
+	if (!w->bar[0])
+		return 0;
+	if (!zxnpu_cr_direct(cr)) {
+		off = zxnpu_cr_mapped_off(cr);
+		if (off == (u32)-1) {
+			zxnpu_l1_select(w, cr >> 16);
+			off = ZXNPU_HIF_REMAP_BASE_L1 + (cr & 0xffff);
+		}
+	} else {
+		off = 0xd0000 + (cr & 0xffff);
+	}
+	if (off + 4 > 0x100000)
 		return 0;
 	return readl(w->bar[0] + off);
 }
 
 static void zxnpu_cr_write(struct zxnpu_wlan *w, u32 cr, u32 val)
 {
-	u32 off = zxnpu_cr_bar_off(cr);
+	u32 off;
 
-	if (!w->bar[0] || off + 4 > 0x100000)
+	if (!w->bar[0])
 		return;
-	writel(val, w->bar[0] + off);
-}
-
-/* BAR0 offsets that are not in the 0x1800_0000 CR window. */
-static u32 zxnpu_bar0_read(struct zxnpu_wlan *w, u32 off)
-{
-	if (!w->bar[0] || (resource_size_t)off + 4 > pci_resource_len(w->pdev, 0))
-		return 0;
-	return readl(w->bar[0] + off);
-}
-
-static void zxnpu_bar0_write(struct zxnpu_wlan *w, u32 off, u32 val)
-{
-	if (!w->bar[0] || (resource_size_t)off + 4 > pci_resource_len(w->pdev, 0))
+	if (!zxnpu_cr_direct(cr)) {
+		off = zxnpu_cr_mapped_off(cr);
+		if (off == (u32)-1) {
+			zxnpu_l1_select(w, cr >> 16);
+			off = ZXNPU_HIF_REMAP_BASE_L1 + (cr & 0xffff);
+		}
+	} else {
+		off = 0xd0000 + (cr & 0xffff);
+	}
+	if (off + 4 > 0x100000)
 		return;
 	writel(val, w->bar[0] + off);
 }
@@ -257,25 +349,13 @@ static void zxnpu_bar0_write(struct zxnpu_wlan *w, u32 off, u32 val)
  * Bits 2:0 are the state mt76 calls FW_STATE_*: 1 = firmware download,
  * 3 = normal operation, 7 = ready including the WA MCU.
  */
-#define ZXNPU_HIF_REMAP_L1_MT7916	0x000fe260
-#define ZXNPU_L1_REMAP_BASE		0x000e0000
 #define ZXNPU_TOP_MISC			0x180600f0
 
 static u32 zxnpu_fw_state_read(struct zxnpu_wlan *w)
 {
-	u32 remap = zxnpu_bar0_read(w, ZXNPU_HIF_REMAP_L1_MT7916);
-	u32 want = ZXNPU_TOP_MISC >> 16;
-
-	/* L1 packs two 16-bit segment targets (live value 0x18001806 = the
-	 * 0xf0000 window maps 0x1800xxxx, the 0xe0000 window 0x1806xxxx).
-	 * The boot ROM has already set it up, so only rewrite when the low
-	 * half misses, and keep the high half - a full-width write used to
-	 * break the second window. */
-	if ((remap & 0xffff) != want)
-		zxnpu_bar0_write(w, ZXNPU_HIF_REMAP_L1_MT7916,
-				 (remap & 0xffff0000) | want);
-	return zxnpu_bar0_read(w, ZXNPU_L1_REMAP_BASE +
-			       (ZXNPU_TOP_MISC & 0xffff)) & 0x7;
+	/* MT_TOP_MISC lives in the 0x1806 segment, so the accessor points
+	 * the L1 window there itself - no manual remap bookkeeping. */
+	return zxnpu_cr_read(w, ZXNPU_TOP_MISC) & 0x7;
 }
 
 static void zxnpu_wlan_fw_state(struct zxnpu_wlan *w, bool commit)
@@ -285,7 +365,7 @@ static void zxnpu_wlan_fw_state(struct zxnpu_wlan *w, bool commit)
 	zxnpu_wlan_append(w, "fw-state: %s\n", commit ? "COMMIT" : "read only");
 	zxnpu_wlan_append(w, "  remap %08x <- %04x, read %08x\n",
 			  ZXNPU_HIF_REMAP_L1_MT7916, ZXNPU_TOP_MISC >> 16,
-			  ZXNPU_L1_REMAP_BASE + (ZXNPU_TOP_MISC & 0xffff));
+			  ZXNPU_HIF_REMAP_BASE_L1 + (ZXNPU_TOP_MISC & 0xffff));
 	if (!commit) {
 		zxnpu_wlan_append(w, "  dry run: set commit=1 to read the L1 window\n");
 		return;
@@ -528,11 +608,12 @@ static void zxnpu_wlan_bus_scan(struct zxnpu_wlan *w)
  * enable=1 and commit=1.
  */
 #define ZXNPU_FWDL_RING_NR	0
-/* At ROM stage the MCU only serves the FWDL ring (qid16) - the WM command
- * ring has no listener until the WM firmware runs (doc 62 §26), so the
- * whole patch sequence (SemGet/AddressLen/Finish + FwScatter) goes out
- * through ring 0. */
-#define ZXNPU_MCU_RING_NR	0
+/* Commands go to qid17 (MCU_WM, ring 1) and firmware scatter data to qid16
+ * (FWDL, ring 0) - that is mt76's split: mt7915_mcu_patch_sem_ctrl() and
+ * friends use MT_MCUQ_WM, mt7915_mcu_send_firmware() uses MT_MCUQ_FWDL, and
+ * the ROM answers the WM ring before any WM firmware runs (a working mt76
+ * proves it). Older builds of this driver sent everything through ring 0. */
+#define ZXNPU_MCU_RING_NR	1
 #define ZXNPU_MCU_RING_REG	(ZXNPU_WFDMA_TX_RING0 + 0x10 * ZXNPU_MCU_RING_NR)
 #define ZXNPU_MCU_DESC_SIZE	16
 /* The live vendor FWDL ring runs 128 deep (CNT=0x80 at 0x18024404,
@@ -605,24 +686,302 @@ static void zxnpu_wlan_queue_init(struct zxnpu_wlan *w, int ring)
 		w->fwdl_ring_armed = true;
 }
 
-/* Build the 60-byte connac2 MCU TXD header mt76_connac2_mcu_fill_message
- * emits for non-scatter commands: the ROM parses this, not the 24-byte
- * Andes header this driver started with (doc 62 §42). Payload follows at
- * +60. */
-static int zxnpu_mcu_txd_header(u8 *msg, int payload_len, u8 cid, u8 seq)
-{
-	u32 total = 60 + payload_len;
+/* ---------------------------------------------------------------------
+ * wfsys reset and the WFDMA bring-up mt76 performs on the MAIN function.
+ *
+ * mt7915_wfsys_reset's mt7916 branch is a plain pulse of
+ * MT_WF_SUBSYS_RST (0x7000_2600, CBTOP1 -> L1 base 0x7000). Releasing
+ * it makes the MCU re-execute its ROM code, which is the precondition
+ * for the whole FWDL handshake: until now this driver only ever bound
+ * 790a (hif2, no reset), so the ROM never re-ran (doc 62 §43).
+ *
+ * The rest mirrors mt7915_dma_init/dma_enable/dma_start for this chip:
+ *   dma_disable(rst) -> predicate the 0xd4xxx ring block, pulse the
+ *   WFDMA reset, drop the DMA enable bits; then prefetch partitioning,
+ *   BUSY_ENA, HIF idle poll, and finally TX/RX DMA enable.
+ * --------------------------------------------------------------------- */
+#define ZXNPU_WF_SUBSYS_RST	0x70002600
+#define ZXNPU_PCIE_MAC_INT_EN	0x74030188	/* CBTOP1, L1 base 0x7403 */
+#define ZXNPU_WFDMA_RST_DTX_PTR	0x1802420c
+#define ZXNPU_WFDMA_PRI_DLY_0	0x180242f0
+#define ZXNPU_WFDMA_PRI_DLY_1	0x180242f4
+#define ZXNPU_WFDMA_PRI_DLY_2	0x180242f8
+#define ZXNPU_WFDMA_BUSY_ENA	0x1802413c
+#define ZXNPU_WFDMA_HIF_MISC	0x18027044
+#define ZXNPU_WFDMA_GLO_TX_EN	BIT(0)
+#define ZXNPU_WFDMA_GLO_RX_EN	BIT(2)
+#define ZXNPU_WFDMA_GLO_OMIT_RX_PFET2	BIT(21)
+#define ZXNPU_WFDMA_GLO_OMIT_RX_INFO	BIT(27)
+#define ZXNPU_WFDMA_GLO_OMIT_TX_INFO	BIT(28)
 
-	memset(msg, 0, 60);
+/* Prefetch SRAM partitioning, mt7915_dma_prefetch for mt7916:
+ * PREFETCH(base, depth) = base << 16 | depth. The last three entries use
+ * base+0x40 on mt7916 because the MAIN_WA ring exists there. */
+struct zxnpu_prefetch {
+	u32 reg;
+	u32 val;
+};
+static const struct zxnpu_prefetch zxnpu_prefetch[] = {
+	{ 0x18024640, (0x000 << 16) | 0x4 },	/* MCUQ_FWDL  (qid16) */
+	{ 0x18024644, (0x040 << 16) | 0x4 },	/* MCUQ_WM    (qid17) */
+	{ 0x18024648, (0x080 << 16) | 0x4 },	/* TXQ BAND0  (qid18) */
+	{ 0x1802464c, (0x0c0 << 16) | 0x4 },	/* TXQ BAND1  (qid19) */
+	{ 0x18024650, (0x100 << 16) | 0x4 },	/* MCUQ_WA    (qid20) */
+	{ 0x18024680, (0x140 << 16) | 0x4 },	/* RXQ MCU (WM) rxq0 */
+	{ 0x18024684, (0x180 << 16) | 0x4 },	/* RXQ MCU_WA   rxq1 */
+	{ 0x18024688, (0x1c0 << 16) | 0x4 },	/* RXQ MAIN_WA  rxq2 */
+	{ 0x1802468c, (0x200 << 16) | 0x4 },	/* RXQ BAND1_WA rxq3 */
+	{ 0x18024690, (0x240 << 16) | 0x4 },	/* RXQ MAIN     rxq4 */
+	{ 0x18024694, (0x280 << 16) | 0x4 },	/* RXQ BAND1    rxq5 */
+};
+
+static void zxnpu_wlan_dma_disable(struct zxnpu_wlan *w, bool rst)
+{
+	u32 v;
+
+	if (rst) {
+		v = zxnpu_cr_read(w, ZXNPU_WFDMA_RST);
+		zxnpu_cr_write(w, ZXNPU_WFDMA_RST, v & ~ZXNPU_WFDMA_RST_ALL);
+		zxnpu_cr_write(w, ZXNPU_WFDMA_RST, v | ZXNPU_WFDMA_RST_ALL);
+	}
+	v = zxnpu_cr_read(w, ZXNPU_WFDMA_GLO_CFG);
+	zxnpu_cr_write(w, ZXNPU_WFDMA_GLO_CFG,
+		       v & ~(ZXNPU_WFDMA_GLO_TX_EN | ZXNPU_WFDMA_GLO_RX_EN |
+			     ZXNPU_WFDMA_GLO_OMIT_TX_INFO |
+			     ZXNPU_WFDMA_GLO_OMIT_RX_INFO |
+			     ZXNPU_WFDMA_GLO_OMIT_RX_PFET2));
+}
+
+/*
+ * The one command that changes the MCU's state. Dry run prints the plan
+ * and the register values either side of the pulse; commit=1 does it.
+ * Returns the FW_STATE before/after so the next step (DIDX advance) has a
+ * baseline to compare against.
+ */
+static void zxnpu_wlan_wfsys_reset(struct zxnpu_wlan *w, bool commit)
+{
+	u32 before, after, rst;
+
+	if (!w->bar[0]) {
+		zxnpu_wlan_append(w, "wfsys-reset: parked, no BAR0 (enable=0)\n");
+		return;
+	}
+	before = zxnpu_fw_state_read(w);
+	rst = zxnpu_cr_read(w, ZXNPU_WF_SUBSYS_RST);
+	zxnpu_wlan_append(w, "wfsys-reset (mt7916: MT_WF_SUBSYS_RST %08x): %s\n",
+			  ZXNPU_WF_SUBSYS_RST, commit ? "COMMIT" : "dry run");
+	zxnpu_wlan_append(w, "  fw-state before = %u\n", before);
+	zxnpu_wlan_append(w, "  MT_WF_SUBSYS_RST pre = %08x\n", rst);
+	if (!commit) {
+		zxnpu_wlan_append(w, "  plan: set bit0, msleep(20), clear bit0, msleep(20)\n");
+		zxnpu_wlan_append(w, "  dry run: set zxnpu_wlan.commit=1 to reset\n");
+		return;
+	}
+	zxnpu_cr_write(w, ZXNPU_WF_SUBSYS_RST, rst | BIT(0));
+	msleep(20);
+	zxnpu_cr_write(w, ZXNPU_WF_SUBSYS_RST, rst & ~BIT(0));
+	msleep(20);
+	zxnpu_wlan_append(w, "  MT_WF_SUBSYS_RST post = %08x\n",
+			  zxnpu_cr_read(w, ZXNPU_WF_SUBSYS_RST));
+	after = zxnpu_fw_state_read(w);
+	zxnpu_wlan_append(w, "  fw-state after = %u (%s)\n", after,
+			  before == after ? "unchanged - MCU may still be in ROM" :
+			  after == 1 ? "firmware download" :
+			  after == 3 ? "normal operation" :
+			  after == 7 ? "ready (WM+WA)" : "changed");
+	/* The reset invalidates any ring the host armed before it. */
+	w->fwdl_ring_armed = false;
+	w->mcu_ring_armed = false;
+}
+
+/* mt7915_dma_init + dma_enable + dma_start, minus the queues this driver
+ * does not use yet: predicate the ring block with a reset, program the
+ * prefetch partitions, poll HIF idle, then turn the DMA engines on and
+ * open the PCIe interrupt master switch. */
+static void zxnpu_wlan_dma_init(struct zxnpu_wlan *w, bool commit)
+{
+	u32 glo, v, busy;
+	int i;
+
+	zxnpu_wlan_append(w, "dma-init (mt7916 WFDMA0 bring-up): %s\n",
+			  commit ? "COMMIT" : "dry run");
+	if (!w->bar[0]) {
+		zxnpu_wlan_append(w, "  parked: no BAR0 (enable=0)\n");
+		return;
+	}
+	zxnpu_wlan_append(w, "  fw-state = %u\n", zxnpu_fw_state_read(w));
+	glo = zxnpu_cr_read(w, ZXNPU_WFDMA_GLO_CFG);
+	zxnpu_wlan_append(w, "  %08x glo=%08x\n", ZXNPU_WFDMA_GLO_CFG, glo);
+	for (i = 0; i < ARRAY_SIZE(zxnpu_prefetch); i++)
+		zxnpu_wlan_append(w, "  prefetch %08x <- %08x\n",
+				  zxnpu_prefetch[i].reg,
+				  zxnpu_prefetch[i].val);
+	if (!commit) {
+		zxnpu_wlan_append(w, "  dry run: set zxnpu_wlan.commit=1 to program\n");
+		return;
+	}
+
+	/* reset + disable, then INT_SOURCE (write-1-clear) */
+	zxnpu_wlan_dma_disable(w, true);
+	zxnpu_cr_write(w, ZXNPU_WFDMA_INT_SOURCE, ~0u);
+
+	/* reset dma indices and the delay-interrupt timers */
+	zxnpu_cr_write(w, ZXNPU_WFDMA_RST_DTX_PTR, ~0u);
+	zxnpu_cr_write(w, ZXNPU_WFDMA_PRI_DLY_0, 0);
+	zxnpu_cr_write(w, ZXNPU_WFDMA_PRI_DLY_1, 0);
+	zxnpu_cr_write(w, ZXNPU_WFDMA_PRI_DLY_2, 0);
+	for (i = 0; i < ARRAY_SIZE(zxnpu_prefetch); i++)
+		zxnpu_cr_write(w, zxnpu_prefetch[i].reg,
+			       zxnpu_prefetch[i].val);
+
+	/* host-side rings: qid16 FWDL (0xd4400) and qid17 MCU_WM (0xd4410);
+	 * the ROM listens on FWDL for firmware data, and mt76 sends the patch
+	 * handshake commands on MCU_WM. */
+	w->fwdl_ring_armed = false;
+	w->mcu_ring_armed = false;
+	zxnpu_wlan_queue_init(w, 0);
+	zxnpu_wlan_queue_init(w, 1);
+
+	/* wait for the WFDMA HIF to report idle, then enable TX/RX DMA */
+	zxnpu_cr_write(w, ZXNPU_WFDMA_BUSY_ENA,
+		       zxnpu_cr_read(w, ZXNPU_WFDMA_BUSY_ENA) | 0x7);
+	if (readl_poll_timeout(w->bar[0] + zxnpu_cr_bar_off(ZXNPU_WFDMA_HIF_MISC),
+			       busy, !(busy & BIT(0)), 100, 20000))
+		zxnpu_wlan_append(w, "  hif misc still busy (%08x)\n",
+				  zxnpu_cr_read(w, ZXNPU_WFDMA_HIF_MISC));
+	else
+		zxnpu_wlan_append(w, "  hif misc idle\n");
+
+	glo = zxnpu_cr_read(w, ZXNPU_WFDMA_GLO_CFG);
+	glo |= ZXNPU_WFDMA_GLO_TX_EN | ZXNPU_WFDMA_GLO_RX_EN |
+	       ZXNPU_WFDMA_GLO_OMIT_TX_INFO | ZXNPU_WFDMA_GLO_OMIT_RX_PFET2;
+	zxnpu_cr_write(w, ZXNPU_WFDMA_GLO_CFG, glo);
+	zxnpu_cr_write(w, ZXNPU_WFDMA_INT_ENA, 0);
+
+	/* master switch of PCIe interrupt enable (mt7915_pci_probe) */
+	v = zxnpu_cr_read(w, ZXNPU_PCIE_MAC_INT_EN);
+	zxnpu_cr_write(w, ZXNPU_PCIE_MAC_INT_EN, 0xff);
+	zxnpu_wlan_append(w, "  pcie mac int ena %08x -> ff (was %08x)\n",
+			  ZXNPU_PCIE_MAC_INT_EN, v);
+	/* vendor live values the 3.30 diff against 192.168.5.1 confirmed:
+	 * HOST_CONFIG bit0 (PDMA_BAND, mt76 sets it when hif2 exists) and
+	 * the WFDMA-to-host window in both halves (0x811c811c - the plain
+	 * 811c0000 left the low half zero, the vendor box runs with both). */
+	v = zxnpu_cr_read(w, 0x18027030);
+	zxnpu_cr_write(w, 0x18027030, v | BIT(0));
+	zxnpu_cr_write(w, 0x180242f4, 0x811c811c);
+	zxnpu_wlan_append(w, "  host config %08x (bit0 set), pcie win 242f4=%08x\n",
+			  zxnpu_cr_read(w, 0x18027030),
+			  zxnpu_cr_read(w, 0x180242f4));
+	zxnpu_wlan_append(w, "  glo=%08x rst=%08x fw-state=%u\n",
+			  zxnpu_cr_read(w, ZXNPU_WFDMA_GLO_CFG),
+			  zxnpu_cr_read(w, ZXNPU_WFDMA_RST),
+			  zxnpu_fw_state_read(w));
+}
+
+/* ---------------------------------------------------------------------
+ * driver own: mt7915_driver_own() from mt7915/mcu.c, which mt76 runs
+ * before every MCU command. Write DRV_OWN to MT_TOP_LPCR_HOST_BAND(0),
+ * wait for the MCU to drop FW_OWN_STAT, then acknowledge the band status
+ * bit. MT_SWDEF_MODE is set to normal (0) first so the firmware does not
+ * come up in ICAP/spectrum mode.
+ * --------------------------------------------------------------------- */
+#define ZXNPU_TOP_LPCR_BAND0		0x18060010
+#define ZXNPU_TOP_LPCR_BAND0_STAT	0x18060014
+#define ZXNPU_LPCR_DRV_OWN		BIT(1)
+#define ZXNPU_LPCR_FW_OWN_STAT		BIT(2)
+#define ZXNPU_LPCR_BAND_STAT		BIT(0)
+/* MT_SWDEF_MODE = MT_SWDEF(0x3c) with SWDEF_BASE_ADDR 0x411400 on mt7916;
+ * mt7916_reg_map {0x410000, 0x90000} makes that bar0+0x943c. */
+#define ZXNPU_SWDEF_MODE		0x0041143c
+#define ZXNPU_SWDEF_NORMAL_MODE		0
+
+static int zxnpu_wlan_driver_own(struct zxnpu_wlan *w, bool commit)
+{
+	int i, ok = -ETIMEDOUT;
+	u32 misc;
+
+	if (!w->bar[0]) {
+		zxnpu_wlan_append(w, "driver-own: parked, no BAR0 (enable=0)\n");
+		return -ENODEV;
+	}
+	zxnpu_wlan_append(w, "driver-own (MT_TOP_LPCR_HOST_BAND0 %08x): %s\n",
+			  ZXNPU_TOP_LPCR_BAND0, commit ? "COMMIT" : "dry run");
+	zxnpu_wlan_append(w, "  swdef mode <- 0 (%08x, bar0+%05x)\n",
+			  ZXNPU_SWDEF_MODE, zxnpu_cr_mapped_off(ZXNPU_SWDEF_MODE));
+	zxnpu_wlan_append(w, "  lpcr=%08x misc=%08x fw-state=%u\n",
+			  zxnpu_cr_read(w, ZXNPU_TOP_LPCR_BAND0),
+			  zxnpu_cr_read(w, ZXNPU_TOP_MISC),
+			  zxnpu_fw_state_read(w));
+	if (!commit) {
+		zxnpu_wlan_append(w, "  dry run: set zxnpu_wlan.commit=1 to take ownership\n");
+		return 0;
+	}
+
+	zxnpu_cr_write(w, ZXNPU_SWDEF_MODE, ZXNPU_SWDEF_NORMAL_MODE);
+	zxnpu_cr_write(w, ZXNPU_TOP_LPCR_BAND0, ZXNPU_LPCR_DRV_OWN);
+	/* mt76_poll_msec(..., FW_OWN_STAT, 0, 500) */
+	for (i = 0; i < 500; i++) {
+		if (!(zxnpu_cr_read(w, ZXNPU_TOP_LPCR_BAND0) &
+		      ZXNPU_LPCR_FW_OWN_STAT)) {
+			ok = 0;
+			break;
+		}
+		msleep(1);
+	}
+	if (ok) {
+		zxnpu_wlan_append(w, "  driver own timeout: lpcr=%08x\n",
+				  zxnpu_cr_read(w, ZXNPU_TOP_LPCR_BAND0));
+		return ok;
+	}
+	zxnpu_cr_write(w, ZXNPU_TOP_LPCR_BAND0_STAT, ZXNPU_LPCR_BAND_STAT);
+	misc = zxnpu_cr_read(w, ZXNPU_TOP_MISC);
+	zxnpu_wlan_append(w, "  driver own ok after %d ms: lpcr=%08x misc=%08x fw-state=%u\n",
+			  i, zxnpu_cr_read(w, ZXNPU_TOP_LPCR_BAND0), misc,
+			  misc & 0x7);
+	return 0;
+}
+
+
+/* connac2 MCU TXD, byte for byte from mt76_connac_mcu.h struct
+ * mt76_connac2_mcu_txd (packed, 64 bytes):
+ *
+ *   +0   __le32 txd[8]      word0 0x41000000|len (Q_IDX 0x20, PKT_FMT 2)
+ *                           word1 0x80010000 (LONG_FORMAT, HDR_FORMAT_CMD)
+ *   +32  __le16 len         payload length, minus the 32-byte txd[] array
+ *   +34  __le16 pq_id       MCU_PQ_ID(MT_TX_PORT_IDX_MCU, 0x20) = 0x10000
+ *   +36  u8 cid   +37 pkt_type 0xa0   +38 set_query (MCU_Q_NA)  +39 seq
+ *   +40  u8 uc_d2b0_rev  +41 ext_cid  +42 s2d_index (H2N=0)  +43 ext_cid_ack
+ *   +44  u32 rsv[5]
+ *
+ * 3.30 fixes two errors from the earlier 60-byte guess: every field after
+ * txd[8] sat 24 bytes early, and pq_id dropped the RX-Q0 half (0x8000
+ * instead of 0x10000). FW_SCATTER messages carry no header at all
+ * (mt76_connac2_mcu_fill_message jumps out before the txd push), so the
+ * scatter path must send the raw payload.
+ */
+#define ZXNPU_MCU_TXD_LEN	64
+#define ZXNPU_MCU_TXD_PAYLOAD	(64 - 32)	/* len = total - sizeof(txd) */
+
+static void zxnpu_mcu_txd_header(u8 *msg, int payload_len, u8 cid, u8 seq)
+{
+	u32 total = ZXNPU_MCU_TXD_LEN + payload_len;
+
+	memset(msg, 0, ZXNPU_MCU_TXD_LEN);
 	put_unaligned_le32(0x41000000u | (total & 0xffff), msg + 0);
 	put_unaligned_le32(0x80010000u, msg + 4);
-	put_unaligned_le16(payload_len, msg + 8);
-	put_unaligned_le16(0x8000u, msg + 10);	/* pq_id: port 1, q 0x20 */
-	msg[12] = cid;
-	msg[13] = 0xa0;				/* MCU_PKT_ID */
-	msg[14] = 1;				/* MCU_Q_SET */
-	msg[15] = seq & 0xf;
-	return 60;
+	put_unaligned_le16(payload_len + ZXNPU_MCU_TXD_PAYLOAD, msg + 32);
+	/* MCU_PQ_ID(MT_TX_PORT_IDX_MCU=1, MT_TX_MCU_PORT_RX_Q0=0x20) is
+	 * (1 << 15) | (0x20 << 10) = 0x10000 in 32 bits; the field is
+	 * __le16 and mt76's cpu_to_le16() truncates, so the wire value is 0.
+	 * (The old code wrote 0x8000 - port 1, q 0 - which is a different
+	 * queue.) */
+	put_unaligned_le16(0x0000, msg + 34);
+	msg[36] = cid;
+	msg[37] = 0xa0;				/* MCU_PKT_ID */
+	msg[38] = 3;				/* MCU_Q_NA */
+	msg[39] = seq & 0xf;
+	/* +42 s2d_index = MCU_S2D_H2N = 0, +41 ext_cid = 0 */
 }
 
 /*
@@ -672,21 +1031,19 @@ static int zxnpu_mcu_submit_ring(struct zxnpu_wlan *w, int ring,
 	{
 		u32 glo = zxnpu_cr_read(w, ZXNPU_WFDMA_GLO_CFG);
 
-		/* hif_set_WFDMA(2): WFDMA_EN | TX DMA EN */
+		/* keep the engines on (dma-init sets them; idempotent here) */
 		zxnpu_cr_write(w, ZXNPU_WFDMA_GLO_CFG, glo | 0x5);
 	}
-	/* mt7915_dma_disable(rst=true) / init_hardware prologue: pulse the
-	 * WFDMA reset (self-clearing, reads back set on the live box) and
-	 * clear every pending interrupt source (INT_SOURCE is W1C). */
-	zxnpu_cr_write(w, ZXNPU_WFDMA_RST, ZXNPU_WFDMA_RST_ALL);
+	/* No WFDMA reset here any more: dma-init owns the reset pulse. Doing it
+	 * per message (3.20-3.29) tore the engine down right after the ring
+	 * registers were programmed, which is not what mt76 does. INT_SOURCE is
+	 * write-1-clear, so dropping pending sources stays harmless. */
 	zxnpu_cr_write(w, ZXNPU_WFDMA_INT_SOURCE, ~0u);
 	zxnpu_main_cr_write(w, reg, (u32)desc_dma);
 	zxnpu_main_cr_write(w, reg + 4, ZXNPU_MCU_RING_DEPTH);
 	(*cidx)++;
 	zxnpu_main_cr_write(w, reg + 8, *cidx);
-	if (!readl_poll_timeout((zxnpu_wlan_main && !w->is_main ?
-				 zxnpu_wlan_main->bar[0] : w->bar[0]) +
-				zxnpu_cr_bar_off(reg + 12), didx,
+	if (!readl_poll_timeout(w->bar[0] + zxnpu_cr_bar_off(reg + 12), didx,
 				(didx % ZXNPU_MCU_RING_DEPTH) ==
 				(*cidx % ZXNPU_MCU_RING_DEPTH), 100, 50000))
 		zxnpu_wlan_append(w, "  didx advanced to %u\n", didx);
@@ -705,16 +1062,15 @@ static int zxnpu_mcu_submit(struct zxnpu_wlan *w, const u8 *msg, int len,
 
 static void zxnpu_wlan_mcu_send(struct zxnpu_wlan *w, bool commit)
 {
-	u8 msg[24 + 4];
+	u8 msg[ZXNPU_MCU_TXD_LEN + 4];
 
-	zxnpu_wlan_append(w, "mcu-send PatchSemGet (type %02x cmd %02x, ring %d): %s\n",
-			  ZXNPU_MCU_TYPE_PATCH, ZXNPU_MCU_CMD_PATCH,
-			  ZXNPU_MCU_RING_NR, commit ? "COMMIT" : "dry run");
+	zxnpu_wlan_append(w, "mcu-send PatchSemGet (cid %02x, ring %d): %s\n",
+			  0x10, ZXNPU_MCU_RING_NR, commit ? "COMMIT" : "dry run");
 	memset(msg, 0, sizeof(msg));
-	/* connac2 MCU TXD (mt76_connac2_mcu_fill_message): cid 0x10 = PATCH_SEM_CONTROL, get */
+	/* connac2 MCU TXD: cid 0x10 = PATCH_SEM_CONTROL, payload 1 = get */
 	zxnpu_mcu_txd_header(msg, 4, 0x10, 1);
-	put_unaligned_le32(0, msg + 60);
-	zxnpu_mcu_submit(w, msg, 64, commit, true);
+	put_unaligned_le32(1, msg + ZXNPU_MCU_TXD_LEN);
+	zxnpu_mcu_submit(w, msg, sizeof(msg), commit, true);
 }
 
 /*
@@ -766,11 +1122,12 @@ static void zxnpu_wlan_mcu_regions(struct zxnpu_wlan *w, const char *args,
 		memset(msg, 0, sizeof(msg));
 		/* connac2 MCU TXD: cid 0x05 PATCH_START_REQ for the MCU SRAM
 		 * window, else 0x01 TARGET_ADDRESS_LEN_REQ */
-		zxnpu_mcu_txd_header(msg, 12, (addr == 0x04000000) ? 0x05 : 0x01, 2);
-		put_unaligned_le32(addr, msg + 60);
-		put_unaligned_le32(len, msg + 64);
-		put_unaligned_le32(0x80000000 | flags, msg + 68);
-		if (zxnpu_mcu_submit(w, msg, 72, commit, true))
+		zxnpu_mcu_txd_header(msg, 12, (addr == 0x200000 || addr == 0x900000) ? 0x05 : 0x01, 2);
+		put_unaligned_le32(addr, msg + ZXNPU_MCU_TXD_LEN);
+		put_unaligned_le32(len, msg + ZXNPU_MCU_TXD_LEN + 4);
+		put_unaligned_le32(0x80000000 | flags,
+				   msg + ZXNPU_MCU_TXD_LEN + 8);
+		if (zxnpu_mcu_submit(w, msg, ZXNPU_MCU_TXD_LEN + 12, commit, true))
 			break;
 		if (!commit)
 			continue;
@@ -780,12 +1137,9 @@ static void zxnpu_wlan_mcu_regions(struct zxnpu_wlan *w, const char *args,
 			unsigned int chunk = min_t(unsigned long, ZXNPU_MCU_CHUNK,
 						   len - done);
 
-			memset(msg, 0, 24 + chunk);
-			put_unaligned_le16(chunk, msg + 0);
-			msg[2] = 0xEE;
-			msg[4] = 0x10;
-			memcpy(msg + 24, fw->data + off + done, chunk);
-			if (zxnpu_mcu_submit_ring(w, ZXNPU_FWDL_RING_NR, msg, 24 + chunk, true, false))
+			/* FW_SCATTER carries no MCU header at all */
+			memcpy(msg, fw->data + off + done, chunk);
+			if (zxnpu_mcu_submit_ring(w, ZXNPU_FWDL_RING_NR, msg, chunk, true, false))
 				goto out;
 			done += chunk;
 			usleep_range(500, 1000);
@@ -1434,24 +1788,23 @@ static void zxnpu_wlan_mcu_dl(struct zxnpu_wlan *w, const char *args, bool commi
 			  name, dst, total, offset, commit ? "COMMIT" : "dry run");
 
 	memset(msg, 0, sizeof(msg));
-	put_unaligned_le16(4, msg + 0);
-	msg[2] = ZXNPU_MCU_TYPE_PATCH;
-	msg[4] = ZXNPU_MCU_CMD_PATCH;
-	put_unaligned_le32(1, msg + 24);
-	if (zxnpu_mcu_submit(w, msg, 28, commit, true))
+	/* PATCH_SEM_CONTROL, payload 1 = get the semaphore */
+	zxnpu_mcu_txd_header(msg, 4, 0x10, 1);
+	put_unaligned_le32(1, msg + ZXNPU_MCU_TXD_LEN);
+	if (zxnpu_mcu_submit(w, msg, ZXNPU_MCU_TXD_LEN + 4, commit, true))
 		goto out;
 	if (!commit)
 		goto out;
 	msleep(20);
 
 	memset(msg, 0, sizeof(msg));
-	put_unaligned_le16(12, msg + 0);
-	msg[2] = (dst == 0x04000000) ? 0x05 : ZXNPU_MCU_TYPE_ADDR;
-	msg[4] = ZXNPU_MCU_CMD_PATCH;
-	put_unaligned_le32(dst, msg + 24);
-	put_unaligned_le32(total, msg + 28);
-	put_unaligned_le32(0x80000000, msg + 32);
-	if (zxnpu_mcu_submit(w, msg, 36, true, true))
+	/* TARGET_ADDRESS_LEN_REQ (cid 0x01); the MCU SRAM window uses
+	 * PATCH_START_REQ (cid 0x05) instead */
+	zxnpu_mcu_txd_header(msg, 12, (dst == 0x200000 || dst == 0x900000) ? 0x05 : 0x01, 2);
+	put_unaligned_le32(dst, msg + ZXNPU_MCU_TXD_LEN);
+	put_unaligned_le32(total, msg + ZXNPU_MCU_TXD_LEN + 4);
+	put_unaligned_le32(0x80000000, msg + ZXNPU_MCU_TXD_LEN + 8);
+	if (zxnpu_mcu_submit(w, msg, ZXNPU_MCU_TXD_LEN + 12, true, true))
 		goto out;
 	msleep(10);
 
@@ -1459,12 +1812,10 @@ static void zxnpu_wlan_mcu_dl(struct zxnpu_wlan *w, const char *args, bool commi
 		unsigned int chunk = min_t(unsigned int, ZXNPU_MCU_CHUNK,
 					   total - done);
 
-		memset(msg, 0, 24 + chunk);
-		put_unaligned_le16(chunk, msg + 0);
-		msg[2] = ZXNPU_MCU_TYPE_SCATTER;
-		msg[4] = ZXNPU_MCU_CMD_SCATTER;
-		memcpy(msg + 24, fw->data + offset + done, chunk);
-		if (zxnpu_mcu_submit_ring(w, ZXNPU_FWDL_RING_NR, msg, 24 + chunk, true, false))
+		/* FW_SCATTER is raw: mt76_connac2_mcu_fill_message returns
+		 * before pushing any txd, so the skb is just the data. */
+		memcpy(msg, fw->data + offset + done, chunk);
+		if (zxnpu_mcu_submit_ring(w, ZXNPU_FWDL_RING_NR, msg, chunk, true, false))
 			goto out;
 		done += chunk;
 		if (!(done % (64 * ZXNPU_MCU_CHUNK)))
@@ -1473,8 +1824,9 @@ static void zxnpu_wlan_mcu_dl(struct zxnpu_wlan *w, const char *args, bool commi
 	}
 
 	memset(msg, 0, sizeof(msg));
+	/* PATCH_FINISH_REQ, no payload */
 	zxnpu_mcu_txd_header(msg, 0, 0x07, 3);
-	if (zxnpu_mcu_submit(w, msg, 60, true, true))
+	if (zxnpu_mcu_submit(w, msg, ZXNPU_MCU_TXD_LEN, true, true))
 		goto out;
 	zxnpu_wlan_append(w, "mcu-dl: %u bytes sent, finish issued\n", done);
 out:
@@ -1555,33 +1907,29 @@ static u32 zxnpu_fw_mode(u8 feature, bool wa)
 static int zxnpu_mcu_addrlen(struct zxnpu_wlan *w, u32 addr, u32 len,
 			     u32 mode, bool commit)
 {
-	u8 msg[24 + 12];
+	u8 msg[ZXNPU_MCU_TXD_LEN + 12];
 
 	memset(msg, 0, sizeof(msg));
-	put_unaligned_le16(12, msg + 0);
-	msg[2] = (addr == 0x04000000) ? 0x05 : 0x01;
-	msg[4] = ZXNPU_MCU_CMD_PATCH;
-	put_unaligned_le32(addr, msg + 24);
-	put_unaligned_le32(len, msg + 28);
-	put_unaligned_le32(mode, msg + 32);
+	zxnpu_mcu_txd_header(msg, 12, (addr == 0x200000 || addr == 0x900000) ? 0x05 : 0x01, 2);
+	put_unaligned_le32(addr, msg + ZXNPU_MCU_TXD_LEN);
+	put_unaligned_le32(len, msg + ZXNPU_MCU_TXD_LEN + 4);
+	put_unaligned_le32(mode, msg + ZXNPU_MCU_TXD_LEN + 8);
 	return zxnpu_mcu_submit(w, msg, sizeof(msg), commit, false);
 }
 
 static int zxnpu_mcu_scatter(struct zxnpu_wlan *w, const u8 *data, u32 len,
 			     bool commit)
 {
-	u8 msg[24 + ZXNPU_MCU_CHUNK];
+	u8 msg[ZXNPU_MCU_CHUNK];
 	u32 done = 0;
 
 	while (done < len) {
 		u32 chunk = min_t(u32, ZXNPU_MCU_CHUNK, len - done);
 
-		memset(msg, 0, 24 + chunk);
-		put_unaligned_le16(chunk, msg + 0);
-		msg[2] = ZXNPU_MCU_TYPE_SCATTER;
-		msg[4] = ZXNPU_MCU_CMD_SCATTER;
-		memcpy(msg + 24, data + done, chunk);
-		if (zxnpu_mcu_submit_ring(w, ZXNPU_FWDL_RING_NR, msg, 24 + chunk, commit, false))
+		/* FW_SCATTER: raw payload, no MCU header (see
+		 * zxnpu_mcu_txd_header) */
+		memcpy(msg, data + done, chunk);
+		if (zxnpu_mcu_submit_ring(w, ZXNPU_FWDL_RING_NR, msg, chunk, commit, false))
 			return -EIO;
 		done += chunk;
 		if (!commit)
@@ -2022,7 +2370,7 @@ static ssize_t zxnpu_wlan_ctl_write(struct file *file, const char __user *ubuf,
 				    size_t count, loff_t *ppos)
 {
 	struct zxnpu_wlan *w = zxnpu_wlan_active();
-	char cmd[32];
+	char cmd[128];	/* mcu-dl-regions manifests are long; 32 once rejected them with -EINVAL before anything ran */
 	bool commit;
 
 	if (!w)
@@ -2241,6 +2589,12 @@ done_ctl:
 				  " (dry run)");
 done_bss:
 		zxnpu_wlan_append(w, "\n");
+	} else if (!strncmp(cmd, "driver-own", 10)) {
+		zxnpu_wlan_driver_own(w, zxnpu_wlan_commit);
+	} else if (!strncmp(cmd, "wfsys-reset", 11)) {
+		zxnpu_wlan_wfsys_reset(w, zxnpu_wlan_commit);
+	} else if (!strncmp(cmd, "dma-init", 8)) {
+		zxnpu_wlan_dma_init(w, zxnpu_wlan_commit);
 	} else if (!strncmp(cmd, "mcu-send", 8)) {
 		zxnpu_wlan_mcu_send(w, zxnpu_wlan_commit);
 	} else if (!strncmp(cmd, "commit", 6)) {
@@ -2249,7 +2603,7 @@ done_bss:
 			zxnpu_wlan_append(w, "commit refused: set zxnpu_wlan.commit=1\n");
 		zxnpu_wlan_wfdma(w, commit);
 	} else {
-		zxnpu_wlan_append(w, "commands: l1profile | ack-expect | data-init | data-recv | dataplane | probe | scan | win <bar> <off> [n] | crw <a> <v> | fw | plan | mcu | rings | mcuwin | mcu-send | mcu-cmd | mcu-dl | mcu-dl-regions | fw-start | fw-info | fw-audit | fw-state | fw-plan wm|wa | fw-dl wm|wa | rx-init | mcu-recv | commit\n");
+		zxnpu_wlan_append(w, "commands: l1profile | ack-expect | data-init | data-recv | dataplane | probe | scan | win <bar> <off> [n] | crw <a> <v> | fw | plan | mcu | rings | mcuwin | mcu-send | mcu-cmd | mcu-dl | mcu-dl-regions | fw-start | fw-info | fw-audit | fw-state | fw-plan wm|wa | fw-dl wm|wa | rx-init | mcu-recv | driver-own | wfsys-reset | dma-init | commit\n");
 	}
 	mutex_unlock(&w->lock);
 	return count;
@@ -2292,6 +2646,12 @@ static int zxnpu_wlan_probe(struct pci_dev *pdev,
 					 "zxnpu-wlan");
 		if (ret)
 			return ret;
+		/* mt7915_pci_probe does this right after iomap; without it the
+		 * endpoint has no bus-master right and the WFDMA never fetches
+		 * a descriptor (probe printed command=0142, MASTER bit clear -
+		 * 22 rounds of DIDX=0 traced to this plus the bridge window
+		 * work below). */
+		pci_set_master(pdev);
 
 		dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(32));
 		w->mcu_ring = dmam_alloc_coherent(&pdev->dev,
@@ -2392,13 +2752,14 @@ static int zxnpu_wlan_probe(struct pci_dev *pdev,
 	} else {
 		zxnpu_wlan_pl_append(w, "parked: enable=0, no PCI/BAR access (reload with enable=1)\n");
 	}
-	zxnpu_wlan_pl_append(w, "state: G3 skeleton, no MT7916 register written\n");
+	zxnpu_wlan_pl_append(w, "state: R-A, main function owns the hardware (no register written at probe)\n");
 	zxnpu_wlan_audit_firmware(w);
 
-	/* one control surface: only the companion (active) instance publishes
-	 * /proc/zx-csp-wlan/ - the main function's evidence shows up in the
-	 * probe log and the dual-window cr dump instead */
-	if (!w->is_main) {
+	/* one control surface: the main function (7906) publishes
+	 * /proc/zx-csp-wlan/ because it is the instance that will run the
+	 * wfsys reset and the WFDMA bring-up; the companion's evidence shows
+	 * up in its own probe log and the dual-window cr dump. */
+	if (w->is_main) {
 		dir = proc_mkdir("zx-csp-wlan", NULL);
 		if (dir) {
 			if (!proc_create_single("status", 0444, dir,
@@ -2412,7 +2773,7 @@ static int zxnpu_wlan_probe(struct pci_dev *pdev,
 		}
 	} else {
 		dir = NULL;
-		zxnpu_wlan_pl_append(w, "func: 7906 main (control surface lives on the 790a instance)\n");
+		zxnpu_wlan_pl_append(w, "func: 790a companion (hif2 only; control surface lives on 7906)\n");
 	}
 	w->proc = dir;
 	if (w->is_main)
@@ -2420,9 +2781,9 @@ static int zxnpu_wlan_probe(struct pci_dev *pdev,
 	else
 		zxnpu_wlan_comp = w;
 	pci_set_drvdata(pdev, w);
-	if (!w->is_main)
+	if (w->is_main)
 		zxnpu_wlan_vaps_init(w);
-	dev_info(&pdev->dev, "G3.2 ready (%s commit=%d vaps=%d)\n",
+	dev_info(&pdev->dev, "R-A ready (%s commit=%d vaps=%d)\n",
 		 w->is_main ? "main" : "comp", zxnpu_wlan_commit,
 		 zxnpu_wlan_vap);
 	return 0;

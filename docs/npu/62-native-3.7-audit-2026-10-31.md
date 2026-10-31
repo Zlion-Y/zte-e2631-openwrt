@@ -943,3 +943,168 @@ DMA 自然不会取描述符。
    fw-state=7
 已排除清单（21 轮）：描述符格式、环地址/步进/深度、GLO_CFG、INT_ENA、
 信用表、PCIe 窗、门铃、DMASHDL 组、RST_DTX_PTR、MCU TXD 头。
+
+## 44. R-A 重构：真正的 HIF 翻窗 + wfsys reset + 完整 WFDMA init（3.30）
+
+**从 mt76 源码（dl/mt76-2026.10.08，权威）读出的三件事，逐条修正本驱动**：
+
+1. **访问路径不是"三段固定窗口"，而是按地址翻窗**
+   `mt7915/mmio.c __mt7915_reg_addr / __mt7915_reg_remap_addr`：
+   - `addr < 0x100000` → bar0 直接访问（所以 `mt7916_reg[]` 直接给 WFDMA0_ADDR=0xd4000）
+   - 命中 `mt7916_reg[]` → 固定平移
+   - 其余 → **L1 翻窗**：把 `addr>>16` 写入 `0xfe260[15:0]`，回读一次推写，
+     再访问 `bar0 + 0xe0000 + (addr & 0xffff)`
+   本驱动的 `0x1802_xxxx → 0xd0000+` 属于第二类（正确，实测 GLO_CFG=1030b857）；
+   而 `0x1800_xxxx` / `0x1806_xxxx` / `0x7000_xxxx`（MT_WF_SUBSYS_RST）/
+   `0x7403_xxxx`（PCIe INT 主开关）都必须走 L1。旧代码把 0x1800 硬编码成
+   `0xf0000` 是错的：实测 `bar0+f0000 = 00000072` 恒定不变（不是 TOP_PWR_CTRL），
+   这解释了 §43 里"写 0x18000000 不粘"的现象——写错了窗，不是只读。
+
+   实测基线（3.29，790a 实例窗）：`fe260 = 18001806`（L1 指向 0x1806）、
+   `e0000 = 00000006`、`d4208 = 1030b857`、`d4200 = 0`。
+
+2. **wfsys reset 只有主功能(7906)做**，mt7916 分支就是
+   `MT_WF_SUBSYS_RST(0x70002600)` set bit0 → 20 ms → clear bit0 → 20 ms。
+   释放复位 = MCU 重新执行 ROM code，这是 FWDL 握手的前提。
+
+3. **ring 与队列编号**（mt7915.h / dma.c）：
+   `MT7915_TXQ_FWDL=16, MCU_WM=17, BAND0=18, BAND1=19, MCU_WA=20`；
+   ring 寄存器 = `0xd4000 + 0x300 + qid*0x10`（FWDL→0xd4400、WM→0xd4410），
+   与既有常量一致。**命令走 qid17(WM)、固件数据走 qid16(FWDL)**——mt76 的
+   `mt7915_mcu_patch_sem_ctrl` 用 MT_MCUQ_WM，`mt7915_mcu_send_firmware`
+   用 MT_MCUQ_FWDL；之前把命令也塞进 FWDL 是错的（3.30 修正）。
+
+   prefetch 分区表（mt7915_dma_prefetch，mt7916 版，含 MAIN_WA 使后三项 +0x40）：
+   `d4640←0x00000004 d4644←0x00400004 d4648←0x00800004 d464c←0x00c00004
+    d4650←0x01000004 d4680←0x01400004 d4684←0x01800004 d4688←0x01c00004
+    d468c←0x02000004 d4690←0x02400004 d4694←0x02800004`
+
+**3.30 代码改动**：
+- `zxnpu_cr_read/write` 改为按 mt76 语义翻窗（0x1802 直连，其余 L1 现写现用），
+  新增 `zxnpu_l1_select()`；`zxnpu_fw_state_read()` 不再手工管 remap。
+- 新增 `zxnpu_wlan_wfsys_reset()`：打印 reset 前后 `MT_TOP_MISC.FW_STATE`，
+  reset 后清 armed 标志（环已被复位作废）。
+- 新增 `zxnpu_wlan_dma_init()`：dma_disable(rst) → INT_SOURCE(W1C) →
+  RST_DTX_PTR → PRI_DLY_CFG0/1/2=0 → prefetch 全表 → 两环(queue_init 0/1) →
+  BUSY_ENA|7 → 轮询 HIF_MISC idle → GLO_CFG 开 TX/RX/OMIT → PCIe INT 主开关
+  `0x74030188←0xff`。
+- 7906 升为主实例：proc/ctl/status/VAP 都挂在它上面，`zxnpu_wlan_active()`
+  优先 main；790a 仅作 hif2 证据窗。
+- 提交路径去掉"每条消息脉冲 WFDMA_RST"（3.20–3.29 的坏习惯，mt76 不做），
+  DMA 复位收敛到 dma-init 一处。
+- 命令环 `ZXNPU_MCU_RING_NR` 0→1（qid17 MCU_WM），固件数据仍走 FWDL。
+
+**验收（3.30 实机）**：
+① `wfsys-reset` 后 `fw-state` 变化（ROM 重跑）→ ② `dma-init` 后
+`glo` 开位、`hif misc idle` → ③ `mcu-dl` 提交 DIDX 前进 → ④ 最终 fw-state=7。
+
+## 45. R-A 实机验收 + DMASHDL 窗口真相（2026-11-01）
+
+**3.30 实机（device-verify ALL-PASS + wlan-ra）**：
+- **A3 PASS（历史性）**：driver-own 1ms 完成，fw-state 0→1（firmware
+  download）——21+ 轮以来 MCU 第一次响应主机，ROM code 确认在跑。
+- **A2 PASS**：dma-init 生效（hif misc idle、GLO_CFG=1030b855 与 mt76
+  dma_start 一致、PCIe INT 主开关 0x74030188←0xff）。
+- **环已激活**：qid16=4e042000/0x80、qid17=4e040000/0x80、cidx 推进——
+  与原厂盒同构。A4 未过：DIDX 仍 0。
+- 干跑读数证实 L1 翻窗有效：lpcr=0x4（FW_OWN_STAT）、
+  MT_WF_SUBSYS_RST=0x300——旧窗口模型下这些地址读不到。
+
+**楔死事故（第二次，需断电）**：`crw 18024100 0` 把 WFDMA_RST 清零并保持
+（mt76 语义是 clear→set 脉冲，常态=1），WFDMA 在 TX/RX 使能+环 armed 下
+被持续复位 → AXI 桥挂死。ping 活/SSH 死/TTL 全静默（COM7=CH340，
+COM5 已换号；Ctrl+C 无响应）。**教训：0x18024100 只允许脉冲写；d6000
+区禁止经直连块扫描（楔死另一嫌疑）。**
+
+**DMASHDL 窗口真相（反汇编 0x1a2a-0x1a2c dump 函数）**：
+- vendor 以 movw/movt 组 **0x7c026100**（INFRA_MCU 空间）调 hw_io_read32，
+  ubfx 提取 [11:0]/[27:16] 两个 12 位字段 = 活值 038a/038a037a 的两半。
+- 全模块 6 处 0x7c02 **全是读、全在同一 dump 函数**——**vendor 从不写
+  DMASHDL**。原厂盒的 038a037a/00100a55 来自 ROM 或 MCU 固件自配。
+- mt76 翻译规则：0x7c026100 → 0x18026100 → L1(base 0x1802) →
+  **bar0+0xe6100**。我们经直连块 0xd6100 读零/写弃 → 直连块解码很可能
+  不含 0xd6000+（d6000 扫描楔死吻合：解码空洞 master abort）。
+- **窗口模型修正**：L1 寄存器高 16 位→0xf0000 窗、低 16 位→0xe0000 窗
+  （0x18001806 = 0xf0000↔0x1800、0xe0000↔0x1806），每次访问按地址翻窗。
+
+**恢复后实验序列（A4 攻坚）**：
+1. 冷机先读 `win 0 e6100/e6140`（L1 置 0x1802：`crw b0 fe260 18001802`）
+   —— ROM 上电初值从未被读过，若非零 = 复位脉冲清零实锤。
+2. 不做任何复位/dma-init：driver-own → mcu-send → 看 DIDX。
+3. 若 DMASHDL 确为零：经 L1 写 `crw b0 e6100 038a037a`、
+   `crw b0 e6140 00100a55` 再验 DIDX。
+4. 结论回填 dma-init（去掉 bit5 脉冲或加 DMASHDL 重配）。
+
+## 46. A4 攻坚全景：与原厂盒逐寄存器对照 + 入向 DMA 排除（2026-11-01）
+
+**方法升级**：直接 telnet 192.168.5.1 用 /tmp/rd（bar0=0x10000000）读原厂
+活系统寄存器，与我们 commit 后的值逐项对照——不再猜。
+
+**已对齐（我们=原厂）**：GLO 1030bc55（bit1 硬件强置，写 55 读 57）、
+RST=0x30、RST_DTX_PTR=0、INT_ENA=ff、BUSY_ENA=0x1f（ROM 默认一致）、
+PCIE 窗 d42f4=811c811c、d82f4=811c0000、HOST_CONFIG=7d01、
+vendor 信用表（d4640..d4650=(6..10)<<22|4、d4680..d4694=(1..6)<<22|4，
+**写入粘住**）、FWDL 环 cnt=128 与原厂一致。
+
+**原厂独有（固件运行时配的）**：DMASHDL d6100=09b109a1/d6140=0010042e
+（vendor 驱动从不写 DMASHDL——反汇编 6 处 0x7c02 全在 dump 函数里），
+我们冷值 0 且**两个窗（直连 d6100/L1 e6100）都写不进**→ 判定 MCU 侧
+管辖，FWDL 阶段应为 ROM 默认。
+
+**新发现的行为**：ROM 自己重配 FWDL 队列（cnt 128→512、base 归零等待
+主机写入；qid17 保持我们写的值）→ ROM 是活的且在管理环状态。
+
+**逐项排除的假设**（全部实测）：
+- PCI 总线主控：probe command=0142 无 MASTER 位（真 bug，已加
+  pci_set_master）；手工置 0x146 后 DIDX 仍 0 → 非充分条件
+- root port 入向 iATU：legacy 视口接口（dbi 只有 16KB，无 unroll），
+  IB0 已使能 0x40000000-0x5fffffff→同址，覆盖 DMA 缓冲 → 通路在
+- PCI 状态寄存器：端点/root 主/次状态无 master abort 位 → 无总线错误
+- PCIE1 引擎实例（0xd8400 环 + GLO）：同样不 fetch → 引擎实例非差异
+- 中断源：d4200 出现持续 bit21(0x00200000)（mt76 未定义位），HIF_MISC
+  bit0 持续 busy（原厂 0）——是停滞的症状不是原因
+
+**新工具**：_scratch/pcie-ib/pcie-ib.ko（DWC iATU dump/编程，legacy
+视口模式）；_scratch/vrd.py（原厂盒 telnet 批量只读）；ctl 缓冲
+32→128 字节（长 manifest 之前被 -EINVAL 静默拒绝）。
+
+**3.31 固化**：pci_set_master（真 bug）、dma-init 追加 HOST_CONFIG
+bit0 + PCIE 窗 811c811c、ctl 缓冲 128B。
+
+**剩余唯一结构性嫌疑**：ZX279128S 互联（SBR/SCU）对 PCIe 主设备入向
+AXI 的过滤——镜像树的 DWC 主控驱动（2026 新移植）无设备→host DMA
+成功先例，H3600 的 MT7915 也未必跑通过。下一轮：提取 vendor 内核
+反汇编其 PCIe/SBR 初始化，找地址过滤配置。
+
+## 47. A4 突破：DMA 引擎活了！pci_set_master 是 22 轮根因（2026-11-01）
+
+**3.31 干净启动实测**：
+- `pci_set_master` 进 probe（mt7915_pci_probe 同位）后，DMA fetch **第一次工作**：
+  `mcu-send` → `didx advanced to 1`，INT_SOURCE=bit27（TX_DONE_MCU_WM 触发），
+  HIF_MISC=0（idle，与原厂一致）。
+- **完整时序**：dma-init → driver-own → wfsys-reset → driver-own → dma-init
+  （重 arm）→ mcu-send。任何在脏状态下的手工 master 位修补都不充分，
+  必须干净启动由驱动按序使能。
+
+**ROM 真实状态（wfsys reset 后首读）**：所有 TX 环 cnt=0x200(512)、base=0
+（等主机写）、prefetch 分区表全零（ROM 不配分区，分区不影响基本 fetch——
+qid17 在分区=0 时照样 fetch 了 4 条）。
+
+**WM 环（qid17）确认被 MCU 消费**：mcu-dl 的 SemGet/AddressLen 两次
+fetch 且 didx 逐条推进（1→2→3）——MCU 真的在吃命令。
+
+**剩余唯一问题：qid16（FWDL 环）从不 fetch**：
+- 17 个 scatter chunk（cidx=0x11）didx 恒 0；寄存器完好（base/cnt/cidx 全对）
+- qid17 fetch 正常而 qid16 完全不动（同引擎同环块）
+- 排除：分区表（0 也能 fetch qid17）、cnt 差异（128/512 都试过）、
+  ROM 复写（base/cnt 保持我们写的值）、PCI/引擎实例
+- 原厂盒同环曾被消费 46 个描述符 → 环本身可工作；怀疑 ROM 阶段 FWDL
+  数据走别的口（固件起来后才重路由到 qid16），或 AddressLen 后 ROM
+  需要 arm 自己的 DMA client 而我们少了某步
+- 下轮方向：① mcu-cmd 把 scatter 塞 qid17 试 ROM 是否照单全收；
+  ② vendor 反汇编查 GetRealPortQueueID 在 ROM 阶段的实际队列号；
+  ③ 检查 AddressLen 的 mode 位（mt76 gen_dl_mode vs 我们硬编码 0x80000000）
+
+**本轮修复清单（已进 3.31）**：pci_set_master（根因）、dma-init 追加
+HOST_CONFIG bit0 + PCIE 窗 811c811c（原厂对照确认）、ctl 缓冲 32→128。
+device-verify ALL-PASS。

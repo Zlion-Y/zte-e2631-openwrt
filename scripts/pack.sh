@@ -65,6 +65,10 @@ say "stamping slot header: $PKG_VERSION"
 
 OUT=${OUT:-$E2631_OUT/e2631-openwrt-$(basename "$DIR").bin}
 case "$OUT" in /*) ;; *) OUT="$PWD/$OUT" ;; esac
+# The packer opens the output with 'w' and dies with ENOENT when the
+# directory is missing - every flash-3.x.sh assumed someone had mkdir'd
+# out/native-wired-<ver>/ by hand. Create it here instead.
+mkdir -p "$(dirname "$OUT")"
 say "packing with template $(basename "$E2631_TEMPLATE")"
 node host/release.mjs --dir "$DIR" --template "$E2631_TEMPLATE" \
 	--version "$PKG_VERSION" --out "$OUT"
