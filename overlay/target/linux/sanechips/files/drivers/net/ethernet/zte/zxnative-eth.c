@@ -35,9 +35,13 @@
 
 #include "zx279128s-eth.h"
 
-static bool zxnative_enable;
+/* Default on: the driver links ahead of the baseline, so with enable=y it
+ * wins the boot probe race and the baseline (which suppresses bind attrs
+ * and can never be rebound at runtime) stays as the boot-time fallback if
+ * this probe declines. enable=0 at boot hands the node to the baseline. */
+static bool zxnative_enable = true;
 module_param_named(enable, zxnative_enable, bool, 0644);
-MODULE_PARM_DESC(enable, "bind the ZX279128S switch/GMAC node with the native rewrite");
+MODULE_PARM_DESC(enable, "probe the switch/GMAC with the native rewrite (boot-time race winner; baseline serves if declined)");
 
 /* ---- BMU ------------------------------------------------------------ */
 

@@ -43,8 +43,18 @@ MEM=$($SSH free 2>/dev/null | awk '/^Mem:/{print $7}')
 
 # V3 wired -----------------------------------------------------------------
 sec "V3 wired"
-BOUND=$($SSH dmesg 2>/dev/null | grep -c 'native wired data plane up')
-[ "$BOUND" -ge 1 ] && ok "zxnative-eth probed" || bad "zxnative-eth did not probe"
+# Baseline (zx279128s-eth) serving the GMAC at boot is the expected steady
+# state; native (zxnative-eth) is expected after `native-eth switch`. Either
+# bound driver passes - what must never happen is NO driver.
+GMAC=$($SSH readlink /sys/bus/platform/devices/92000000.ethernet/driver 2>/dev/null | sed 's#.*/##')
+case "$GMAC" in
+	zx279128s-eth|zxnative-eth) ok "gmac served by $GMAC" ;;
+	*) bad "gmac bound by nobody ($GMAC)" ;;
+esac
+if [ "$GMAC" = zxnative-eth ]; then
+	$SSH dmesg 2>/dev/null | grep -q 'native wired data plane up' &&
+		ok "native probe message present" || bad "native bound but probe message missing"
+fi
 WAN=$($SSH ip -br addr show wan 2>/dev/null | grep -c 'UP')
 [ "$WAN" -ge 1 ] && ok "wan link up" || bad "wan down"
 PGW=$($SSH ping -c 2 -W 2 192.168.5.1 2>/dev/null | grep -c ' 0% packet loss')
@@ -61,16 +71,21 @@ for m in zxnative_eth zxnpu_wlan zx279128s_npu_ppe zx279128s_npu_idm; do
 done
 $SSH ls /proc/zx-csp-wlan/status >/dev/null 2>&1 && ok "/proc/zx-csp-wlan/status present" ||
 	bad "wlan proc missing (BUG2 regression)"
-WST=$($SSH head -3 /proc/zx-csp-wlan/status 2>/dev/null)
-echo "$WST" | grep -qE 'parked|dataplane' && ok "wlan status responds: $(echo "$WST" | head -1)" ||
-	bad "wlan status unreadable"
+# persistent probe log (doc 62 B4): parked message or probe evidence lives here
+WPR=$($SSH cat /proc/zx-csp-wlan/probe 2>/dev/null | head -1)
+echo "$WPR" | grep -qE 'parked|vendor=' && ok "wlan probe log: $WPR" ||
+	bad "wlan probe log unreadable/empty"
 for d in /proc/zx-npu-idm /proc/zx-npu-ppe /proc/zx-npu-audit; do
 	$SSH [ -d "$d" ] 2>/dev/null && ok "$d present" || bad "$d missing"
 done
 
 # V5 stability -------------------------------------------------------------
 sec "V5 stability"
-DROP=$($SSH awk 'NR>0{d+=$2} END{print d+0}' /proc/net/softnet_stat 2>/dev/null)
+# busybox awk has no strtonum: fetch the hex drop column, convert in bash
+DROP=0
+for f2 in $($SSH cut -d' ' -f2 /proc/net/softnet_stat 2>/dev/null); do
+	: $((DROP += 16#$f2))
+done 2>/dev/null
 [ "$DROP" = 0 ] && ok "softnet drops 0" || bad "softnet dropped $DROP"
 CT=$($SSH cat /proc/sys/net/netfilter/nf_conntrack_count 2>/dev/null)
 [ -n "$CT" ] && [ "$CT" -lt 8000 ] && ok "conntrack $CT" || bad "conntrack $CT suspicious"

@@ -6,8 +6,9 @@
 set -eu
 DEV=${1:-root@192.168.1.1}
 PKG=${2:-../out/native-wired-3.9/e2631-openwrt-native-wired-3.9.bin}
-SSH="ssh -o BatchMode=yes $DEV"
-SCP="scp -o BatchMode=yes"
+SSH="ssh -o BatchMode=yes -o StrictHostKeyChecking=no $DEV"
+ssh-keygen -R 192.168.1.1 >/dev/null 2>&1 || true
+SCP="scp -O -o BatchMode=yes"
 
 [ -f "$PKG" ] || { echo "package missing: $PKG"; exit 1; }
 echo "== local sha256"

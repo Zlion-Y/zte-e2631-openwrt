@@ -1,73 +1,45 @@
 #!/bin/sh
-# native-eth: P2 switchover between the baseline vendor-port driver
-# (zx279128s-eth, boots first and owns 92000000.ethernet) and the native
-# rewrite (zxnative-eth). Manual on purpose (doc 62 A1/A4): the first
-# hardware probe of the native driver is observed live over SSH, not hidden
-# behind an init script. `switch` falls back to the baseline if the native
-# probe does not bring a port up within the wait window, so a failed probe
-# never costs the management path.
+# native-eth: report who owns the ZX279128S GMAC and set the boot-time
+# driver race. The native rewrite (zxnative-eth) links AHEAD of the baseline
+# vendor-port driver (zx279128s-eth), so at boot it probes first; if its
+# probe declines (enable=0 or graceful -ENODEV), the baseline registered
+# right after takes the node. Runtime switching is impossible - the baseline
+# sets suppress_bind_attrs, so its bind/unbind sysfs attrs do not exist and
+# a bound driver can never hand the node over (doc 62 A1).
 #
-#   native-eth status   which driver owns the GMAC, native params
-#   native-eth switch   baseline -> native, auto-revert on failure
-#   native-eth revert   native -> baseline
+#   native-eth status         who owns the GMAC now, and how
+#   native-eth enable <0|1>   set the boot race winner (effective next boot)
+#
+# Revert to the baseline: native-eth enable 0 && reboot.
 
 BASE=zx279128s-eth
 NAT=zxnative-eth
-DEV=92000000.ethernet
-DRIVERS=/sys/bus/platform/drivers
-MARKER=/tmp/native-eth.mode
 
 cur() {
-	readlink "$DRIVERS/../devices/platform/soc/$DEV/driver" 2>/dev/null |
+	readlink /sys/bus/platform/devices/92000000.ethernet/driver 2>/dev/null |
 		sed 's#.*/##'
-}
-
-native_ok() {
-	dmesg | grep -q "native wired data plane up" && ip link show lan2 >/dev/null 2>&1
-}
-
-do_bind() { # do_bind <driver>
-	echo "$DEV" > "$DRIVERS/$1/bind" 2>/dev/null
-}
-
-do_unbind() { # do_unbind <driver>
-	echo "$DEV" > "$DRIVERS/$1/unbind" 2>/dev/null
 }
 
 case "$1" in
 status)
 	printf 'gmac bound by: %s\n' "$(cur)"
-	printf 'native enable: %s offload: %s\n' \
-		"$(cat /sys/module/$NAT/parameters/enable 2>/dev/null)" \
+	printf 'boot race: native enable=%s (baseline auto-serves if declined)\n' \
+		"$(cat /sys/module/$NAT/parameters/enable 2>/dev/null)"
+	printf 'native offload param: %s\n' \
 		"$(cat /sys/module/$NAT/parameters/offload 2>/dev/null)"
-	printf 'marker: %s\n' "$(cat $MARKER 2>/dev/null || echo none)"
-	dmesg | grep -E "$NAT" | tail -3
+	echo '-- native probe evidence (dmesg):'
+	dmesg | grep -E "$NAT|native wired data plane" | tail -5
 	;;
-switch)
-	echo 1 > /sys/module/$NAT/parameters/enable
-	do_unbind $BASE
-	do_bind $NAT
-	sleep 10
-	if native_ok; then
-		echo native > $MARKER
-		echo "native-eth: native driver up; baseline released"
-		exit 0
-	fi
-	echo "native-eth: native probe did not come up - reverting to baseline"
-	do_unbind $NAT
-	do_bind $BASE
-	echo baseline > $MARKER
-	native_ok || echo "native-eth: WARNING baseline also failed - check TTL"
-	exit 1
-	;;
-revert)
-	do_unbind $NAT
-	do_bind $BASE
-	echo baseline > $MARKER
-	echo "native-eth: baseline restored: $(cur)"
+enable)
+	case "$2" in
+	0|1)	echo "$2" > /sys/module/$NAT/parameters/enable
+		echo "native-eth: enable=$2 stored; $([ "$2" = 1 ] && echo 'next boot the native rewrite serves the GMAC' || echo 'next boot the baseline takes the node back')" ;;
+	*)	echo "usage: native-eth enable <0|1>"; exit 2 ;;
+	esac
 	;;
 *)
-	echo "usage: native-eth <status|switch|revert>"
+	echo "usage: native-eth <status|enable <0|1>>"
+	[ "$(cur)" = "$NAT" ] || echo "note: the baseline currently serves the GMAC; enable=1 + reboot to race the native driver in"
 	exit 2
 	;;
 esac

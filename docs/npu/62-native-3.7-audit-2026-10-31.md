@@ -22,12 +22,21 @@
 `/sys/bus/platform/drivers/zxnative-eth` 已注册但无绑定；dmesg 无
 "native wired data plane up"。**两个驱动同时编入**（基线
 main/switch/ffe.c 仍在 overlay files/，先注册先绑定）。
-**方案**（分两轮）：
-1. 本轮（3.9）：随包交付 `native-eth switch` 切换 CLI（unbind 基线 →
-   bind native，10s 内无 "native wired data plane up" 或无端口 up 则
-   自动回退基线）。首刷后**手动**执行观察第一次硬件 probe，不自动。
-2. native 稳定 N 轮后：从 overlay 移除基线源文件，实现真"全重写"。
+**运行期切换不可行（3.9 实跑发现）**：基线驱动
+`suppress_bind_attrs`——bind/unbind sysfs 文件根本不存在，已绑定驱动
+无法让出节点；首次 `native-eth switch` 实跑三步全部失败
+（模块名 `zxnative-eth`→应为 `zxnative_eth`；unbind EACCES 实为文件不存在）。
+**切换模型定稿（3.10）——链接顺序竞争 + 启动期自动回退**：
+1. 043 patch 把 `zxnative-eth.o` 提到 `zx279128s-eth.o` 之前（initcall
+   先注册先绑定）；
+2. `zxnative_enable` 默认 true：native 赢得 boot 竞争、直接服役；
+3. native probe 优雅拒绝（enable=0 或 -ENODEV）→ 设备无人认领 → 后注册
+   的基线自动 probe 接管 = 启动期回退；
+4. 回退操作 = `native-eth enable 0 && reboot`（运行期无法回退，见上）；
+5. native 稳定 N 轮后从 overlay 移除基线源文件（真"全重写"收尾）。
 DTS 前提已核实满足（`zte,zx279128s-gmac` + ethernet-ports 子节点）。
+风险已知：native 首次硬件 probe 若 OOPS（非优雅失败）则需 TTL 救援；
+deferred-probe 竞态（mdio 未就绪时让基线先绑）由实机观察裁决。
 
 ### A2 [P1·BUG] zxna_remove 只注销第一个端口（unbind 路径 UAF）
 zxnative-eth.c `zxna_remove()`：`if (a->ports[i]) { unregister_netdev; break; }`
@@ -146,3 +155,17 @@ cidx/didx 模运算、PPE 槽映射/CLA 命令守卫。注意：M3/M4/M6 是因 
 `bash tests/device-verify.sh`（V1 版本/槽头、V2 健康无 oops、V3 有线
 功能/IRQ、V4 native 状态/proc、V5 稳定性指标）+ 手工附加：native-eth
 switch 观察（如本轮）+ wlanmgr step1。全过才进下一轮。
+
+## 7. 3.9 刷入与核查记录（2026-10-31）
+
+- 原位升级：check OK → upgrade-check OK（slot0 原厂完好）→ slot1
+  serial 100 写入 → 重启。
+- **核查 ALL-PASS**：槽头版本=`OpenWrt native-wired-3.9`（C1 真机闭环）；
+  parked probe 证据 `/proc/zx-csp-wlan/probe` 在案（B2 闭环）；zxnpu0
+  随机 MAC（D1 生效）；fw-audit 运行期 4 固件全在（B5 闭环）。
+- 教训：全新 rootfs 的 dropbear 主机密钥会变，flash 脚本已固化
+  `ssh-keygen -R`；busybox 无 nohup，detach 用 subshell 双 fork。
+- boot 期 request_firmware -2 为 initcall 时序（运行期正常），FWDL 走
+  ctl 运行期路径不受影响。
+- 两个固件文件（1.76MB 与 458KB）内容 0% 重叠却同 CRC32=2144df1c——
+  记录为真实碰撞（~2^-32），审计同时打印 size 可区分，非 bug。

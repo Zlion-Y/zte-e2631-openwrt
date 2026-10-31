@@ -1,6 +1,6 @@
 --- a/drivers/net/ethernet/zte/Kconfig
 +++ b/drivers/net/ethernet/zte/Kconfig
-@@ -73,4 +73,14 @@
+@@ -73,4 +73,18 @@
  	  register writes also require commit=1.
  
  	  If unsure, say Y on this board.
@@ -10,15 +10,20 @@
 +	depends on OF && PHYLINK
 +	help
 +	  Standalone vendor-behaviour rewrite of the switch/GMAC/DMA data
-+	  path. While the baseline driver owns the node this module stays
-+	  inert; zxnative_eth.enable=1 lets it probe instead.
++	  path. Linked ahead of the baseline driver, so it wins the boot
++	  probe race when enabled; if its probe declines (enable=0 or a
++	  graceful -ENODEV) the baseline driver registered right after
++	  takes the node - the baseline cannot be rebound at runtime
++	  (suppress_bind_attrs), so driver fallback only happens at boot.
 +
-+	  If unsure, say N.
++	  If unsure, say Y on this board.
++
  endif # NET_VENDOR_ZTE
 --- a/drivers/net/ethernet/zte/Makefile
 +++ b/drivers/net/ethernet/zte/Makefile
-@@ -6,3 +6,4 @@
- obj-$(CONFIG_ZX_NPU_IDM) += zx279128s-npu-idm.o
- obj-$(CONFIG_ZX_NPU_PPE) += zx279128s-npu-ppe.o
- obj-$(CONFIG_ZX_CSP_WLAN) += zxnpu-wlan.o
+@@ -1,4 +1,5 @@
+ # SPDX-License-Identifier: GPL-2.0-only
 +obj-$(CONFIG_ZXNATIVE_ETH) += zxnative-eth.o
+ obj-$(CONFIG_ZX279128S_ETH) += zx279128s-eth.o
+ zx279128s-eth-y := zx279128s-main.o zx279128s-ppe.o zx279128s-switch.o
+ obj-$(CONFIG_ZX_NPU) += zx279128s-npu.o
