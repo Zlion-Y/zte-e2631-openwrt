@@ -837,45 +837,6 @@ static bool zxnative_offload;
 module_param_named(offload, zxnative_offload, bool, 0644);
 MODULE_PARM_DESC(offload, "arm the PPE flow offload (register snapshot, V4 rules, packet modifier, trap/MAC flip)");
 
-static int zxna_setup_tc(struct net_device *netdev, enum tc_setup_type type,
-			 void *type_data)
-{
-	struct zx_eth_priv *priv = netdev_priv(netdev);
-	struct zx_eth_adapter *a = priv->adapter;
-	struct flow_cls_offload *cls = type_data;
-	int ret;
-
-	if (type != TC_SETUP_FT)
-		return -EOPNOTSUPP;
-	if (!zxnative_offload) {
-		netdev_dbg(netdev, "ppe offload refused: zxnative_eth.offload=0\n");
-		return -EOPNOTSUPP;
-	}
-
-	mutex_lock(&a->ppe_lock);
-	switch (cls->command) {
-	case FLOW_CLS_REPLACE:
-		/* first flow arms the PPE: register snapshot + V4 rules +
-		 * packet modifier + trap/MAC table flip (zx_ppe_start) */
-		if (!a->ppe_active) {
-			ret = zx_ppe_start(a);
-			if (ret)
-				break;
-		}
-		ret = zx_ppe_flow_add(a, cls);
-		break;
-	case FLOW_CLS_DESTROY:
-		ret = zx_ppe_flow_del(a, cls);
-		break;
-	case FLOW_CLS_STATS:
-		ret = zx_ppe_flow_stats(a, cls);
-		break;
-	default:
-		ret = -EOPNOTSUPP;
-	}
-	mutex_unlock(&a->ppe_lock);
-	return ret;
-}
 
 
 /* ---- ethtool --------------------------------------------------------- */
@@ -931,7 +892,7 @@ static const struct net_device_ops zxna_netdev_ops = {
 	.ndo_set_mac_address	= zxna_set_mac,
 	.ndo_validate_addr	= eth_validate_addr,
 	.ndo_eth_ioctl		= zxna_ioctl,
-	.ndo_setup_tc		= zxna_setup_tc,
+	.ndo_setup_tc		= zx_eth_setup_tc,
 };
 
 /* ppe.c classifies ingress ports through this hook (declared in the shared
