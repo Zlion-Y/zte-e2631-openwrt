@@ -408,3 +408,25 @@ word0 写不粘（可能只读视图/写法错/half-word 语义）。
    /proc/kcore（若 vendor 有）或 rd 去 O_SYNC 重试
 3. FWDL 前置：活系统 ring base 4a6df000 vs 我们 4e080000——DMA 可达域
    核对（dma-ranges 0x40000000 窗）
+
+## 20. 破冰：MCU 在消费命令——RX 应答环是缺失的另一半（2026-10-31）
+
+**crw 写粘性地图**（a5a5a5a5 扫描）：0xd4260 半字过滤粘写（05a505a5，
+12 位/半字编码）；**0xd4b00 高半字 = 0x9 稳定 = 本 boot 发往 qid17 的
+9 条命令（3 次 mcu-dl × SemGet/AddressLen/Finish）全部被 MCU 消费**！
+0xd4b04 = 0x00010001（与 0xd4260 使能值同现——区域有别名/联动）；
+0xd4b28/48 = 0x00070000 默认态；0xd4b20 word0 三变体写全不粘。
+
+**结论**：命令通道（qid17）双向活——DMA 取描述符、MCU 消费、did 计数
+在 0xd4b00 高半字。TOP_MISC=0 的原因 = **FWDL 流程缺 RX 侧**：SemGet/
+AddressLenReq 是请求-应答式，MCU 应答到 RX 事件环，本 boot 未跑
+rx-init、未读应答 → 流程停等。FwScatter 51 块（FWDL 环）消费 0 亦与
+应答未读一致（patch 流程未推进到 bulk 阶段接受）。
+
+**下轮（R-A 收官）**：
+1. rx-init（RX 事件环 setup，commit=1）
+2. mcu-dl p.bin 后逐命令 mcu-recv 读应答（SemGet 响应→sem、AddressLen
+   响应→dst 确认）
+3. 完整 patch 流 → fw-dl wm → fw-dl wa → fw-state 应 = 7
+4. poll 修正：did 在 0xd4b00 高半（ring1）；tx0/FWDL 的 did 位置在
+   RX 联动后重定位
