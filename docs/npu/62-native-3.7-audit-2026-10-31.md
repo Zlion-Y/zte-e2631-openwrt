@@ -189,3 +189,15 @@ IRQ 6011、softnet 零丢包、无 oops。基线从未被 probe（竞争干净�
 `sync; echo b > /proc/sysrq-trigger`；等待循环必须先等 SSH 掉线再等
 回归；每次新 rootfs 的 dropbear 主机密钥都会变（device-verify 已带
 StrictHostKeyChecking=no）。
+
+## 9. 3.12 终态（本轮收束）
+
+- **有线**：基线出像（CONFIG_ZX279128S_ETH=n，021 patch 保留供
+  zx279128s-eth.h）；zxnative-eth 经 probe 级 defer（MAC 源 nvmem
+  就绪前）→ deferred 重试绑定，厂 MAC 逐字节恢复
+  （lan1/2/3=f8:73:1a:d3:ef:a8，wan=...a9）；device-verify ALL-PASS。
+- 全轮产物：out/native-wired-3.12/e2631-openwrt-native-wired-3.12.bin
+  sha256 7a0751bb…（双门禁过，槽头=3.12，serial 102）。
+- 待办移交下轮：B1（7906 主功能绑定点亮芯片——FWDL 前置）、A5（native
+  proc/ethtool 统计）、A4（init 自动化——现 native 即 boot 默认，无需）、
+  P5 dataplane（依赖 B1）。
