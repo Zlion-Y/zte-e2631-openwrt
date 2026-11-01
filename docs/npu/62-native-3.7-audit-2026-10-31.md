@@ -1547,3 +1547,32 @@ F2 用我们的 OpenWrt 设备当 TFTP 服务器（已建 /tmp/tftpd）→ vendo
 F3 检查 PCIe 链路训练速度：vendor Force Gen1（ZX PCIe 驱动里有），
    我们是否也在 Gen1？Gen2 的 DMA 写可能有不同行为
 F4 用 vendor 盒的 web 管理界面（端口 80）上传工具（绕过 busybox wget）
+
+## 63. vendor 内核解压成功 + wifi init 函数定位（2026-11-01）
+
+**vendor 内核 zImage 解压成功**：gzip@0x65a8 → 6.67MB vmlinux
+（_scratch/vmlinux.out），全量反汇编完成（vendor-kernel.dis, 63M行）。
+
+**vendor wifi init 函数定位**：VA c0244150（fileoff 0x23c150），通过
+`movw r5,#0x9264 + movt r5,#0xc056` 引用 `g_WiFi_Reserve_Mem_Base`
+printk 字符串（init.rodata copy @ VA c0569264）。
+
+**关键发现：vendor 的 GLO_CFG 值 = 0x21fd**（写入三个不同 WFDMA 引擎
+的偏移 0x470/0x4c0/0x510）：
+```
+0x21fd = TX_EN(bit0) | RX_EN(bit2) | ... | bit13(0x2000)
+```
+bit13 是 mt76 未定义的位，vendor 初始化就置 1。
+实测：写 0x21fd 到 0xd4208 后 qid16 **仍不 fetch**（didx=0）。
+回读 0x21f5（bit3 被硬件清了）。
+
+**vendor 的 pcie 节点是空壳**（compatible=zte,ZX279127-pcie，仅
+interrupts/status，无 reg/clk/phy），且 vendor mt7916.ko 内无 0x5746
+写入——PCIe 和 WFSYS 初始化全在 vendor 内核的 zx279128 平台代码里
+（zx279128_reserve_mem / zte_board_init / zte_gpio_init 系列）。
+
+**下轮任务拆解（vendor 平台代码还原）**：
+G1 反汇编 c0018918 附近（含 0x18000000 常量的平台 init 函数链）
+G2 找 zte_board_init / zx279128_reserve_mem 的完整实现
+G3 找 PCIe 链路训练/WFSYS 时钟/电源的硬编码序列
+**验收**：在我们设备上复刻 vendor 平台初始化后，qid16 didx 前进 ≥1
