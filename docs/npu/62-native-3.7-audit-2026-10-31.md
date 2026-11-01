@@ -1424,3 +1424,19 @@ B3 找到后在我们驱动里实现"直写 MCU SYSRAM"路径，用可回读窗�
 （先解决可靠回读：找 ROM 的 dump 命令或 L1 正确映射）
 **验收**：写入已知 pattern 后能回读到同一 pattern（数据落地证明），
 再执行 FwStart，观察 fw-state → 7
+   （B1 结果：**已定位 vendor 数据发送路径**）
+   `load_fw_v1` 内 0x1d5a9c 调用的无名局部函数 0x1d5984 才是发送器：
+   按 `4096 - chip_cap[0x134]` 分块，逐块调
+   **`MtCmdFwScatter` (0x1cbf04)**。其反汇编给出精确头：
+   ```
+   mvn  r2,#17     ; 0xEE
+   mov  r3,#16     ; 0x10
+   strb r2,[sp,#10] ; msg[2] = type 0xEE
+   strb r3,[sp,#12] ; msg[4] = cmd  0x10
+   ```
+   payload 由 `AndesAppendCmdMsg` 追加在 +32。
+
+   **结论：3.40 已实现的 Andes scatter 头（type 0xEE / cmd 0x10 /
+   payload@32）与 vendor 逐字节一致。** 因此数据帧格式不再是变量；
+   剩余变量只有**环选择**：GetRealPortQueueID(0xEE) 返回
+   chip_cap[0x162]，其值应为 16 或 17 —— 下一测直接 A/B 两环。
