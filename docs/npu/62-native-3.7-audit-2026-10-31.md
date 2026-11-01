@@ -1493,3 +1493,34 @@ D3 关键：RX 环的 **EXT_CTRL/prefetch**（0xd4680..）与 RX 队列使能位
    （GLO_CFG bit2 已置）之外，是否还需要 qid 级 "RX DMA enable"
 D4 若仍无事件：试把 rxq0 指向 vendor 同数量级地址（如 4a6XXXXX 区间）
    排除地址窗口/别名问题
+
+## 61. RX 路径 D1-D4 结果：事件投递在 host 侧完全缺失（3.44，2026-11-01）
+
+**新工具**：`rx-desc` ctl 命令——CPU 直接读 RX 描述符 coherent 内存
+（buf0/ctrl/buf1/info）与事件缓冲前 8 字节，是"DMA 是否碰过"的地面真值。
+
+**D1 实测**：RX 描述符武装完全正确——
+```
+desc[0]: buf0=4e050000 ctrl=46a40000 buf1=0 info=0
+desc[1]: buf0=4e0506a4 ctrl=46a40000
+desc[2]: buf0=4e050d48 ...（1700 步长，页对齐，bit30=空闲标志）
+```
+SemGet 后 desc[0] **逐字节不变** → DMA 从未触碰。
+
+**D4 实测**：六个 RX 环（d4500/d4510/d4520/d4530/d4540/d4550）全部指到
+有效缓冲后发 SemGet → **六个环 didx/cidx 全零**。ROM 在此板上不向任何
+RX 环投递任何东西。
+
+**推论**：MCU→host 的事件通道在本板上**整体缺失**，不是环配置问题。
+缺失的环节必然在 WFDMA 的"MCU 事件 → PCIe MemWr"路由/使能——即 MCU
+侧的事件端口到 host RX 环之间的某级开关。
+
+**下轮任务拆解（MCU 事件端口路由）**：
+E1 反汇编 vendor 的 rx 事件投递路径（mtf_trans_rxd_into_rxblk /
+   hif_rx_event_process / mt7916 hif_ctrl vtable）找 host 环寄存器之外
+   的 WFDMA 路由寄存器
+E2 对照 vendor 盒与我们的 **0xd41f0（INT_MCU_CMD_SOURCE）**、
+   **0xd41f4（MCU_HOST_INT_ENA）**、**0x74030108（MCU doorbell）** 读数
+E3 检查 mt76 的 `mt76_connac_mcu_uart_tx_done` 类似的 MCU→host 握手
+   位（WFDMA host 侧"我已就绪"标志，MCU 可能轮询它才投递）
+**验收**：任一 rxq didx 前进且事件缓冲可读到非零数据

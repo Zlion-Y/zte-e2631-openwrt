@@ -1820,6 +1820,39 @@ static void zxnpu_wlan_rx_init(struct zxnpu_wlan *w, bool commit)
 	w->rx_cidx = 0;
 }
 
+/*
+ * rx-desc: dump the live RX descriptors (coherent memory the driver owns)
+ * and the first event buffers. The DMA flips the descriptor ctrl on
+ * delivery, so this is the ground truth for "did anything arrive".
+ */
+static void zxnpu_wlan_rx_desc_dump(struct zxnpu_wlan *w)
+{
+	int i;
+
+	if (!w->rx_ring || !w->rx_buf) {
+		zxnpu_wlan_append(w, "rx-desc: no rx memory\n");
+		return;
+	}
+	zxnpu_wlan_append(w, "rx-desc: ring=%08x bufs=%08x depth=%u\n",
+			  (u32)w->rx_ring_dma, (u32)w->rx_buf_dma,
+			  ZXNPU_MCU_RX_DEPTH);
+	for (i = 0; i < 4; i++) {
+		u8 *d = (u8 *)w->rx_ring + i * ZXNPU_MCU_DESC_SIZE;
+		u8 *b = (u8 *)w->rx_buf + i * ZXNPU_MCU_RX_BUF_SIZE;
+
+		zxnpu_wlan_append(w,
+				  "  desc[%d]: buf0=%08x ctrl=%08x buf1=%08x info=%08x\n",
+				  i, get_unaligned_le32(d),
+				  get_unaligned_le32(d + 4),
+				  get_unaligned_le32(d + 8),
+				  get_unaligned_le32(d + 12));
+		zxnpu_wlan_append(w,
+				  "  buf[%d]: %02x %02x %02x %02x %02x %02x %02x %02x\n",
+				  i, b[0], b[1], b[2], b[3],
+				  b[4], b[5], b[6], b[7]);
+	}
+}
+
 static void zxnpu_wlan_mcu_recv(struct zxnpu_wlan *w)
 {
 	u32 didx, cidx, n, i;
@@ -2598,6 +2631,8 @@ static ssize_t zxnpu_wlan_ctl_write(struct file *file, const char __user *ubuf,
 		zxnpu_wlan_mcu_regions(w, cmd + 15, zxnpu_wlan_commit);
 	} else if (!strncmp(cmd, "mcu-dl ", 7)) {
 		zxnpu_wlan_mcu_dl(w, cmd + 7, zxnpu_wlan_commit);
+	} else if (!strncmp(cmd, "rx-desc", 7)) {
+		zxnpu_wlan_rx_desc_dump(w);
 	} else if (!strncmp(cmd, "rx-init", 7)) {
 		zxnpu_wlan_rx_init(w, zxnpu_wlan_commit);
 	} else if (!strncmp(cmd, "mcu-recv", 8)) {
