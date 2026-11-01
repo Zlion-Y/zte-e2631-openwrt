@@ -1269,3 +1269,28 @@ len@0、type@2、cmd@4、seq@6（自增）、cid@8、port@20=0x8000
 **下轮**：① 映射 vendor 36B item → 真实 wire 消息位置 → 逐字节对照
 vendor 的 AddressLen wire 内容；② 用 vendor 的**逐字节** AddressLen
 重放（替换我们的 connac2/Andes 版本）；③ 数据落地后 FwStart 才有意义。
+
+## 54. 修正：SRAM 回读窗口不可靠（3.39，2026-11-01）
+
+**§53 的"WM 数据从未落地"结论作废**：0x00414800 的两次回读
+（bar0+0x84800/0x94800 两个候选窗）返回**互不相同的随机数据**——
+这些窗不是稳定的 SRAM 视图（未映射读返回总线噪声，或 MCU SRAM 在
+此状态下 host 不可读）。0x00400000 窗同样每次读数都变。
+
+**WM 数据是否落地：当前不可验证**（没有已证实的 host 侧 SRAM 读窗）。
+"AddressLen 未被解析"降级为未证实假设。
+
+**当前事实链（可靠的）**：
+- 描述符 fetch/消费 ✓（DIDX 实证，patch 20 + WM 3446 计数闭合）
+- 三种命令头（connac2 64B / Andes 24B / Andes 32B）在武装窗口内全部
+  被消费 ✓
+- FW_SCATTER 必须走 qid17 ✓
+- fw-state 恒 1、START 消费但不生效 ✗ —— 唯一未解
+
+**下轮（顺序）**：
+1. AndesBhHandler → pci_kick 的 36B item payload 构建（vendor 线上
+   逐字节模板——和我们的 68/76B 消息逐字节 diff）
+2. vendor 盒抓真实 START 消息：vendor 的 WM 环有 3446+ 条历史消息的
+   缓冲池——用环内 buf0 扫描池地址定位一条 FwStartReq（type 02）的
+   原始字节
+3. 若 vendor 的 START wire 字节与我们的有差 → 逐字节复刻
