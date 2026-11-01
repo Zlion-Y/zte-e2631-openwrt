@@ -1294,3 +1294,7 @@ vendor 的 AddressLen wire 内容；② 用 vendor 的**逐字节** AddressLen
    缓冲池——用环内 buf0 扫描池地址定位一条 FwStartReq（type 02）的
    原始字节
 3. 若 vendor 的 START wire 字节与我们的有差 → 逐字节复刻
+   （补）vendor 环活体抓取窗口已关闭：环滚动多轮，开机期 FWDL 消息
+   被固件时代的 keepalive 覆盖。0xa0 长度消息只在扫描瞬间出现。
+   START wire 格式的最终答案只剩 AndesBhHandler 链的静态解码
+   （hif_ctrl[0xb14] → mt7916 实现，vtable 初始化未定位）。
