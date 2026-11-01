@@ -1440,3 +1440,30 @@ B3 找到后在我们驱动里实现"直写 MCU SYSRAM"路径，用可回读窗�
    payload@32）与 vendor 逐字节一致。** 因此数据帧格式不再是变量；
    剩余变量只有**环选择**：GetRealPortQueueID(0xEE) 返回
    chip_cap[0x162]，其值应为 16 或 17 —— 下一测直接 A/B 两环。
+
+## 59. WM 停滞根因：单缓冲环覆写（驱动缺陷，非硬件）（2026-11-01）
+
+**干净启动 + vendor 逐字节一致 framing 的硬证据**：
+```
+qid17: base=4e040000 cnt=0x80 cidx=0x0d8b(3467 提交) didx=0x54(84 消费)
+fw-state = 1（始终）
+```
+**MCU 消费到第 84 条就永久停止**，而主机已提交 3467 条。
+
+**根因分析（驱动缺陷）**：`zxnpu_mcu_submit_ring` 全部提交共用
+`w->fwdl_buf` / `w->mcu_buf` **一个 4 KiB 缓冲**，每条描述符都指向同一
+物理地址并在下一次提交时被覆写；环深 128，提交速度远快于消费 →
+环内多条 pending 描述符指向同一块正被改写的内存，MCU 读到自相矛盾的
+数据后停止消费（84 ≈ patch 20 + WM addrlen 9 + ~55 scatter 块）。
+
+**这同时解释了历史现象**：此前"cidx 推进 / didx 0"被我误读为消费，
+实际是提交；真正的消费从未超过 ~84 条。
+
+**下轮任务拆解（数据面工程化，验收明确）**：
+C1 每槽独立数据缓冲：`desc_ring[i] -> buf_ring[i]`（128 × 512 B，
+   `dmam_alloc_coherent` 一次分配），提交时只写当前槽的缓冲
+C2 加流控：提交后若 `(cidx - didx) >= depth - 4` 则轮询等待，模拟
+   真实驱动的 tx ring 语义
+C3 事务完成后再 `dma_wmb()` + 更新 cpu_idx（当前顺序可疑）
+**验收**：qid17 didx 追平 cidx（3467/3467）且 fw-state 从 1 前进；
+随后 FwStart（type 2）应把状态推到 7
