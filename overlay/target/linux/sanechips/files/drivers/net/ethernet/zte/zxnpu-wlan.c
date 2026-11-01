@@ -82,6 +82,15 @@ struct zxnpu_wlan {
 	dma_addr_t fwdl_ring_dma;
 	void *fwdl_buf;
 	dma_addr_t fwdl_buf_dma;
+	/* Per-slot data buffers: every descriptor must own its bytes.
+	 * A single shared buffer is rewritten while earlier descriptors
+	 * are still pending, and with a 128-slot ring the MCU reads
+	 * self-contradictory data and stops consuming (doc 62 s59). */
+	u32 ring_stall;		/* consecutive submits without didx progress */
+	void *mcu_bufs;
+	dma_addr_t mcu_bufs_dma;
+	void *fwdl_bufs;
+	dma_addr_t fwdl_bufs_dma;
 	u32 fwdl_cidx;
 	bool fwdl_ring_armed;
 	bool mcu_ring_armed;
@@ -636,6 +645,7 @@ MODULE_PARM_DESC(fw_ring, "TX ring for FW_SCATTER data (0=qid16 FWDL, 1=qid17 WM
 #define ZXNPU_MCU_TYPE_FINISH	0x07
 #define ZXNPU_MCU_TYPE_ADDR	0x01
 #define ZXNPU_MCU_CHUNK		512
+#define ZXNPU_MCU_SLOT		(ZXNPU_MCU_CHUNK + 64)	/* room for the 32B Andes header */
 #define ZXNPU_WM_FW		"zte/mt7916/WIFI_RAM_CODE_MT7916.bin"
 #define ZXNPU_WA_FW		"zte/mt7916/7916_WACPU_RAM_CODE_release.bin"
 #define ZXNPU_PATCH_FW		"zte/mt7916/mt7916_patch_e1_hdr.bin"
@@ -1011,8 +1021,10 @@ static int zxnpu_mcu_submit_ring(struct zxnpu_wlan *w, int ring,
 {
 	void *desc = ring ? w->mcu_ring : w->fwdl_ring;
 	dma_addr_t desc_dma = ring ? w->mcu_ring_dma : w->fwdl_ring_dma;
-	void *buf = ring ? w->mcu_buf : w->fwdl_buf;
-	dma_addr_t buf_dma = ring ? w->mcu_buf_dma : w->fwdl_buf_dma;
+	void *bufs = ring ? w->mcu_bufs : w->fwdl_bufs;
+	dma_addr_t bufs_dma = ring ? w->mcu_bufs_dma : w->fwdl_bufs_dma;
+	void *buf;
+	dma_addr_t buf_dma;
 	u32 *cidx = ring ? &w->mcu_cidx : &w->fwdl_cidx;
 	u32 reg = ZXNPU_WFDMA_TX_RING0 + ZXNPU_WFDMA_RING_STRIDE * ring;
 	u32 slot, didx, prev;
@@ -1021,11 +1033,31 @@ static int zxnpu_mcu_submit_ring(struct zxnpu_wlan *w, int ring,
 		zxnpu_wlan_append(w, "  parked: enable=0 (reload with enable=1)\n");
 		return 0;
 	}
-	if (!desc || !buf || len <= 0 || len > ZXNPU_MCU_BUF_SIZE)
+	if (!desc || !bufs || len <= 0 || len > ZXNPU_MCU_SLOT)
 		return -EINVAL;
 	zxnpu_wlan_queue_init(w, ring);
+
+	/* flow control: never let the producer lap the consumer. Bounded to
+	 * 40 ms per message - the earlier 1 s budget turned a stalled MCU into
+	 * a one-hour download. */
+	{
+		int spins;
+
+		for (spins = 0; spins < 200; spins++) {
+			u32 didx_now = zxnpu_main_cr_read(w, reg + 12);
+			u32 cidx_now = *cidx;
+
+			if ((cidx_now - didx_now) <
+			    (ZXNPU_MCU_RING_DEPTH - 8))
+				break;
+			usleep_range(150, 250);
+		}
+	}
+
 	slot = (*cidx) % ZXNPU_MCU_RING_DEPTH;
-	memset(buf, 0, ZXNPU_MCU_BUF_SIZE);
+	buf = (u8 *)bufs + (u32)slot * ZXNPU_MCU_SLOT;
+	buf_dma = bufs_dma + (dma_addr_t)slot * ZXNPU_MCU_SLOT;
+	memset(buf, 0, ZXNPU_MCU_SLOT);
 	memcpy(buf, msg, len);
 	zxnpu_mcu_fill_desc(desc, desc_dma, slot, (u32)buf_dma, len);
 	dma_wmb();
@@ -1057,13 +1089,23 @@ static int zxnpu_mcu_submit_ring(struct zxnpu_wlan *w, int ring,
 	zxnpu_main_cr_write(w, reg + 4, ZXNPU_MCU_RING_DEPTH);
 	(*cidx)++;
 	zxnpu_main_cr_write(w, reg + 8, *cidx);
-	if (!readl_poll_timeout(w->bar[0] + zxnpu_cr_bar_off(reg + 12), didx,
-				(didx % ZXNPU_MCU_RING_DEPTH) ==
-				(*cidx % ZXNPU_MCU_RING_DEPTH), 100, 50000))
-		zxnpu_wlan_append(w, "  didx advanced to %u\n", didx);
-	else
-		zxnpu_wlan_append(w, "  didx still %u (last was %u)\n",
-				  zxnpu_cr_read(w, reg + 12), prev);
+	didx = zxnpu_main_cr_read(w, reg + 12);
+	if (didx != prev) {
+		w->ring_stall = 0;
+		if (verbose)
+			zxnpu_wlan_append(w, "  didx advanced to %u\n", didx);
+		return 0;
+	}
+
+	if (++w->ring_stall > 512) {
+		pr_err("zxnpu-wlan: ring qid%d stalled: didx frozen at %u, %u outstanding\n",
+		       ring ? 17 : 16, didx, *cidx - didx);
+		w->ring_stall = 0;
+		return -EIO;
+	}
+	if (verbose)
+		zxnpu_wlan_append(w, "  didx still %u (stall %u)\n", didx,
+				  w->ring_stall);
 	return 0;
 }
 
@@ -1899,8 +1941,9 @@ static void zxnpu_wlan_mcu_dl(struct zxnpu_wlan *w, const char *args, bool commi
 		if (zxnpu_mcu_submit_ring(w, zxnpu_wlan_fw_ring, msg, chunk, true, false))
 			goto out;
 		done += chunk;
-		if (!(done % (64 * ZXNPU_MCU_CHUNK)))
-			zxnpu_wlan_append(w, "  ... %u/%u\n", done, total);
+		if (!(done % (128 * ZXNPU_MCU_CHUNK)))
+			pr_info("zxnpu-wlan: scatter %u/%u (didx %u)\n", done,
+				total, zxnpu_main_cr_read(w, ZXNPU_MCU_RING_REG + 12));
 		usleep_range(1000, 2000);
 	}
 
@@ -2757,6 +2800,12 @@ static int zxnpu_wlan_probe(struct pci_dev *pdev,
 						   &w->fwdl_ring_dma, GFP_KERNEL);
 		w->fwdl_buf = dmam_alloc_coherent(&pdev->dev, ZXNPU_MCU_BUF_SIZE,
 						  &w->fwdl_buf_dma, GFP_KERNEL);
+		w->mcu_bufs = dmam_alloc_coherent(&pdev->dev,
+						  ZXNPU_MCU_RING_DEPTH * ZXNPU_MCU_SLOT,
+						  &w->mcu_bufs_dma, GFP_KERNEL);
+		w->fwdl_bufs = dmam_alloc_coherent(&pdev->dev,
+						   ZXNPU_MCU_RING_DEPTH * ZXNPU_MCU_SLOT,
+						   &w->fwdl_bufs_dma, GFP_KERNEL);
 		w->rx_ring = dmam_alloc_coherent(&pdev->dev,
 						 ZXNPU_MCU_RX_DEPTH * ZXNPU_MCU_DESC_SIZE,
 						 &w->rx_ring_dma, GFP_KERNEL);
@@ -2779,7 +2828,8 @@ static int zxnpu_wlan_probe(struct pci_dev *pdev,
 		 * data-init would hand hardware a garbage DMA base (doc 62
 		 * finding 7). devm unwinds whatever did allocate. */
 		if (!w->mcu_ring || !w->mcu_buf || !w->fwdl_ring ||
-		    !w->fwdl_buf || !w->rx_ring || !w->rx_buf ||
+		    !w->fwdl_buf || !w->mcu_bufs || !w->fwdl_bufs ||
+		    !w->rx_ring || !w->rx_buf ||
 		    !w->dtx_ring || !w->drx_ring || !w->drx_buf ||
 		    !w->dband_ring)
 			return -ENOMEM;

@@ -1467,3 +1467,29 @@ C2 加流控：提交后若 `(cidx - didx) >= depth - 4` 则轮询等待，模�
 C3 事务完成后再 `dma_wmb()` + 更新 cpu_idx（当前顺序可疑）
 **验收**：qid17 didx 追平 cidx（3467/3467）且 fw-state 从 1 前进；
 随后 FwStart（type 2）应把状态推到 7
+
+## 60. 停滞点精确复现：didx 恒止于 84 = 20(patch) + 64(WM)（3.43，2026-11-01）
+
+**C1-C3 修复验证（每槽独立缓冲 + 流控 + 写序）**：
+- 补丁阶段 `cidx=20 / didx=20` **完全追平**（多次复现，干净启动）
+- WM 阶段：**didx 精确冻结在 84**，新增停滞检测在 90 秒内报出
+  `ring qid17 stalled: didx frozen at 84, 641 outstanding` 并 -EIO 中止
+- 结论：环覆写问题已修复（补丁段证明），但 MCU 仍在**第 84 条**停止消费
+
+**新假设（强）**：84 − 20 = **恰好 64 条 WM 消息**。64 很像 MCU 内部
+**命令槽池上限**：ROM/loader 把命令收进内部队列后，需要主机把应答
+（response/event）从 RX 环读走并归还槽位；我们的 **RX/事件路径从未
+送达任何数据**（d4508/d450c 恒 0、d4200 无 RX 中断），因此 64 槽用尽
+后 MCU 停止取述。这解释了过去所有"消费一段就停"的现象。
+
+**下轮任务拆解（RX/事件路径，验收=rxq didx 前进且能读到事件字节）**：
+D1 复核 RX 描述符：mt76 的 RX 描述符 buf0=数据地址、ctrl=len<<16，
+   无 LAST_SEC0；但 vendor 活环实证 **空槽 ctrl=0x46a40000（bit30=set）**、
+   投递后 0x06a40000。确认我们 3.37 回退后的写法与 vendor 一致
+D2 RX 环基址/深度对齐：vendor rxq0 base=4a0b8000、cnt=0x200(512)。
+   我们 cnt=512 已对齐；检查 base 是否需要 4KB/64KB 对齐（我们用
+   dmam_alloc_coherent 的 4e044000，页对齐）
+D3 关键：RX 环的 **EXT_CTRL/prefetch**（0xd4680..）与 RX 队列使能位
+   （GLO_CFG bit2 已置）之外，是否还需要 qid 级 "RX DMA enable"
+D4 若仍无事件：试把 rxq0 指向 vendor 同数量级地址（如 4a6XXXXX 区间）
+   排除地址窗口/别名问题
