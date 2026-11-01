@@ -1298,3 +1298,31 @@ vendor 的 AddressLen wire 内容；② 用 vendor 的**逐字节** AddressLen
    被固件时代的 keepalive 覆盖。0xa0 长度消息只在扫描瞬间出现。
    START wire 格式的最终答案只剩 AndesBhHandler 链的静态解码
    （hif_ctrl[0xb14] → mt7916 实现，vtable 初始化未定位）。
+
+## 55. mt7615e 对照实验 + WFSYS 上电序列（2026-11-01）
+
+**真 mt76（kmod-mt7615e）上机成功**：compat→cfg80211→mac80211→mt76→
+connac-lib→mt7615-common(+hwmon.ko)→mt7615e 七模块全载入，
+new_id 强制探针（驱动名是 mt7615e 不是 mt7915e！），双 PHY 注册、
+MAC/LED 初始化——然后 "Firmware is not ready for download"。
+
+**mt7615e 的状态检查读的是 MT_TOP_MISC2（reg_map[MT_TOP_CFG_BASE]
++0x134 = 0x18060134），不是我们一直读的 MT_TOP_MISC(0x180600f0)！**
+mt7615/mcu.c mt7615_load_firmware：MISC2[2:0] 必须==1 才继续。
+我们的 MISC2 恒 0（driver-own 后 MISC=1 但 MISC2 仍 0）。
+
+**WFSYS 上电序列（mt7915 式）实测**：DUMMY_CR(0x2120)←ffff →
+PWR_CTRL(0x18000000 走 L1) key 0x5746 舞步（8c/8d/8c/8d/9c）→
+**DUMMY_CR 读回 ffff0000 = MCU 复位完成魔数出现**（MT_MCU_DUMMY_
+DEFAULT 确认——MCU 执行了复位！）——但 MISC2 仍 0。
+
+**解读**：MISC[2:0]=1 是 LPCR 所有权状态（我们 driver-own 造成）；
+MISC2[2:0]=0 = MCU 的 ROM 没有走到下载循环。上电舞步触发了 MCU 复
+位（魔数）但 ROM 未推进到 download。vendor 差异待查（MISC2 在 vendor
+盒上的读数——rd 工具已从其 /tmp 消失，需重建上传通道）。
+
+**新工具**：_scratch/rdsrc/rd.c（静态 /dev/mem 读取器，可重编上传）；
+我们的 uhttpd 已备 /www/zrd 供 vendor 盒 wget（wget 路由未通，待查）。
+
+**mt76 对照实验结论**：mt76 与我们卡在同一处（MISC2=0）——排除驱动
+实现差异，确认为板级/固件交互层问题。两条驱动收敛到同一未知门槛。
