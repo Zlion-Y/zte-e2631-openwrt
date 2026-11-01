@@ -1329,3 +1329,7 @@ MISC2[2:0]=0 = MCU 的 ROM 没有走到下载循环。上电舞步触发了 MCU 
    （补）INT_MASK（0xd4204，MCU 位与 vendor 活值两种写法）不触发 MISC2。
    下轮首选：vendor mt7916.ko 反汇编里搜 0x5746（PWR_KEY）写序列——
    vendor 自己的 WFSYS 上电顺序（含时钟/REG/GDC 步骤）是最后未复刻项。
+   （补 2）vendor mt7916.ko 内**无** 0x5746 写入——WFSYS 上电在更早
+   的启动链完成（vendor 内核 WiFi 平台驱动或加载器）。MT_TOP_PWR_CTRL
+   读数恒 0x72 = 上电后的硬件状态读回。MISC2 触发条件的答案在 vendor
+   启动链——需要解 vendor 内核（zImage 压缩容器未识别，见 §55 前）。
