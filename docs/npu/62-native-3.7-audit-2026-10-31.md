@@ -1190,3 +1190,29 @@ WM 收完 loader 解除武装。START 无法再经环到达——patch 的 START
 2. 对照 vendor 盒的 INT_MCU_CMD_SOURCE(0xd41f0)/MCU_HOST_INT_ENA
    (0xd41f4) 语义
 3. 若 START 走门铃：写 0x74030108 触发
+
+## 51. vendor 下载流程全貌（反汇编定论，2026-11-01）
+
+**load_patch_v1（0x1d5c0c）**：PatchSemGet → AddressLen(patch 扇区循环)
+→ **PatchFinishReq** → PatchSemGet(释放) → AddressLen →
+**FwDecompressStart**（我们从未发过！）→ AddressLen → **FwStartReq**
+—— patch 阶段以 FwStartReq 收尾（mt76 用 FinishReq，vendor 多一步）。
+
+**load_fw_v1（0x1d5a48）**：AddressLen(WM region 循环) → **FwStartReq**
+—— 与我们的 fw-dl+fw-start 一致。
+
+**命令发送架构**：MtCmd* → AndesSendCmdMsg(0x1b9b18) →
+AndesQueueTailCmdMsg + **AndesBhSchedule**（BH 异步！）→
+AndesBhHandler → pci_kick_out_cmd_msg(0x1e19c0, 36B item) →
+hif_kick_out_cmd_msg(chip_ops[0xb04] 转发) → 环寄存器。
+AndesInitCmdMsg(0x1b8e5c) 只填驱动内存 struct（[0]=len [2]=type
+[4]=cmd [6]=seq [20]=port/queue [23]=wait flag）；**线上头由 BH 转换
+函数另建**（AndesBhHandler 链，未解码——下轮入口）。
+
+**已对照排除**：MtCmdFwStartReq 确为 ring 命令（type 0x02/cmd 0x17，
+Andes 头，payload {option,override} 各 4B）——我们两种头都试过不被取；
+vendor 客户端不 disarm 的原因仍在其 BH 发送路径的细节。
+
+**下轮入口**：① AndesBhHandler（找线上头构建 = 精确 24B/36B 字段）；
+② FwDecompressStart（0x1cc2ec）的 cid/payload——vendor 流程里有而我们
+没有的命令；③ 对照 vendor 盒 0xd41f0/0xd41f4 中断语义。
