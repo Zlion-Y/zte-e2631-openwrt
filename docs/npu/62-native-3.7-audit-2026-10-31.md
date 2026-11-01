@@ -1333,3 +1333,29 @@ MISC2[2:0]=0 = MCU 的 ROM 没有走到下载循环。上电舞步触发了 MCU 
    的启动链完成（vendor 内核 WiFi 平台驱动或加载器）。MT_TOP_PWR_CTRL
    读数恒 0x72 = 上电后的硬件状态读回。MISC2 触发条件的答案在 vendor
    启动链——需要解 vendor 内核（zImage 压缩容器未识别，见 §55 前）。
+
+## 56. 实验设计纠正：mt7615e 对照无效，mt76 原生支持 0x7906（2026-11-01）
+
+**mt76 的 id 表（权威）**：
+```c
+mt7915_pci_device_table[] = { 0x7915, 0x7906 };   /* 主驱动 */
+mt7915_hif_device_table[] = { 0x7916, 0x790a };   /* hif2 辅助 */
+static inline bool is_mt7916(dev) { return mt76_chip(dev) == 0x7906; }
+```
+→ **0x7906 就是 mt76 定义的 MT7916 主设备**，mt7915e 原生绑定它（无需
+new_id）。§43 的架构判断正确；但 §55 的"mt7615e 对照"**用错了驱动族**：
+mt7615e 是 MT7615 驱动，检查 MT_TOP_MISC2（mt7615 寄存器），对我们
+7916 卡毫无参考价值。§55 的"MISC2=0"结论**作废**。
+
+**已建 mt7615e 相关问题**：mt7615e 强绑 7906 时按 MT7615 寄存器布局
+操作，本该失败——这是错误驱动导致的期望内失败，不是板级证据。
+
+**真对照实验（本轮执行）**：给 mt7915e 打两个补丁后正规构建——
+① 跳过不存在的 connac2 式 ROM patch（vendor 只提供 Andes 式 e1 patch）；
+② FW_SCATTER 从 qid16 改走 qid17（我们已实证 qid16 不 fetch）。
+然后用 mt76 自己的 wfsys_reset/dma_init/driver_own/描述符序列跑同一块卡，
+与自研驱动做同条件 A/B：任一成功 = 该序列成立；两者同败 = 协议层问题。
+
+**判据（本轮验收）**：dmesg 出现 "Firmware init done" 或
+`/sys/class/ieee80211/phy*` → mt76 成功；否则记录其停在哪一步
+（load_patch / load_ram / firmware_state 超时）。
