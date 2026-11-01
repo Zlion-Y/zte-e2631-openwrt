@@ -1576,3 +1576,36 @@ G1 反汇编 c0018918 附近（含 0x18000000 常量的平台 init 函数链）
 G2 找 zte_board_init / zx279128_reserve_mem 的完整实现
 G3 找 PCIe 链路训练/WFSYS 时钟/电源的硬编码序列
 **验收**：在我们设备上复刻 vendor 平台初始化后，qid16 didx 前进 ≥1
+
+## 64. vendor 内核 PCIe 控制器驱动解码完成——不是问题所在（2026-11-01）
+
+**vendor 内核解压 + 全量反汇编完成**（63M 行），PCIe 驱动定位在
+c0017d14（synopsys pcie probe）到 c0018xxx（时钟/复位管理）。
+
+**vendor PCIe init 做的事**：
+- CRPM 时钟使能（`orr r4,r4,#0xb5` 写 [r3+0x70]）→ LSP0CRPM
+- 复位释放（`bic r5,#1` 写 [r3+0x74]）
+- 电源域切换（`bic r5,#0x4000` 写 [r3+0x0c]；`bic r5,#0x4000000` 写 [r3+0x24]）
+- ioremap 多个地址窗（0x9500000/0x1c000000/0xf100000/0x9600000/0x2c000000）
+- DW PCIe DBI 配置
+
+**结论**：这些都是 PCIe 控制器本身的时钟/复位/电源管理——通过
+CCF/Reset Framework 由我们 pcie-zx279128s.c 的 devm_clk_get/reset_control
+等效实现。TX fetch 正常工作证明 PCIe 链路和数据路径没问题。
+
+**WFSYS/MT7916 上电不在 vendor 内核里**（无 0x5746/0x70002600/
+0x1806xxx 常量）——MT7916 PCIe 设备的上电由芯片自身 boot ROM 在 PCIe
+link up 时自动执行，无需 host 干预。
+
+**根因收窄**：芯片→host DMA 写路径不通不是 PCIe 控制器或 WFSYS 电源
+问题。剩余可能性：
+1. MT7916 WFDMA 的 MCU→host 事件路由需要 vendor WiFi 驱动（mt7916.ko）
+   内部的某步（但该 ko 也没有相关 MMIO 常量）
+2. MT7916 自身固件/ROM 在此板上有 bug 或不同的 boot 路径
+3. 硬件差异（我们的板与 vendor 板可能有 PCB 级差异，如 PCIe lane/clk）
+
+**建议下轮方向（非代码）**：
+H1 获取定制版固件**文件**（不刷机），解压对比 wifi init 代码差集
+H2 用 TTL 在我们 3.44 固件上观察 vendor 系统启动日志（如果用户
+   愿意刷定制版到备用设备）
+H3 联系 ZTE/MTK 获取 MT7916 在 ZX279128S 平台的 reference driver
