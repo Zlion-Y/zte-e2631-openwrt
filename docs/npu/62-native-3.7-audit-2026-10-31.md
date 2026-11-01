@@ -1216,3 +1216,5 @@ vendor 客户端不 disarm 的原因仍在其 BH 发送路径的细节。
 **下轮入口**：① AndesBhHandler（找线上头构建 = 精确 24B/36B 字段）；
 ② FwDecompressStart（0x1cc2ec）的 cid/payload——vendor 流程里有而我们
 没有的命令；③ 对照 vendor 盒 0xd41f0/0xd41f4 中断语义。
+   （补）MtCmdFwDecompressStart = Andes type **0x30** / cmd 0x17，
+   payload 4B（来自 fw 头字段）——全新命令类型，未在 mt76 出现。
