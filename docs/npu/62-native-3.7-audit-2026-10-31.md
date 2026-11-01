@@ -1524,3 +1524,26 @@ E2 对照 vendor 盒与我们的 **0xd41f0（INT_MCU_CMD_SOURCE）**、
 E3 检查 mt76 的 `mt76_connac_mcu_uart_tx_done` 类似的 MCU→host 握手
    位（WFDMA host 侧"我已就绪"标志，MCU 可能轮询它才投递）
 **验收**：任一 rxq didx 前进且事件缓冲可读到非零数据
+
+## 62. RX 路径总结：MCU→host DMA 写路径整体不通（2026-11-01）
+
+**全部实验汇总**：
+- RX 描述符格式正确（rxdump 验证：bit30 空闲标志、页对齐、1700 步长）
+- 六个 RX 环全部武装仍无事件（ROM 不向任何环投递）
+- INT_ENA/INT_MASK/门铃/DMASHDL/上电序列全试——无效
+- TX fetch（chip 读 host）✓ 已证；chip→host DMA 写 ✗ 从未成功
+
+**结论**：MT7916 的 DMA 写路径（MCU 事件→PCIe MemWr→host 内存在本板上
+不通。TX 读（MemRd）工作正常但写路径被某层门控。
+
+**排除法定位**：iATU IB0 覆盖 0x40000000-0x5fffffff（读写共享地址窗
+口）；vendor 同硬件跑同格式 ✓。差异在 vendor 启动链的**某步初始**。
+
+**下轮攻坚方向（按优先级）**：
+F1 vendor 内核 zImage 解压（不同压缩容器，尝试 binwalk/lzma 变体）→
+   找 WFSYS/CONN_INFRA 初始化代码（时钟/复位/MISC2 触发）
+F2 用我们的 OpenWrt 设备当 TFTP 服务器（已建 /tmp/tftpd）→ vendor 盒
+   tftp 从 192.168.5.3 取 rd 工具 → 读 vendor MISC2 活值确认状态语义
+F3 检查 PCIe 链路训练速度：vendor Force Gen1（ZX PCIe 驱动里有），
+   我们是否也在 Gen1？Gen2 的 DMA 写可能有不同行为
+F4 用 vendor 盒的 web 管理界面（端口 80）上传工具（绕过 busybox wget）
