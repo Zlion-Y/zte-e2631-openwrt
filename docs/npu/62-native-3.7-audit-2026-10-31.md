@@ -1108,3 +1108,34 @@ fetch 且 didx 逐条推进（1→2→3）——MCU 真的在吃命令。
 **本轮修复清单（已进 3.31）**：pci_set_master（根因）、dma-init 追加
 HOST_CONFIG bit0 + PCIE 窗 811c811c（原厂对照确认）、ctl 缓冲 32→128。
 device-verify ALL-PASS。
+
+## 48. FWDL 传输层打通：patch+WM 全量送达（3.32-3.35，2026-11-01）
+
+**决定性发现：fw_ring=1（scatter 走 qid17/WM 环）** —— ROM 阶段的
+FW_SCATTER 数据根本不走 qid16！qid16 从不 fetch 的谜底：mt76 的
+MT_MCUQ_FWDL 映射在这颗 vendor 芯片的 ROM/patch loader 里不适用。
+qid17 被证明命令+数据全收：
+- patch：SemGet/AddrLen/17 scatter/FINISH 共 20/20 消费（didx=20）
+- WM：9 region 全量 3446 块消费（boot C cidx=3466 排空）
+
+**MCU 侧行为逐开机波动**（新发现）：
+- 每阶段下载完成后，MCU 或者干净排空（cidx==didx，寄存器保留），
+  或者复位自己的 DMA client（didx 归 0、cidx 寄存器残留我们的 kick 值）
+- 失步后下一阶段命令变成"数千 stale 待取描述符"——ring-sync（3.34 加入）
+  条件式归零（cidx==didx 时不动，失步才重零）
+- 3.35 实测：sync 正确识别失步（0x10e/0）并归零，但 MCU 客户端此后
+  不再取述（需要 ROM 自己重新 arm——driver-own 不够）
+
+**3.33-3.35 修复链**：fw-start 改 64B connac2 头（旧 24B Andes 头 ROM
+不认）、wfsys-reset 时软件计数器归零、ctl 缓冲 128B、fw_ring 参数化。
+全部 device-verify ALL-PASS。
+
+**剩余问题（下轮）**：
+1. WM 下载在 region[1] 间歇停滞（boot C 全量 / 3.34-3.35 停在 270）——
+   怀疑 ROM 等我们消费应答事件（NEED_RSP 置位但 rxq0 从未收到事件，
+   d450c=0；应答路径或需 INT_MCU_CMD_SOURCE 应答循环）
+2. fw-start 后 MCU 客户端不重新 arm——寻找 ROM 重开 fetch 的条件
+   （可能要读走事件/清 INT_MCU_CMD_SOURCE/或 WA 环也 arm）
+3. 目标不变：fw-state=7
+
+**已排除**：计数器失步（sync 已修）、txd 头格式、cnt/分区、PCI 路径。

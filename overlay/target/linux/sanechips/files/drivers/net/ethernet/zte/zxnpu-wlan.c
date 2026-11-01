@@ -608,6 +608,15 @@ static void zxnpu_wlan_bus_scan(struct zxnpu_wlan *w)
  * enable=1 and commit=1.
  */
 #define ZXNPU_FWDL_RING_NR	0
+/* Runtime knob: the FWDL scatter data ring. qid16 is mt76's MT_MCUQ_FWDL,
+ * but the live 3.31 tests showed qid16 never fetches while qid17 (WM) is
+ * consumed command by command - the ROM-stage scatter may ride the WM ring
+ * (the vendor's GetRealPortQueueID resolves it from chip_cap[0x162], which
+ * we have not decoded). fw_ring lets the on-device test switch without a
+ * rebuild. */
+static int zxnpu_wlan_fw_ring = ZXNPU_FWDL_RING_NR;
+module_param_named(fw_ring, zxnpu_wlan_fw_ring, int, 0644);
+MODULE_PARM_DESC(fw_ring, "TX ring for FW_SCATTER data (0=qid16 FWDL, 1=qid17 WM)");
 /* Commands go to qid17 (MCU_WM, ring 1) and firmware scatter data to qid16
  * (FWDL, ring 0) - that is mt76's split: mt7915_mcu_patch_sem_ctrl() and
  * friends use MT_MCUQ_WM, mt7915_mcu_send_firmware() uses MT_MCUQ_FWDL, and
@@ -789,9 +798,14 @@ static void zxnpu_wlan_wfsys_reset(struct zxnpu_wlan *w, bool commit)
 			  after == 1 ? "firmware download" :
 			  after == 3 ? "normal operation" :
 			  after == 7 ? "ready (WM+WA)" : "changed");
-	/* The reset invalidates any ring the host armed before it. */
+	/* The reset invalidates any ring the host armed before it, and the
+	 * ROM zeroes the ring registers - the software counters must follow
+	 * or the next submit kicks cpu_idx to a stale absolute value the
+	 * engine reads as thousands of pending descriptors. */
 	w->fwdl_ring_armed = false;
 	w->mcu_ring_armed = false;
+	w->fwdl_cidx = 0;
+	w->mcu_cidx = 0;
 }
 
 /* mt7915_dma_init + dma_enable + dma_start, minus the queues this driver
@@ -1139,7 +1153,7 @@ static void zxnpu_wlan_mcu_regions(struct zxnpu_wlan *w, const char *args,
 
 			/* FW_SCATTER carries no MCU header at all */
 			memcpy(msg, fw->data + off + done, chunk);
-			if (zxnpu_mcu_submit_ring(w, ZXNPU_FWDL_RING_NR, msg, chunk, true, false))
+			if (zxnpu_mcu_submit_ring(w, zxnpu_wlan_fw_ring, msg, chunk, true, false))
 				goto out;
 			done += chunk;
 			usleep_range(500, 1000);
@@ -1158,7 +1172,7 @@ out:
  */
 static void zxnpu_wlan_fw_start(struct zxnpu_wlan *w, const char *args, bool commit)
 {
-	u8 msg[24 + 8];
+	u8 msg[ZXNPU_MCU_TXD_LEN + 8];
 	unsigned long option = 0, override = 0;
 
 	if (sscanf(args, "%lx %lx", &option, &override) < 1) {
@@ -1166,14 +1180,57 @@ static void zxnpu_wlan_fw_start(struct zxnpu_wlan *w, const char *args, bool com
 		return;
 	}
 	memset(msg, 0, sizeof(msg));
-	put_unaligned_le16(8, msg + 0);
-	msg[2] = 0x02;
-	msg[4] = ZXNPU_MCU_CMD_PATCH;
-	put_unaligned_le32(option, msg + 24);
-	put_unaligned_le32(override, msg + 28);
+	zxnpu_mcu_txd_header(msg, 8, 0x02, 4);
+	put_unaligned_le32(option, msg + ZXNPU_MCU_TXD_LEN);
+	put_unaligned_le32(override, msg + ZXNPU_MCU_TXD_LEN + 4);
 	zxnpu_wlan_append(w, "fw-start option=%08lx override=%08lx\n",
 			  option, override);
-	zxnpu_mcu_submit(w, msg, 32, commit, true);
+	zxnpu_mcu_submit(w, msg, ZXNPU_MCU_TXD_LEN + 8, commit, true);
+}
+
+/*
+ * sync: re-zero the WM ring (registers + software counters) without
+ * touching the ROM. After each download phase the MCU's DMA client drops
+ * its didx to 0 while the cpu_idx register keeps the value we kicked;
+ * the next command would then look like thousands of stale pending
+ * descriptors to the engine. Run this between download phases.
+ */
+static void zxnpu_wlan_ring_sync(struct zxnpu_wlan *w, bool commit)
+{
+	zxnpu_wlan_append(w, "ring-sync: cidx sw=%u reg=%08x didx=%08x -> 0\n",
+			  w->mcu_cidx,
+			  zxnpu_cr_read(w, ZXNPU_MCU_RING_REG + 8),
+			  zxnpu_cr_read(w, ZXNPU_MCU_RING_REG + 12));
+	if (!commit) {
+		zxnpu_wlan_append(w, "  dry run: set zxnpu_wlan.commit=1\n");
+		return;
+	}
+	/* Only act on a genuinely desynced ring: after each download phase
+	 * the MCU either drains cleanly (cidx == didx, healthy - touching
+	 * it breaks the next phase) or resets its DMA client (didx drops
+	 * to 0 while cpu_idx keeps our last kick). */
+	{
+		u32 ci = zxnpu_cr_read(w, ZXNPU_MCU_RING_REG + 8);
+		u32 di = zxnpu_cr_read(w, ZXNPU_MCU_RING_REG + 12);
+
+		if (ci == di) {
+			w->mcu_cidx = ci % ZXNPU_MCU_RING_DEPTH;
+			zxnpu_wlan_append(w, "  drained healthy (cidx==didx), no action\n");
+			return;
+		}
+		zxnpu_main_cr_write(w, ZXNPU_MCU_RING_REG + 8, 0);
+		zxnpu_main_cr_write(w, ZXNPU_MCU_RING_REG + 12, 0);
+		w->mcu_cidx = 0;
+		w->fwdl_cidx = 0;
+		w->fwdl_ring_armed = false;
+		w->mcu_ring_armed = false;
+		zxnpu_wlan_queue_init(w, ZXNPU_MCU_RING_NR);
+		zxnpu_wlan_append(w, "  re-zeroed desynced ring (cidx=%08x didx=%08x)\n",
+				  ci, di);
+	}
+	zxnpu_wlan_append(w, "  synced: cidx reg=%08x didx=%08x\n",
+			  zxnpu_cr_read(w, ZXNPU_MCU_RING_REG + 8),
+			  zxnpu_cr_read(w, ZXNPU_MCU_RING_REG + 12));
 }
 
 /* fw-info [file]: patch header fields and MTK firmware trailer. */
@@ -1815,7 +1872,7 @@ static void zxnpu_wlan_mcu_dl(struct zxnpu_wlan *w, const char *args, bool commi
 		/* FW_SCATTER is raw: mt76_connac2_mcu_fill_message returns
 		 * before pushing any txd, so the skb is just the data. */
 		memcpy(msg, fw->data + offset + done, chunk);
-		if (zxnpu_mcu_submit_ring(w, ZXNPU_FWDL_RING_NR, msg, chunk, true, false))
+		if (zxnpu_mcu_submit_ring(w, zxnpu_wlan_fw_ring, msg, chunk, true, false))
 			goto out;
 		done += chunk;
 		if (!(done % (64 * ZXNPU_MCU_CHUNK)))
@@ -1929,7 +1986,7 @@ static int zxnpu_mcu_scatter(struct zxnpu_wlan *w, const u8 *data, u32 len,
 		/* FW_SCATTER: raw payload, no MCU header (see
 		 * zxnpu_mcu_txd_header) */
 		memcpy(msg, data + done, chunk);
-		if (zxnpu_mcu_submit_ring(w, ZXNPU_FWDL_RING_NR, msg, chunk, commit, false))
+		if (zxnpu_mcu_submit_ring(w, zxnpu_wlan_fw_ring, msg, chunk, commit, false))
 			return -EIO;
 		done += chunk;
 		if (!commit)
@@ -1980,14 +2037,12 @@ static int zxnpu_fw_send(struct zxnpu_wlan *w, const struct firmware *fw,
 	zxnpu_wlan_append(w, "  fw-start option=%08x override=%08x\n",
 			  option, override);
 	{
-		u8 msg[24 + 8];
+		u8 msg[ZXNPU_MCU_TXD_LEN + 8];
 
 		memset(msg, 0, sizeof(msg));
-		put_unaligned_le16(8, msg + 0);
-		msg[2] = 0x02;
-		msg[4] = ZXNPU_MCU_CMD_PATCH;
-		put_unaligned_le32(option, msg + 24);
-		put_unaligned_le32(override, msg + 28);
+		zxnpu_mcu_txd_header(msg, 8, 0x02, 4);
+		put_unaligned_le32(option, msg + ZXNPU_MCU_TXD_LEN);
+		put_unaligned_le32(override, msg + ZXNPU_MCU_TXD_LEN + 4);
 		return zxnpu_mcu_submit(w, msg, sizeof(msg), commit, true);
 	}
 }
@@ -2589,6 +2644,8 @@ done_ctl:
 				  " (dry run)");
 done_bss:
 		zxnpu_wlan_append(w, "\n");
+	} else if (!strncmp(cmd, "sync", 4)) {
+		zxnpu_wlan_ring_sync(w, zxnpu_wlan_commit);
 	} else if (!strncmp(cmd, "driver-own", 10)) {
 		zxnpu_wlan_driver_own(w, zxnpu_wlan_commit);
 	} else if (!strncmp(cmd, "wfsys-reset", 11)) {
