@@ -1389,3 +1389,6 @@ A2 用我们已证可写的 0xd4640..0xd4694 组，逐个尝试给 qid16 单独�
 A3 若仍不 fetch：用 iATU/PCIe 侧排查 qid16 描述符地址（4e042000）与
    其它环（4e040000）的页对齐/边界差异
 **验收**：qid16 的 didx 前进 ≥1（且从 SRAM 侧可见数据落地为佳）
+   （A3 结果）GLO_CFG bit9（MT_WFDMA0_GLO_CFG_FW_DWLD_BYPASS_DMASHDL，
+   mt792x 定义）单独置位后 qid16 仍不 fetch（cidx=0x11/didx=0），
+   readback 1030ba57 证明位已粘。→ 绕过位不是唯一条件。
