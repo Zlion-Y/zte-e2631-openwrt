@@ -1170,22 +1170,29 @@ out:
  * {option, override_addr}. load_fw_v1 sets bit0 of option when a region
  * carried the override flag (feature_set 0x20) and bit2 for band 1.
  */
+static u16 zxnpu_wlan_andes_seq;
+
 static void zxnpu_wlan_fw_start(struct zxnpu_wlan *w, const char *args, bool commit)
 {
-	u8 msg[ZXNPU_MCU_TXD_LEN + 8];
+	u8 msg[32 + 8];
 	unsigned long option = 0, override = 0;
 
 	if (sscanf(args, "%lx %lx", &option, &override) < 1) {
 		zxnpu_wlan_append(w, "usage: fw-start <option-hex> [override-hex]\n");
 		return;
 	}
-	memset(msg, 0, sizeof(msg));
-	zxnpu_mcu_txd_header(msg, 8, 0x02, 4);
-	put_unaligned_le32(option, msg + ZXNPU_MCU_TXD_LEN);
-	put_unaligned_le32(override, msg + ZXNPU_MCU_TXD_LEN + 4);
+	/* Andes FwStartReq: 32-byte header, type 2, cmd 0x17. */
+	put_unaligned_le16(8, msg + 0);
+	msg[2] = 2;
+	msg[4] = 0x17;
+	put_unaligned_le16(++zxnpu_wlan_andes_seq, msg + 6);
+	put_unaligned_le16(0x8000u, msg + 20);
+	msg[23] = 3;
+	put_unaligned_le32(option, msg + 32);
+	put_unaligned_le32(override, msg + 32 + 4);
 	zxnpu_wlan_append(w, "fw-start option=%08lx override=%08lx\n",
 			  option, override);
-	zxnpu_mcu_submit(w, msg, ZXNPU_MCU_TXD_LEN + 8, commit, true);
+	zxnpu_mcu_submit(w, msg, sizeof(msg), commit, true);
 }
 
 /*
@@ -1273,7 +1280,6 @@ static void zxnpu_wlan_fw_info(struct zxnpu_wlan *w, const char *args)
 }
 
 /* mcu-cmd <type> <cmd> <hex payload>: raw diagnostic command. */
-static u16 zxnpu_wlan_andes_seq;
 static void zxnpu_wlan_mcu_cmd(struct zxnpu_wlan *w, const char *args, bool commit)
 {
 	u8 msg[24 + 128];
@@ -2055,7 +2061,7 @@ static int zxnpu_fw_send(struct zxnpu_wlan *w, const struct firmware *fw,
 	zxnpu_wlan_append(w, "  fw-start option=%08x override=%08x\n",
 			  option, override);
 	{
-		u8 msg[ZXNPU_MCU_TXD_LEN + 8];
+		u8 msg[32 + 8];
 
 		memset(msg, 0, sizeof(msg));
 		zxnpu_mcu_txd_header(msg, 8, 0x02, 4);

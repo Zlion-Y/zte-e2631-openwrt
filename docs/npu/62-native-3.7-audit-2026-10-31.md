@@ -1243,3 +1243,29 @@ len@0、type@2、cmd@4、seq@6（自增）、cid@8、port@20=0x8000
 36B item payload 构建——35B 头？），拿到 vendor 线格式的**逐字节**
 模板再对照；同时试 WM 下载后跟 DecompressStart(type 0x30)+FwStart
 的 vendor 完整顺序。
+
+## 53. SRAM 回读鉴别 + vendor 环地面真值（3.39，2026-11-01）
+
+**SRAM 回读**：WM region 目标（0x0220a800 / 0x00414800）读回全零——
+**3446 块 WM 数据从未落入 SRAM**，loader 消费了描述符但丢弃了载荷
+（AddressLen 未被解析）。patch 目标 0x04000000 也是 loader 虚拟地址
+（真实 MCU SYSRAM=0x00400000，reg_map 直连 bar0+0x80000，那里有数据
+但是 patch 运行后的工作区，非原始载荷）。
+
+**vendor 环地面真值**（原厂盒 WM 环 4a6e0000）：
+- 16B 描述符、mt76 格式（buf0/ctrl@+4/buf1/info）——与我们一致
+- 消费项 ctrl=0xc0440000/0xc04c0000（DMA_DONE|LAST_SEC0|len 68/76）
+  —— **68/76 字节消息 = connac2 64B 头 + 4/12 payload，即我们一直在
+  发的格式**（不是 32B Andes！）
+- buf0=0x471cc620 指向 AndesCmdMsg 池（链表），36B item bookkeeping
+  与 DMA 环分离——vendor 的 wire 消息在池内另一处（下轮映射）
+
+**已实现（3.39）**：Andes 32B 头（mcu-cmd/addrlen/fw-start 全套）——
+格式存在但 AddressLen 仍未被 loader 解析（SRAM 全零实证）。
+**Andes 32B 与 connac2 64B 的取舍**：vendor 消息 68/76B = connac2
+尺寸——mt76 的 connac2 头就是对的；Andes 32B 是 vendor MtCmd* 家族
+的另一条路径（两者并存）。
+
+**下轮**：① 映射 vendor 36B item → 真实 wire 消息位置 → 逐字节对照
+vendor 的 AddressLen wire 内容；② 用 vendor 的**逐字节** AddressLen
+重放（替换我们的 connac2/Andes 版本）；③ 数据落地后 FwStart 才有意义。
