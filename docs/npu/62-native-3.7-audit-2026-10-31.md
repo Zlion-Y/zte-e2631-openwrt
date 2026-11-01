@@ -1392,3 +1392,35 @@ A3 若仍不 fetch：用 iATU/PCIe 侧排查 qid16 描述符地址（4e042000）
    （A3 结果）GLO_CFG bit9（MT_WFDMA0_GLO_CFG_FW_DWLD_BYPASS_DMASHDL，
    mt792x 定义）单独置位后 qid16 仍不 fetch（cidx=0x11/didx=0），
    readback 1030ba57 证明位已粘。→ 绕过位不是唯一条件。
+
+## 58. qid16 攻坚：组合配置全负 + 反汇编重大转折（2026-11-01）
+
+**A1（GLO=1030bc55 含 bit10 + 原厂 DMASHDL 09b109a1/0010042e +
+prefetch FWDL=0x180）**：
+- DMASHDL 两个值**仍然写不进**（0x18026100/0x18026140 回读 0）——
+  该块在 host 侧不可写（疑 MCU 专属）
+- GLO 置位成功（1030bc55→回读 1030bc57）
+- **qid16 依旧 didx=0**（cidx=0x11 提交）
+
+**T1（FWDL prefetch=0 + GLO bit9|bit10 = 1030be55）**：qid16 仍不 fetch。
+→ qid16 对该 SoC 的 host 侧写入路径**不可用**；原厂环里那 0x2e 很可能是
+开机阶段 ROM 自己的活动，不是驱动写入。
+
+**转折（反汇编）**：`load_patch_v1`(0x1d5c0c) 与 `load_fw_v1`(0x1d5a48)
+的调用清单里**没有任何 scatter/数据发送调用**——只有
+PatchSemGet / AddressLen / PatchFinish / FwDecompressStart / FwStart。
+即 **vendor 驱动并不通过 MCU DMA 环发送固件数据**！数据必然走另一条
+路径（直接写 MCU SRAM 的 hw_io_write32 循环，或某个 mem-write 助手）。
+
+**已实现的兼容尝试（3.40，构建中）**：scatter 改为 Andes 32B 头 +
+type=0xEE/cmd=0x10（GetRealPortQueueID 里 0xEE 被重定向到下载队列）。
+手工验证：type=0xEE 帧在 WM 环上被消费（didx 0→4），但 fw-state 不变——
+与"数据未落地"一致。
+
+**下轮任务拆解（vendor 数据通路）**：
+B1 反汇编搜 load_fw_v1 的数据拷贝循环（os_alloc_mem 分配后的写入/发送）
+B2 搜 hw_io_write32 密集循环（连续地址递增写 = SRAM 直写）
+B3 找到后在我们驱动里实现"直写 MCU SYSRAM"路径，用可回读窗口验证
+（先解决可靠回读：找 ROM 的 dump 命令或 L1 正确映射）
+**验收**：写入已知 pattern 后能回读到同一 pattern（数据落地证明），
+再执行 FwStart，观察 fw-state → 7

@@ -2001,16 +2001,28 @@ static int zxnpu_mcu_addrlen(struct zxnpu_wlan *w, u32 addr, u32 len,
 static int zxnpu_mcu_scatter(struct zxnpu_wlan *w, const u8 *data, u32 len,
 			     bool commit)
 {
-	u8 msg[ZXNPU_MCU_CHUNK];
+	/* Vendor FwScatter framing: an Andes 32-byte header with type 0xEE
+	 * (the value GetRealPortQueueID redirects to the firmware-download
+	 * queue) and cmd 0x10, payload at +32. mt76 sends scatter raw, which
+	 * only works when the data ring is a dedicated DMA queue; on this SoC
+	 * data and commands share the WM ring, so the header is what tells
+	 * the loader "this is firmware data, not a command". */
+	u8 msg[32 + ZXNPU_MCU_CHUNK];
 	u32 done = 0;
 
 	while (done < len) {
 		u32 chunk = min_t(u32, ZXNPU_MCU_CHUNK, len - done);
 
-		/* FW_SCATTER: raw payload, no MCU header (see
-		 * zxnpu_mcu_txd_header) */
-		memcpy(msg, data + done, chunk);
-		if (zxnpu_mcu_submit_ring(w, zxnpu_wlan_fw_ring, msg, chunk, commit, false))
+		memset(msg, 0, sizeof(msg));
+		put_unaligned_le16(chunk, msg + 0);
+		msg[2] = 0xEE;
+		msg[4] = 0x10;
+		put_unaligned_le16(++zxnpu_wlan_andes_seq, msg + 6);
+		put_unaligned_le16(0x8000u, msg + 20);
+		msg[23] = 3;
+		memcpy(msg + 32, data + done, chunk);
+		if (zxnpu_mcu_submit_ring(w, zxnpu_wlan_fw_ring, msg, 32 + chunk,
+					  commit, false))
 			return -EIO;
 		done += chunk;
 		if (!commit)
