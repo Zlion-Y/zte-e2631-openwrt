@@ -1218,3 +1218,28 @@ vendor 客户端不 disarm 的原因仍在其 BH 发送路径的细节。
 没有的命令；③ 对照 vendor 盒 0xd41f0/0xd41f4 中断语义。
    （补）MtCmdFwDecompressStart = Andes type **0x30** / cmd 0x17，
    payload 4B（来自 fw 头字段）——全新命令类型，未在 mt76 出现。
+
+## 52. Andes 全头验证（3.38，2026-11-01）
+
+**mcu-cmd 升级为完整 Andes 头**（AndesInitCmdMsg 逐字段）：
+len@0、type@2、cmd@4、seq@6（自增）、cid@8、port@20=0x8000
+（GetRealPortQueueID 非 0xEE 返回值）、wait@23=3。
+
+**实测**：patch 20/20 + 尾序列 3 条（FwStart/DecompressStart/FwStart）
+全部消费（23/23 排空）；WM 3446 块提交后 Andes FwStart 也提交
+（cidx=3470 计数吻合）——但 **fw-state 仍 1，无事件，状态不变**。
+
+**结论**：START 命令被消费但不生效——问题不在投递，在语义/上下文。
+候选（按证据强度）：
+1. loader 等的 START 带 decompress 上下文（vendor 在 DecompressStart
+   之后 AddressLen 之后才 FwStart——顺序敏感，我们单一 WM region 流
+   缺中间步骤）
+2. 需要先完成 patch 的 FwStart 生效（patch 真正运行）才能接受 WM 的
+   start——我们无法确认 patch 是否运行（无应答可读）
+3. 应答路径（rxq0）从未工作——ROM/loader 可能卡在等我们消费它早前
+   的应答（但我们从未见过任何应答到达）
+
+**下轮首选**：解 AndesBhHandler→线上头的最后一段（pci_kick 前的
+36B item payload 构建——35B 头？），拿到 vendor 线格式的**逐字节**
+模板再对照；同时试 WM 下载后跟 DecompressStart(type 0x30)+FwStart
+的 vendor 完整顺序。

@@ -1273,6 +1273,7 @@ static void zxnpu_wlan_fw_info(struct zxnpu_wlan *w, const char *args)
 }
 
 /* mcu-cmd <type> <cmd> <hex payload>: raw diagnostic command. */
+static u16 zxnpu_wlan_andes_seq;
 static void zxnpu_wlan_mcu_cmd(struct zxnpu_wlan *w, const char *args, bool commit)
 {
 	u8 msg[24 + 128];
@@ -1308,11 +1309,21 @@ static void zxnpu_wlan_mcu_cmd(struct zxnpu_wlan *w, const char *args, bool comm
 		}
 	}
 	memset(msg, 0, sizeof(msg));
+	/* The Andes wire header is the head of the vendor cmd_msg
+	 * (AndesInitCmdMsg): len, type, cmd, an incrementing seq, the cid
+	 * echo, the GetRealPortQueueID port (0x8000 for everything but
+	 * scatter) and the wait-response flag. The old 4-field header was
+	 * rejected by the patch loader parser. */
 	put_unaligned_le16(n, msg + 0);
 	msg[2] = type;
 	msg[4] = cmd;
+	put_unaligned_le16(++zxnpu_wlan_andes_seq, msg + 6);
+	put_unaligned_le16(cmd, msg + 8);
+	put_unaligned_le16(0x8000u, msg + 20);
+	msg[23] = 3;				/* wait response */
 	memcpy(msg + 24, payload, n);
-	zxnpu_wlan_append(w, "mcu-cmd type=%u cmd=%u payload=%d\n", type, cmd, n);
+	zxnpu_wlan_append(w, "mcu-cmd type=%u cmd=%u payload=%d seq=%u\n",
+			  type, cmd, n, zxnpu_wlan_andes_seq);
 	zxnpu_mcu_submit(w, msg, 24 + n, commit, true);
 }
 
