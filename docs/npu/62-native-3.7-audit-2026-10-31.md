@@ -1161,3 +1161,32 @@ qid17 被证明命令+数据全收：
   ① 全序列 patch→sync→WM→sync→WA→sync→双 start 实测
   ② 试写 0x74030108 门铃
   ③ vendor 反汇编 AndesCmdMsgWaitResponse / load_fw_v1 的等待语义
+
+## 50. 取述真相与 loader 状态机边界（3.37，2026-11-01）
+
+**纠正**：此前"WA 900 块 flowed"是误读——cidx 推进只是软件计数，
+didx=0 表示引擎从未取述。**真正被消费过的只有两段**：patch 20 条
+（ROM）+ WM 3446 块（patch 启动后的 loader）。WM 之后 MCU 客户端硬关闭。
+
+**实测排除（全部 pending=1 干净投递）**：
+- 64B connac2 start（cid 0x02）✗
+- Andes 24B start（type 0x02/cmd 0x17，vendor 格式）✗
+- sync 后 AddressLen 探针（wa.bin 898 块）✗ —— loader 不在数据等待态
+
+**RX bit30 语义已破译并回退**（3.36 错改 3.37 回退）：空槽=0x46a40000
+（bit30=1 host 持有），投递后=0x06a40000（引擎清位）——vendor 活环实证。
+
+**时间数据**：fw-dl wm 165 秒全量完成（3446 精确），可重复。
+
+**当前模型**：PATCH_FINISH → patch 代码运行 → 它自己的 loader 收 WM
+数据（其 DMA client 在 FINISH 时重新初始化 = patch→WM 能续的原因）；
+WM 收完 loader 解除武装。START 无法再经环到达——patch 的 START 触发
+机制不是环命令（或需要 vendor 驱动里某个我们没做的重挂步骤）。
+
+**下轮方向（按优先）**：
+1. vendor 反汇编 AndesCmdMsgSend / load_fw_v1 的收尾序列——找 START
+   的真实投递机制（可能 type 0x02/cmd 0x17 走 PCIE doorbell 0x74030108
+   或另一队列）
+2. 对照 vendor 盒的 INT_MCU_CMD_SOURCE(0xd41f0)/MCU_HOST_INT_ENA
+   (0xd41f4) 语义
+3. 若 START 走门铃：写 0x74030108 触发
