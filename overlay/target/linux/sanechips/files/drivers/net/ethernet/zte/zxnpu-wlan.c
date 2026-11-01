@@ -1725,6 +1725,13 @@ static void zxnpu_wlan_rx_init(struct zxnpu_wlan *w, bool commit)
 
 		memset(d, 0, ZXNPU_MCU_DESC_SIZE);
 		put_unaligned_le32(bd, d + 0);
+		/* bit30 on an RX descriptor is the FREE/owned-by-host flag:
+		 * the vendor ring keeps it set while the slot is empty and
+		 * the DMA clears it when it delivers the event (live vendor
+		 * ring: filled slot ctrl=0x06a40000, empty=0x46a40000). mt76
+		 * omits it only because its WED path manages ownership
+		 * differently - here it is required or the engine skips
+		 * every slot as already-consumed. */
 		put_unaligned_le32(0x40000000u | (ZXNPU_MCU_RX_BUF_SIZE << 16), d + 4);
 
 		memset(buf, 0, ZXNPU_MCU_RXD_SIZE);

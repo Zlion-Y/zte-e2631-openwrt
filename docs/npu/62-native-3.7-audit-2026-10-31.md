@@ -1139,3 +1139,25 @@ qid17 被证明命令+数据全收：
 3. 目标不变：fw-state=7
 
 **已排除**：计数器失步（sync 已修）、txd 头格式、cnt/分区、PCI 路径。
+
+## 49. WM 全量下载可靠化 + 事件环机制解读（3.36-3.37，2026-11-01）
+
+**WM 下载可靠完成**：165 秒、cidx=3446 精确匹配（3436 chunk + 9 addrlen
++1），此前"停在 270"全是脚本读数时机假象。传输层完全可靠。
+
+**RX 描述符 bit30 语义破译**（原厂盒活体内存对照）：
+- 空槽 ctrl=0x46a40000（bit30=1=host 持有），已投递事件 ctrl=0x06a40000
+  （引擎清 bit30）——**bit30 是 RX 环所有权标志**，不是 mt76 说的"无需"。
+  3.36 误删导致事件全丢，3.37 已回退。
+- 原厂事件环 5 个全武装：rxq0/1 cnt=512、rxq2=1024、rxq3=512、rxq4=1536，
+  且都有 pending（didx=cidx+1，host 消费滞后）——ROM/固件应答确实走环。
+
+**未解**：MCU 客户端在每阶段下载完成后 disarm，下一阶段能否 re-arm 不定：
+- patch 清空后 WM addrlen 能取（重新拉起）✓
+- WM 清空后 WA/START 都不取 ✗（sync 归零 + pending=1 也不行）
+- 本窗口无 patch 直接下 WM 也全量消费——patch 非前置必需
+- 假设：patch 的 loader 在 region 间重新 arm、最后 region 后等待的触发
+  不是环命令（doorbell 0x74030108？或 WA 先于 start？）——下轮：
+  ① 全序列 patch→sync→WM→sync→WA→sync→双 start 实测
+  ② 试写 0x74030108 门铃
+  ③ vendor 反汇编 AndesCmdMsgWaitResponse / load_fw_v1 的等待语义

@@ -49,11 +49,13 @@ echo rx-init > $P; grep 'reg ' $S | head -1"
 say "patch download (fw_ring=1, scatter via qid17)"
 $SSH "echo 'mcu-dl p.bin' > $P
 grep -E 'mcu-dl:|didx advanced' $S | tail -2
-grep -E 'didx still' $S | tail -1"
+grep -E 'didx still' $S | tail -1
+echo mcu-recv > $P; grep -E 'cidx=|slot' $S | head -6"
 
 say "WM firmware regions + start"
 $SSH "echo 'fw-dl wm' > $P
-grep -E 'fw-start|didx still' $S | tail -2"
+grep -E 'fw-start|didx still' $S | tail -2
+echo mcu-recv > $P; grep -E 'cidx=' $S | head -3"
 
 say "WA firmware regions + start"
 $SSH "echo 'fw-dl wa' > $P
