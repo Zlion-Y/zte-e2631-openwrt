@@ -5193,29 +5193,37 @@ static ssize_t zxnpu_wlan_ctl_write(struct file *file, const char __user *ubuf,
 			ring = 0;
 		zxnpu_wlan_mcu_recv(w, ring);
 	} else if (!strncmp(cmd, "evt-dump ", 9)) {
-		/* "evt-dump <ring> <slot> <len>": hex-dump an event buffer
-		 * WITHOUT consuming it. The heartbeat (eid=00, ~220 B) carries
-		 * the firmware's RF state; the scan window only ever showed
-		 * 68 bytes of it. */
-		int ring = 0, slot = 0, len = 0, j;
+		/* "evt-dump <ring> <slot> <len> [count]": hex-dump event
+		 * buffers WITHOUT consuming them. The heartbeat (eid=00)
+		 * carries whole received frames (neighbor beacons!) at +56;
+		 * the scan window only ever showed 68 bytes. count exists
+		 * because each ctl write RESETS the status buffer - one
+		 * dump per write kept losing all but the last slot. */
+		int ring = 0, slot = 0, len = 0, cnt = 1, k, j;
 		void *bufmem;
 		u8 *buf;
 
-		if (sscanf(cmd + 9, "%d %d %d", &ring, &slot, &len) == 3 &&
-		    ring >= 0 && ring <= 1 && len > 0 && len <= 512) {
+		if (sscanf(cmd + 9, "%d %d %d %d", &ring, &slot, &len, &cnt) >= 3 &&
+		    ring >= 0 && ring <= 1 && len > 0 && len <= 512 &&
+		    cnt > 0 && cnt <= 16) {
 			bufmem = ring ? w->wa_buf : w->rx_buf;
-			buf = (u8 *)bufmem + slot * ZXNPU_MCU_RX_BUF_SIZE;
-			zxnpu_wlan_append(w, "evt-dump ring%d slot%d len=%d:\n",
-					  ring, slot, len);
-			for (j = 0; j < len; j++) {
-				zxnpu_wlan_append(w, " %02x", buf[j]);
-				if ((j & 15) == 15)
-					zxnpu_wlan_append(w, "\n");
+			for (k = 0; k < cnt; k++) {
+				buf = (u8 *)bufmem +
+				      ((slot + k) % ZXNPU_MCU_RX_DEPTH) *
+				      ZXNPU_MCU_RX_BUF_SIZE;
+				zxnpu_wlan_append(w, "evt-dump ring%d slot%d len=%d:\n",
+						  ring, (slot + k) % ZXNPU_MCU_RX_DEPTH,
+						  len);
+				for (j = 0; j < len; j++) {
+					zxnpu_wlan_append(w, " %02x", buf[j]);
+					if ((j & 15) == 15)
+						zxnpu_wlan_append(w, "\n");
+				}
+				zxnpu_wlan_append(w, "\n");
 			}
-			zxnpu_wlan_append(w, "\n");
 		} else {
 			zxnpu_wlan_append(w,
-					  "usage: evt-dump <ring 0|1> <slot> <1..512>\n");
+					  "usage: evt-dump <ring 0|1> <slot> <1..512> [1..16]\n");
 		}
 	} else if (!strncmp(cmd, "data-init", 9)) {
 		zxnpu_wlan_data_init(w, zxnpu_wlan_commit);
