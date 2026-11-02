@@ -3470,3 +3470,18 @@ ret=0。qid20 `cidx=didx=16`（命令被 DMA 取走）但事件环零应答，�
   芯片 TX 没有硬件级故障，native 驱动与 mt76 之间存在尚未定位的初始化缺口。
   下一步两条路：(a) 逐项 diff mt76 初始化（中断/环尺寸/arm 时序/mac_init），
   (b) mt7915e 对照上机直接暴露缺口。
+
+## 94. R102：环深度对齐 mt76 仍不救 TX；启动 mt7915e 对照（3.106/3.107-mt76，2026-11-03）
+
+- 环深度对齐（事件环/txfree 32/64→**512**，= mt76 MT7915_RX_MCU_RING_SIZE）：
+  512 深 ring 生效（didx 推进到 43），但 beacon 上传后 liveness 仍 -110，
+  TXS/free-notify 依旧零。**环深度不是 TX 挂因**（但 512 保留——正确的对齐值）。
+- 新行为观察：beacon 上传后**邻居帧事件停止**（512 深排空六轮 0 个 eid=00）
+  ——固件在 BSS 激活后切到 AP RX 过滤，不再转发邻居 beacon。合理且无害。
+- **战略行动**：apply.sh 增加 `E2631_MT76=1` 开关——恢复 v1.x 的开源无线栈
+  （kmod-mt7915e/kmod-mac80211/kmod-cfg80211/wpad/固件包 + 11-mt76-caldata +
+  e2631-wifi-eeprom/load/boot 启动序列 + wireless uci，全部从 main 分支
+  overlay 恢复）。这是**对照实验**：mt76 在同一硬件、同一 WIFI_RAM_CODE 上
+  于 v1.3-v1.8.0 实测过 TX（200M/HE80），若它在 native 内核上同样工作，
+  二分定位 native TX 缺口；顺带得到可用 WiFi 基线。native zxnpu-wlan 默认
+  parked（enable=0）不冲突。构建 3.107-mt76（mac80211 全新编译，长）。
