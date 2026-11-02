@@ -2765,3 +2765,71 @@ WTBL 条目（`WTBL_UPDATE` 0x32 在 3.80 已验证有应答，但还没有真�
 TXD 构帧（`mt76_connac2_mac_write_txwi` 语义，字段表已从 `mt76_connac2_mac.h`
 拿到：TXD0 包长/qidx/pkt_fmt、TXD1 long_format/hdr_format/wlan_idx、TXD2 固定速率
 与功率偏移、TXD3 seq/BA）→ RX 上报解析（`eid=00` 那批事件）→ wiphy 注册。
+
+## 85. TXD 落地：第一帧进 qid18 并被引擎处理完（3.89 → 3.90）
+
+3.88 之后 band0 已 up 但 TX 环是空的，缺的只有 TXD。它不需要猜：
+`mt76_connac2_mac_write_txwi()` + `mt76_connac2_mac_write_txwi_80211()`
+就是对 `mt76_connac2_mac.h` 的纯位域打包。**32 字节 / 8 dword**：
+
+| dword | 字段 |
+|---|---|
+| w0 | `TX_BYTES(len+32)` \| `PKT_FMT(MT_TX_TYPE_CT=0)` \| `Q_IDX(MT_LMAC_AC00=0)` |
+| w1 | `LONG_FORMAT` \| `HDR_FORMAT(802_11=2)` \| `HDR_INFO(hdrlen/2)` \| `TID` \| `WLAN_IDX` \| `OWN_MAC` |
+| w2 | `FRAME_TYPE` \| `SUB_TYPE` \| `MULTICAST` \| `FIX_RATE` |
+| w3 | `REM_TX_COUNT(15)` \| `BA_DISABLE` |
+| w5 | `PID`（0 低于 `MT_PACKET_ID_FIRST=3` ⇒ 不要主机 TX status） |
+| w6 | `FIXED_BW` \| `TX_RATE`（2 GHz 的 `mt76_rates[0]` = CCK 1 Mbps = 0） |
+| w7 | `SPE_IDX`（双链固定速率分支取 24） |
+
+**不需要 WTBL 这一步**：`mt7915_mac_add_interface()` 从不对自己的 vif 发
+`WTBL_UPDATE` —— BSS 的 wcid 是 `BSS_INFO_BASIC` 里的 `bmc_wcid` 建出来的
+（3.87 已按 wcid 0 发过）。WTBL 表项只有站点关联（`STA_REC_UPDATE` + `WTBL_SET`）
+时才出现。
+
+### 85.1 两个 bug，都在「解读射频行为」之前被抓到
+
+1. **数据 RX 环写错寄存器**：`ZXNPU_DATA_RX_REG` 原来是
+   `RX_RING0 + 0x10*1 = 0x18024510`，那是 **WA 事件环**，不是数据环。RX 环块与
+   MCU 事件环共用，mt76 的映射是 0=MCU WM、1=MCU WA、2=band0 data、3=band1 data
+   ⇒ 数据环必须是 qid2（`0x18024520`）。原写法会让 `data-init` 把固件应答命令的
+   环直接换掉。
+2. **组播判定写反**：`is_multicast_ether_addr()` 是 `addr1[0] & 0x01`；3.89 写成
+   「六个字节全 0」，没有任何地址满足，于是 `MULTICAST`/`FIX_RATE`/`BA_DISABLE`/
+   速率字/`spe_idx` 全部没进 TXD。
+
+第 2 个是靠「手算期望表 vs 实机 dump」的 dword 对账发现的，不是靠刷机试：
+
+| dword | 手算期望 | 3.89 实机 | 3.90 实机 |
+|---|---|---|---|
+| w0 | `00000040` | `00000040` | `00000040` |
+| w1 | `80026000` | `80026000` | `80026000` |
+| w2 | `80000420` | `00000020` ❌ | `80000420` ✅ |
+| w3 | `10007800` | `00007800` ❌ | `10007800` ✅ |
+| w6 | `00000004` | `00000000` ❌ | `00000004` ✅ |
+| w7 | `0000c000` | `00000000` ❌ | `0000c000` ✅ |
+
+### 85.2 实机结果（3.90，band0 ch1，广播数据帧 64 B）
+
+```
+data-init: rx 18024520 base=4e048000 cnt=64 cidx=64 | tx 18024420 base=4e047000 cnt=64
+tx-bcast:  queued slot 0 len=64 kick cidx=1 didx=0
+           didx 0 -> 1 after 5 ms          (引擎取走了描述符)
+           desc slot 0 ctrl=c0400000 dma_done=1   (引擎处理完 buffer)
+```
+
+**`dma_done` 是主机侧能拿到的第一手「帧真的走了」证据**；`didx` 前进只证明
+描述符被读。没有 TX-done 事件，且本来也不该有：那要求 `pid >= 3`。
+
+### 85.3 顺带确认的一件事：eid=00 那批事件是什么
+
+调谐后固件持续上报 `eid=00`、载荷 ~220 B 的事件，`+14` 处是一个递增计数器
+（`0120/0126/012d/…`），内容随每次上报变化但在同一量级 —— 是固件的周期心跳/
+状态上报，不是命令应答，也不需要回应。`mcu-recv` 一次能刷出三十多帧，这就是
+3.88 那个 16 KiB 缓冲区被写满的来源。
+
+### 85.4 下一步
+
+TX status（`pid >= MT_PACKET_ID_FIRST` + `MT_TXD5_TX_STATUS_HOST`，回收
+`MT_DMA_CTL_DMA_DONE` 的环）→ RX 数据环解析（qid2，含 802.11 头 + RX status）
+→ 站点关联路径（`STA_REC_UPDATE` + `WTBL_SET`，才需要 WTBL）→ wiphy 注册。
