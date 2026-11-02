@@ -2896,3 +2896,62 @@ qid2: 一个包, type=6(TX-free) len=68
 - 运行脚本里 `grep -v '^  slot '` 把刚加上的 RX 解码行自己过滤掉了，
   差点误判成"没收到包"。
 - `echo 'cmd' > $P > /dev/null` 会覆盖前一个重定向，命令根本没写进 proc。
+
+## 87. 停止试错：原厂 mt7916.ko 未 strip，符号级反汇编开工（3.93 → 3.94）
+
+前几轮在 RX 环投递上靠改寄存器试值，这是错的工作方式。本板原厂驱动
+`mt7916.ko`（5.5 MB）**没有 strip**，25345 个符号全在，这才是权威参照。
+
+### 87.1 工具（已进仓库 `native/tools/re/`）
+
+宿主 binutils 是 x86 的（`objdump: can't use supplied machine arm`、
+`objcopy: unable to recognise the format`），所以自己解析 ELF32 段表与 `.symtab`，
+只依赖 capstone：
+
+```
+python3 tools/re/armdis.py mt7916.ko <symbol> [n]    # 按符号反汇编
+python3 tools/re/armdis.py mt7916.ko --at 0x1eb784   # 地址属于哪个函数
+python3 tools/re/armdis.py mt7916.ko --grep 0x4400   # 谁用了这个立即数
+python3 tools/re/armdis.py mt7916.ko --callers pci_free_rx_buf
+python3 tools/re/findval.py mt7916.ko 0x18024500     # 常量在哪个段
+```
+
+关键是**重定位注解**：可重定位目标里 `bl` 的目标是空的，不加注解全是"跳到自身"。
+注解后代码直接可读：
+
+```
+bl   -> hif_io_write32
+movw r1, #0   -> pci_kick_out_data_tx
+```
+
+`--callers` 必须同时解析 `.data` 里的函数指针，因为 SDK 所有 HAL 调用都走 ops 表，
+`.text` 里根本没有对应的 `bl`。
+
+### 87.2 读出来的事实
+
+| 位置 | 事实 |
+|---|---|
+| `pci_kick_out_data_tx` | `hif_io_write32(hc, ring->cpu_idx_reg[+0x24], ring->sw_idx[+0x28])` |
+| `mt_asic_init_txrx_ring` 第一循环（TX/MCU 环） | `base+8 ← 0`、`base+4 ← cnt` |
+| `mt_asic_init_txrx_ring` **第二循环（RX 环）** | `write(base, buf_dma)` → `base+8 ← depth-1` → `base+4 ← depth` |
+| `pci_free_rx_buf` | 只把软件索引 `+0x22` 加 1、回绕于 `+0x24` 的 depth；**不写任何寄存器** |
+| `hif_init_WFDMA` | `GLO_CFG(0x18024208)` 清 BIT27、置 BIT28\|BIT21；随后写 `0x18024640/0x18024680` 窗口表（值 0x180+i*0x40 与 4+i*0x3c） |
+| `pci_core_ops_register` | hif_ops：`+0x08 pci_free_rx_buf`、`+0x0c pci_init_txrx_ring_mem`、`+0x10 pci_reset_txrx_ring_mem`、`+0x18 pci_get_tx_buf`、`+0x34 pci_dma_reset`，以及 cmd/fwdl/data_tx 三个 kick |
+
+### 87.3 实机对照（负结果，但仍然有价值）
+
+| qid2 武装值 | 投递结果 |
+|---|---|
+| 64（3.90–3.92，错） | 恰好 1 个（TX-free），之后 `didx` 不动 |
+| 0（3.93，读错了第一循环） | 0 个 |
+| **63 = depth-1（3.94，原厂 RX 值）** | **0 个** |
+
+所以**武装值不是全部真相**。原厂 RX 武装还写了环基址，而描述符布局来自
+`pci_init_txrx_ring_mem`，那个还没读。首要嫌疑是**描述符步长**：若是 8 字节而我们
+按 16 字节填，则只有第 0 项有效 —— 这正好解释"只投递一次"。
+
+### 87.4 下一轮，先读再写
+
+1. `pci_init_txrx_ring_mem` 的填充循环：步长、`ctrl` 字段编码、RXD 头是否预置；
+2. RX 侧的 publish 点（`pci_rx_data_done_func` 里 `[sb+0x1c]` 那类 ops 回调的真实目标）；
+3. 以上两条闭合后，才允许再刷机。
