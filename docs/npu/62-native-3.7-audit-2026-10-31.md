@@ -2256,3 +2256,276 @@ MCU 已在 RDY，但 host 侧还没有 MAC/PHY 初始化，也没有 netdev：
 下一步是照 mt7915_init_hardware 的顺序做 WF 复位后的 DMA 环（band0 RX/TX）、
 MCU 基础命令（query/NIC_CAPABILITY）、再把 wiphy 注册出来。固件下载这条路
 不再需要碰 framing 了。
+
+## 80. fw-state=7 之后命令无应答：应答环缺失（3.75 → 3.76）
+
+### 80.1 3.75 实测：帧被取走，事件没回来
+
+3.75 加了 `mcu-ext <cid> <ext_cid> [query|set|na] [hex]`（标准 connac2 TXD：
+cid=0xed、ext_cid、set_query、ext_cid_ack）。固件下载照旧成功，fw-state=7
+稳定，但三条扩展命令全部 2 s 超时：
+
+```
+mcu-ext cid=ed ext=13 q=1 len=4 seq=5: COMMIT
+  submit qid17 slot=20 len=68 ... cidx=20 didx=20
+  didx still 20 (stall 3)
+  wait_event seq=5: timeout (2000ms)
+
+随后读寄存器：qid17 cidx=25 didx=23   ← 帧被消费了
+              qid0  didx=20           ← 一个事件都没多
+```
+
+即 **DMA 把 5 帧都取走了（didx 20→23，另 2 帧随后也进），但没有任何事件**。
+`didx` 前进只证明 DMA 工作，不证明固件理解命令；判据只能是事件。
+
+对照：`fw-start`（cid=0x02，非扩展）在同一路径上有 seq 匹配的应答
+（3.74 的 evt[15]/evt[19]）。所以不是"TXD 格式不通"，是**扩展命令或应答环**。
+
+### 80.2 寄存器取证：qid1 从未初始化
+
+```
+0x18024500 (qid0) base=4e044000 cnt=0x20  cidx=0x34 didx=0x14   ← WM 事件环，已配
+0x18024510 (qid1) base=00000000 cnt=0x200 cidx=0     didx=0     ← 未配
+0x18024520 (qid2) base=00000000 ...                             ← 未配
+0x18024530 (qid3) base=00000000 ...                             ← 未配
+```
+
+`enum mt76_rxq_id { MT_RXQ_MAIN, MT_RXQ_MCU, MT_RXQ_MCU_WA, ... }`：MT7915 有
+**两个** MCU 事件环。而 `mt7915_mcu_send_message()`：
+
+```c
+if (cmd == MCU_CMD(FW_SCATTER))        qid = MT_MCUQ_FWDL;
+else if (test_bit(MT76_STATE_MCU_RUNNING, &dev->mphy.state))
+                                        qid = MT_MCUQ_WA;
+else                                    qid = MT_MCUQ_WM;
+```
+
+固件跑起来（MCU_RUNNING）之后，**所有命令都交给 WA**，应答自然从 WA 的事件环
+（MT_RXQ_MCU_WA）回。QID0 只覆盖 WM 的事件——这正好解释为什么 FW_START 有应答
+（那一步由 WM/ROM 处理）、之后的命令全静默（WA 有回复，但 qid1 的 base 是 0，
+无处可写）。
+
+### 80.3 vendor 侧旁证：Andes 头 +0 是 band，不是长度
+
+`MtCmdFwLog2Host`（run.ko 0x1c44d4）逐指令：
+
+```asm
+1c4650: movne r3, #0        ; type==0 (MCU_FW_LOG_WM) → 0
+1c4654: beq   1c46d4        ; type==1 (WA)            → r3=2
+1c4658: strh  r3, [sp,#24]  ; Andes +0 (u16) = 0 或 2
+1c4660: mvn   r2, #18       ; 0xffffffed
+1c4664: mov   r3, #19       ; 0x13
+1c4668: strb  r2, [sp,#26]  ; Andes +2 = 0xed  (MCU_CMD_EXT_CID)
+1c4670: strb  r3, [sp,#27]  ; Andes +3 = 0x13  (FW_LOG_2_HOST)
+```
+
+结论两条：
+
+1. **Andes 头 +2 = 0xed、+3 = 0x13**，即 vendor 把"扩展命令号"直接铺在
+   Andes 头里，与我们此前 `mcu-cmd` 的 `+2=type / +4=cmd` 布局不同（`+4` 是
+   flags）。这也是 3.75 之前 mcu-cmd 只对 patch 阶段那些简单命令有效的原因。
+2. **+0 的 u16 是目标核**（0 = WM，2 = WA），不是帧长——与 connac2 的
+   `s2d_index`（0 = H2N，2 = H2C）语义一致。
+
+### 80.4 3.76 改动
+
+| 改动 | 目的 |
+|---|---|
+| `rx-init [ring]` | ring 0 = 0x18024500 (WM)，ring 1 = 0x18024510 (WA)，depth 32 |
+| `mcu-recv [ring]` | 分别 dump 两个事件环 |
+| `zxnpu_wlan_mcu_scan_ring()` | 抽出单环扫描；`wait_event_st` 每 20 ms 扫 0 和 1 两个环 |
+| `mcu-ext-wa` | 同一扩展命令发 WA：`s2d_index = 2`（`__MCU_CMD_FIELD_WA`） |
+| probe | 新增 `wa_ring` / `wa_buf`（32 × 36 desc + 32 × 1700 B） |
+
+日志标签：ring0 保持 `evt[`，ring1 用 `evtwa[`，旧日志仍可 grep。
+
+### 80.5 验收
+
+- A：fw-state 仍为 7（下载路径不受影响）
+- B：`rx-init 1` 后 0x18024510 base 非 0、cnt=32
+- C：`mcu-ext ed 13 set`（WM）或 `mcu-ext-wa ed 13 set`（WA）至少一条拿到
+  seq 匹配的事件；`ext_eid` 一并打印
+
+若 C 仍失败，则下一个怀疑对象是"扩展命令要先用 basic cid 完成 host 侧初始化"
+（mt7915_init_hardware: dma_init → mcu_init → eeprom_init），而不是编码本身。
+
+## 81. 根因：RDY 之后命令要投 MCU_WA 的环（qid20），3.77 → 3.78
+
+### 81.1 3.77 证伪了"帧格式"这条线
+
+3.77 在同一次开机里把同一条扩展命令（`MCU_EXT_CMD_FW_LOG_2_HOST` = 0x13）
+用四种线格式发了一遍：
+
+| 变体 | 帧形态 |
+|---|---|
+| A | 仅 64B connac2 TXD |
+| B | 64B TXD + 32B Andes（band 0） |
+| C | 仅 32B Andes（band 0） |
+| D | 64B TXD + 32B Andes（band 2） |
+
+四种全部 `wait_event` 超时，命令环 didx 停在 23/24，`INT_SOURCE = 0`，
+两条事件环零事件。**帧格式不是原因**——同一批命令在 patch 与 FWDL 阶段用
+同样的编码是被应答过的。
+
+### 81.2 真因在 `mt7915_mcu_send_message()` 的投递路由
+
+mainline（openwrt/mt76 master）原文：
+
+```c
+static int
+mt7915_mcu_send_message(struct mt76_dev *mdev, struct sk_buff *skb,
+			int cmd, int *wait_seq)
+{
+	enum mt76_mcuq_id qid;
+
+	if (cmd == MCU_CMD(FW_SCATTER))
+		qid = MT_MCUQ_FWDL;
+	else if (test_bit(MT76_STATE_MCU_RUNNING, &dev->mphy.state))
+		qid = MT_MCUQ_WA;
+	else
+		qid = MT_MCUQ_WM;
+	...
+}
+```
+
+而 `mt7915_mcu_init_firmware()` 在 `mt7915_load_firmware()` 返回后**立刻**
+置位 `MT76_STATE_MCU_RUNNING`：
+
+```c
+	ret = mt7915_load_firmware(dev);
+	if (ret)
+		return ret;
+
+	set_bit(MT76_STATE_MCU_RUNNING, &dev->mphy.state);
+	ret = mt7915_mcu_fw_log_2_host(dev, MCU_FW_LOG_WM, 0);
+```
+
+`enum mt7915_txq_id`（mt7915/mt7915.h）：
+
+```c
+enum mt7915_txq_id {
+	MT7915_TXQ_FWDL = 16,
+	MT7915_TXQ_MCU_WM,	/* 17 */
+	MT7915_TXQ_BAND0,	/* 18 */
+	MT7915_TXQ_BAND1,	/* 19 */
+	MT7915_TXQ_MCU_WA,	/* 20 */
+};
+```
+
+即：**qid20 = 0x18024440 才是固件跑起来之后的命令环**，qid17 只是启动期
+（patch sem / AddrLen / FwStart）那一层的环。
+
+### 81.3 我们之前做了什么
+
+3.74c-3.77 一律把命令投到 `ZXNPU_MCU_RING_NR = 1`（qid17）。下载期这是**对的**
+（mt76 此时也走 MT_MCUQ_WM，所以 FwStart 拿到了 seq 匹配的应答）；固件起来
+之后**同一个环就静默了**——这恰好是"命令发给了不服务它的核"的正常表现，
+而不是丢帧。之前把 `didx` 排空当作"帧被吃掉但没人回"来推理，方向错了：
+排空只证明 WFDMA 把帧搬走了，不证明有核在处理。
+
+### 81.4 3.78 改动
+
+| 改动 | 说明 |
+|---|---|
+| `ZXNPU_TX_RING_FWDL/WM/WA_CMD` = 0/1/4 | 选择子就是 WFDMA 环号，= `enum mt7915_txq_id` |
+| `struct zxnpu_tx_ring` + `zxnpu_tx_ring_get()` | 把 ring0/1 的二元选择改成三选一，`queue_init` 与 `submit` 共用 |
+| `wac_ring / wac_bufs / wac_cidx / wac_ring_armed` | qid20 环：128 × 16B 描述符 + 128 × 4096B 载荷，probe 里分配 |
+| `mcu_ring` 模块参数 + `mcu-ring 0\|1\|4` 控制命令 | 一次开机 A/B 三个环，不必一版一刷 |
+| `dma-init` | 现在同时 arm qid16 / qid17 / qid20 |
+| `wfsys-reset` / `dma-init` | 一并复位 `wac_*` |
+
+同时修正了 `submit` 日志里的 qid 打印（原来硬编码 `ring ? 17 : 16`，环 4 会
+被误报成 17）。
+
+### 81.5 验收
+
+一次开机跑三条，命令固定为 `mcu-ext ed 13 na 0000`（FW_LOG_2_HOST，ctrl=0）：
+这是 `mt7915_mcu_init_firmware()` 在 RDY 之后发的**第一条**命令，最能代表
+"命令面是否活着"。
+
+- A：`mcu-ring 4` → qid20 应答（预期成立）
+- B：`mcu-ring 1` → qid17 静默（对照，复现 3.75-3.77 的现象）
+- C：`mcu-ring 0` → qid16 静默（对照）
+
+任一环拿到 `evtwa[` / `evt[` 且 seq 匹配，即证明命令面恢复，可以推进到
+`MCU_EXT_CMD(NIC_CAPABILITY)` 与 host 侧 band0 数据环。
+
+## 82. 3.79/3.80：RX 环 CPU_IDX 的 post 编码 —— 命令面真正打通
+
+### 82.1 3.78 留下的"只回一条"现象
+
+3.78 一次开机跑 A/B/C：qid20 拿到 `evtwa[0] eid=ed seq=05`（`ret=0`），
+qid17/qid16 静默。但同一条命令再发一次就超时，命令环还继续取走 3 帧后停摆。
+"第一条被应答、之后全哑"不像 MCU 死了，更像**事件环再也放不进新事件**。
+
+### 82.2 根因：RX 环 `CPU_IDX` 写成了自由递增
+
+我们自 3.46 起在消费事件后写：
+
+```c
+	zxnpu_cr_write(w, reg + 8, didx + ZXNPU_MCU_RX_DEPTH);   /* 33 on a 32-deep ring */
+```
+
+mainline 只写 `q->head`，而 `mt76_dma_rx_fill_buf()` 的循环上界是
+`q->queued < q->ndesc - 1`（永远留一个空位），所以填满后
+`head == (tail + ndesc - 1) % ndesc`：
+
+```c
+static void
+mt76_dma_kick_queue(struct mt76_dev *dev, struct mt76_queue *q)
+{
+	wmb();
+	if (mt76_queue_is_emi(q))
+		*q->emi_cpu_idx = cpu_to_le16(q->head);
+	else
+		Q_WRITE(q, cpu_idx, q->head);
+}
+```
+
+两者相差**正好一个环深**：引擎把 `cpu_idx - dma_idx = 32` 读成"环满、没有空位
+收下一帧"，于是事件不再投递；WA 核因为回不了应答而卡在命令处理上，命令环随即
+停止取帧。这一条同时解释了 3.75-3.77 里"环排空却无应答"和 3.78 里"只回一条"。
+
+顺带补上 mt76 的另一半：消费事件后要**把描述符还回去**
+（`mt76_dma_rx_fill()` 重写 ctrl：带 `LAST_SEC0`(bit30)、不带 `DMA_DONE`(bit31)），
+否则每收一个事件就永久退役一个槽位。
+
+### 82.3 3.79 的 A/B 结果（实机）
+
+`rx_repost` 三档，同一条 `mcu-ext ed 13 na 0000`：
+
+| 档 | 写值 | 结果 |
+|---|---|---|
+| 2 | `(didx-1) % depth` | **三条连续命令全部应答**：`evtwa[0] seq=05` / `[1] seq=06` / `[2] seq=07`，`ret=0`；`rx-raw ring1: cidx=2 didx=3` |
+| 0 | 不写 | 无事件（该轮下载本身已失败，见下） |
+| 1 | `didx + depth` | 无事件（同上） |
+
+第 2、3 轮作废的原因是另一个已知脆弱点：**同一次开机里重复 `wfsys-reset`
+之后 ROM 不再回到下载态**（`fw-state after = 1 / unchanged`，`fw-dl: failed at -110`）。
+所以一个 boot 只能跑一次"复位→下载→RDY"，多档 A/B 要分次开机。
+
+### 82.4 3.80 改动
+
+| 改动 | 说明 |
+|---|---|
+| `rx_repost` 默认值 1 → **2** | 写 `(didx-1) % depth`，与 `mt76_dma_kick_queue` 一致 |
+| `scan_ring()` 消费后回收描述符 | 重写 `buf0 = bufdma + slot*1700`、`ctrl = LAST_SEC0 | len<<16` |
+| `rx-raw [ring] [first] [count]` | 不看 DMA_IDX，直接十六进制转储事件槽；用于区分"没写"和"写了但索引没动" |
+
+### 82.5 3.80 的验收：跑 mt7915 RDY 后的真实初始化序列
+
+全部投 qid20，逐条等 seq 应答：
+
+| # | 命令 | cid / ext |
+|---|---|---|
+| 1 | FW_LOG_2_HOST (WM) | ed / 0x13 |
+| 2 | FW_LOG_2_HOST (WA) | ed / 0x13 |
+| 3 | WTBL_UPDATE (del_wtbl_all) | ed / 0x32 |
+| 4 | MWDS_SUPPORT (set_mwds 1) | ed / 0x80 |
+| 5 | MURU_CTRL | ed / 0x9f |
+| 6 | RX_AIRTIME_CTRL | ed / 0x4a |
+| 7 | RED_ENABLE | ed / 0x68 |
+
+这几条是 mt76 在碰 MAC 之前必须走完的路径，逐条被应答即说明 MCU 真正在服务，
+而不只是回显一条探针。下一步才是 `MCU_CE_CMD_GET_NIC_CAPAB`(0x8a)、
+host 侧 band0 数据环与 wiphy 注册。

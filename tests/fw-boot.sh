@@ -5,7 +5,7 @@
 #
 # Sequence (mt76 order, everything commit-gated):
 #   enable -> reprobe -> dma-init -> driver-own -> wfsys-reset ->
-#   driver-own -> dma-init -> patch download (fw_ring=1) ->
+#   driver-own -> dma-init -> patch download (fw_ring=0) ->
 #   WM regions+start -> WA regions+start -> poll MT_TOP_MISC for 7
 #
 # Acceptance for the round: fw-state leaves 1 and reaches 7 (RDY).
@@ -19,7 +19,7 @@ say() { printf '\n== %s\n' "$*"; }
 
 $SSH "cat /etc/e2631-version" || { echo "device unreachable"; exit 1; }
 
-say "enable + reprobe + symlinks + fw_ring=1"
+say "enable + reprobe + symlinks + fw_ring=0"
 $SSH "echo 1 > /sys/module/zxnpu_wlan/parameters/enable
 echo '0000:01:00.0' > /sys/bus/pci/drivers/zxnpu-wlan/unbind 2>/dev/null
 echo '0001:01:00.0' > /sys/bus/pci/drivers/zxnpu-wlan/unbind 2>/dev/null
@@ -29,7 +29,7 @@ ln -sf /lib/firmware/zte/mt7916/mt7916_patch_e1_hdr.bin /lib/firmware/p.bin
 ln -sf /lib/firmware/zte/mt7916/WIFI_RAM_CODE_MT7916.bin /lib/firmware/wm.bin
 ln -sf /lib/firmware/zte/mt7916/7916_WACPU_RAM_CODE_release.bin /lib/firmware/wa.bin
 sleep 2
-echo 1 > /sys/module/zxnpu_wlan/parameters/fw_ring
+echo 0 > /sys/module/zxnpu_wlan/parameters/fw_ring
 echo 1 > /sys/module/zxnpu_wlan/parameters/commit"
 
 say "dma-init"
@@ -46,30 +46,28 @@ $SSH "echo driver-own > $P; tail -1 $S
 echo dma-init > $P; tail -1 $S
 echo rx-init > $P; grep 'reg ' $S | head -1"
 
-say "patch download (fw_ring=1, scatter via qid17)"
+say "patch download (fw_ring=0, scatter via qid16)"
 $SSH "echo 'mcu-dl p.bin' > $P
-grep -E 'mcu-dl:|didx advanced' $S | tail -2
-grep -E 'didx still' $S | tail -1
-echo mcu-recv > $P; grep -E 'cidx=|slot' $S | head -6"
+cat $S
+echo mcu-recv > $P; cat $S"
 
 say "WM firmware regions + start"
 $SSH "echo 'fw-dl wm' > $P
-grep -E 'fw-start|didx still' $S | tail -2
-echo mcu-recv > $P; grep -E 'cidx=' $S | head -3"
+cat $S
+echo mcu-recv > $P; cat $S"
 
 say "WA firmware regions + start"
 $SSH "echo 'fw-dl wa' > $P
-grep -E 'fw-start|didx still' $S | tail -2"
+cat $S
+echo mcu-recv > $P; cat $S"
 
-say "sync (conditional) + explicit fw-start WM + WA"
-$SSH "echo sync > $P; tail -2 $S
-echo 'fw-start 1 0220a800' > $P; grep -E 'submit|didx' $S | tail -1
-echo 'fw-start 5 0' > $P; grep -E 'submit|didx' $S | tail -1"
+say "sync (fw-state readback)"
+$SSH "echo sync > $P; tail -2 $S"
 
 say "fw-state poll (target: 7 = RDY)"
 $SSH "for i in 1 2 3 4 5 6 7 8; do echo fw-state > $P; grep state $S | tail -1; sleep 2; done"
 
 say "ring final state"
-$SSH "for a in d4418 d441c d4500 d4508 d450c; do printf '%s=' \$a; echo 'win 0 '\$a' 1' > $P; sed -n 's/.*= //p' $S | tr -d '\n'; printf ' '; done; echo"
+$SSH "for a in d4410 d4414 d4418 d441c d4500 d4508 d450c; do printf '%s=' \$a; echo 'win 0 '\$a' 1' > $P; sed -n 's/.*= //p' $S | tr -d '\n'; printf ' '; done; echo"
 
 $SSH "echo 0 > /sys/module/zxnpu_wlan/parameters/commit"
