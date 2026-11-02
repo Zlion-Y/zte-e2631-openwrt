@@ -374,7 +374,7 @@ else
 echo "native: E2631_MT76=1 - stock wireless stack (mt7915e/mac80211/wpad) kept selected"
 for p in kmod-mt7915e kmod-mt7915-firmware kmod-mt7916-firmware kmod-mac80211 \
 	 kmod-cfg80211 hostapd-common wpad-mbedtls wireless-regdb \
-	 kmod-mt76-connac kmod-hwmon-core kmod-thermal; do
+	 kmod-mt76-core kmod-mt76-connac kmod-mt7615-common kmod-hwmon-core kmod-thermal; do
 	sed -i "/^# CONFIG_PACKAGE_${p} is not set\$/d" "$TREE/.config"
 	grep -q "^CONFIG_PACKAGE_${p}=y\$" "$TREE/.config" || \
 		printf 'CONFIG_PACKAGE_%s=y\n' "$p" >> "$TREE/.config"
