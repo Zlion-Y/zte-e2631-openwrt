@@ -2160,7 +2160,12 @@ static void zxnpu_wlan_mcu_finish(struct zxnpu_wlan *w, bool commit)
  * lands there; rx-init is gated like mcu-send.
  */
 #define ZXNPU_MCU_RX_REG	ZXNPU_WFDMA_RX_RING0
-#define ZXNPU_MCU_RX_DEPTH	32
+/* Event-ring depth: mt76 arms the MCU event rings with
+ * MT7915_RX_MCU_RING_SIZE = 512. We ran 32 - the neighbor-beacon flood
+ * (~20 events/s on a busy channel) wraps a 32-deep ring in ~1.6 s, and
+ * every command face "wedge" appeared exactly when the ring had been
+ * left undrained for a few seconds. */
+#define ZXNPU_MCU_RX_DEPTH	512
 #define ZXNPU_MCU_RX_BUF_SIZE	1700
 #define ZXNPU_MCU_RXD_SIZE	16
 /* After consuming N events from an RX ring the host must tell the engine
@@ -2216,7 +2221,7 @@ MODULE_PARM_DESC(rx_repost,
  * event ring. */
 #define ZXNPU_DATA_RX_REG	(ZXNPU_WFDMA_RX_RING0 + 0x10 * 4)
 #define ZXNPU_TXFREE_RX_REG	(ZXNPU_WFDMA_RX_RING0 + 0x10 * 2)
-#define ZXNPU_TXFREE_DEPTH	64
+#define ZXNPU_TXFREE_DEPTH	512	/* mt76: MT_RXQ_MAIN_WA ring size 512 */
 #define ZXNPU_TXFREE_BUF_SIZE	1024
 #define ZXNPU_DATA_DEPTH	64
 #define ZXNPU_DATA_BUF_SIZE	1700
