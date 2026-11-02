@@ -2252,22 +2252,56 @@ static void zxnpu_wlan_data_recv(struct zxnpu_wlan *w)
 	for (i = 0; i < n && i < 8; i++) {
 		u32 slot = (cidx + i) % ZXNPU_DATA_DEPTH;
 		u8 *buf = (u8 *)w->drx_buf + slot * ZXNPU_DATA_BUF_SIZE;
+		u32 rxd0 = get_unaligned_le32(buf);
+		u32 ptype = (rxd0 >> 27) & 0x1f;
+		u32 plen = rxd0 & 0xffff;
 		int j;
 
-		zxnpu_wlan_append(w, "  slot %u:", slot);
-		/* 64 bytes: the Andes event TLV (status codes) lives at +32 */
+		/* RXD0[31:27] is the packet type mt7915_rx_check() switches
+		 * on: 0 = TXS, 2 = normal 802.11 frame, 6 = TX-free,
+		 * 0x18 = TX-free v0, 0x0c = FW monitor. RXD0[15:0] is the
+		 * payload length. */
+		zxnpu_wlan_append(w, "  slot %u: type=%u(%s) len=%u:", slot,
+				  ptype,
+				  ptype == 0 ? "TXS" :
+				  ptype == 2 ? "frame" :
+				  ptype == 6 ? "txfree" :
+				  ptype == 0x18 ? "txfree0" :
+				  ptype == 0x0c ? "fwmon" : "?", plen);
+		/* 64 bytes: RXD is 20 bytes and the header follows it */
 		for (j = 0; j < 64; j++)
 			zxnpu_wlan_append(w, " %02x", buf[j]);
 		zxnpu_wlan_append(w, "\n");
+		/* Hand the slot back the same way the MCU event rings do:
+		 * ctrl goes back to LAST_SEC0 | len << 16 with DMA_DONE
+		 * cleared, or the engine retires one slot per frame. */
+		if (w->drx_ring) {
+			u8 *d = (u8 *)w->drx_ring +
+				slot * ZXNPU_MCU_DESC_SIZE;
+
+			put_unaligned_le32((u32)(w->drx_buf_dma +
+					   (dma_addr_t)slot *
+					   ZXNPU_DATA_BUF_SIZE), d + 0);
+			put_unaligned_le32(0x40000000u |
+					   (ZXNPU_DATA_BUF_SIZE << 16), d + 4);
+		}
 	}
 	if (n > 8)
 		zxnpu_wlan_append(w, "  ... %u more\n", n - 8);
 	if (n) {
-		/* same tail + full-ring-announce model as the MCU event ring */
+		/* same post encoding the MCU rings need: (didx - 1) % depth
+		 * when rx_repost = 2, i.e. "one slot free", never didx + depth
+		 * - that looks like a full ring and stops delivery (3.80). */
 		w->drx_cidx = didx;
-		if (zxnpu_wlan_commit)
-			zxnpu_cr_write(w, ZXNPU_DATA_RX_REG + 8,
-				       didx + ZXNPU_DATA_DEPTH);
+		if (zxnpu_wlan_commit && zxnpu_wlan_rx_repost) {
+			u32 post = zxnpu_wlan_rx_repost == 2 ?
+				   (didx + ZXNPU_DATA_DEPTH - 1) %
+				   ZXNPU_DATA_DEPTH :
+				   didx + ZXNPU_DATA_DEPTH;
+
+			dma_wmb();
+			zxnpu_cr_write(w, ZXNPU_DATA_RX_REG + 8, post);
+		}
 	}
 }
 
@@ -4106,6 +4140,9 @@ static int zxnpu_wlan_fw_bss(struct zxnpu_wlan *w, int band, bool enable)
  * and mt7915_bss_info_changed() apply them. Requires the full download
  * (fw-state 7) and the eeprom upload to have happened in this boot.
  */
+/* defined with the STA_REC builder, next to the TX section */
+static int zxnpu_wlan_fw_sta(struct zxnpu_wlan *w, int band);
+
 static void zxnpu_wlan_fw_up(struct zxnpu_wlan *w, const char *args)
 {
 	unsigned int band = 0, ch = 0;
@@ -4144,6 +4181,14 @@ static void zxnpu_wlan_fw_up(struct zxnpu_wlan *w, const char *args)
 	zxnpu_wlan_append(w, "  bss-info-update: ret=%d\n", ret);
 	if (ret)
 		return;
+
+	/* mt7915_start_ap() closes with the BSS's own STA_REC (it creates the
+	 * WTBL entry for wcid 0) and the DRR group. Without it the firmware
+	 * fetches frames and reports dma_done, then drops them. */
+	ret = zxnpu_wlan_fw_sta(w, band);
+	if (ret)
+		return;
+
 	zxnpu_wlan_append(w, "  band %u up: ch=%u bssid %pM tx-path %u\n",
 			  band, ch, w->mac, zxnpu_band_chains(w, band));
 }
@@ -4170,10 +4215,11 @@ static void zxnpu_wlan_fw_up(struct zxnpu_wlan *w, const char *args)
  *   w7  SPE_IDX (24 for a 2-chain band, the value the fixed-rate branch
  *       picks when antenna_mask has more than one chain)
  *
- * No WTBL entry is needed for this frame: the BSS wcid (0) was already created
- * by BSS_INFO_BASIC's bmc_wcid, which is exactly why
- * mt7915_mac_add_interface() never sends a WTBL_UPDATE for its own vif. A WTBL
- * entry only appears once a station associates (STA_REC_UPDATE + WTBL_SET).
+ * The WTBL entry for wcid 0 is NOT created by BSS_INFO_BASIC's bmc_wcid - that
+ * field only labels which wcid receives broadcast traffic. 3.91 assumed
+ * otherwise and watched frames get fetched, report dma_done, and vanish: the
+ * firmware had no peer to transmit to. The entry comes from the BSS's own
+ * STA_REC (radio-up's last step), which is where mt7915_start_ap() sends it.
  */
 #define ZXNPU_TXD_LEN		32
 #define ZXNPU_TX_BUF_LEN	2048
@@ -4194,6 +4240,8 @@ static void zxnpu_wlan_fw_up(struct zxnpu_wlan *w, const char *args)
 #define ZXN_TXD2_SUB_TYPE	GENMASK(3, 0)
 #define ZXN_TXD3_BA_DISABLE	BIT(28)
 #define ZXN_TXD3_REM_TX_COUNT	GENMASK(15, 11)
+#define ZXN_TXD5_TX_STATUS_HOST	BIT(10)
+#define ZXN_TXD5_PID		GENMASK(7, 0)
 #define ZXN_TXD6_TX_RATE	GENMASK(29, 16)
 #define ZXN_TXD6_FIXED_BW	BIT(2)
 #define ZXN_TXD7_SPE_IDX	GENMASK(15, 11)
@@ -4206,7 +4254,7 @@ static void zxnpu_wlan_fw_up(struct zxnpu_wlan *w, const char *args)
 #define ZXN_PREP(mask, v)	(((u32)(v) << (__builtin_ctz(mask))) & (mask))
 
 static int zxnpu_txwi_80211(u32 *w, const u8 *frm, int frm_len, int hdr_len,
-			    u32 wcid, u32 omac, u32 spe_idx)
+			    u32 wcid, u32 omac, u32 spe_idx, u32 pid)
 {
 	u32 total = frm_len + ZXNPU_TXD_LEN;
 	u32 type = (frm[0] >> 2) & 0x3;
@@ -4233,6 +4281,12 @@ static int zxnpu_txwi_80211(u32 *w, const u8 *frm, int frm_len, int hdr_len,
 	       ZXN_PREP(ZXN_TXD2_SUB_TYPE, subtype) |
 	       ZXN_PREP(ZXN_TXD2_MULTICAST, mcast ? 1 : 0);
 	w[3] = ZXN_PREP(ZXN_TXD3_REM_TX_COUNT, 15);
+	/* pid >= MT_PACKET_ID_FIRST (3) asks the firmware for a host TX
+	 * status: it then reports the frame back as a PKT_TYPE_TXS block and
+	 * a PKT_TYPE_TXRX_NOTIFY on the data RX ring (mt7915_rx_check()). */
+	w[5] = ZXN_PREP(ZXN_TXD5_PID, pid);
+	if (pid >= 3)
+		w[5] |= ZXN_TXD5_TX_STATUS_HOST;
 	if (type != 2 || mcast) {	/* !data or multicast => fixed rate */
 		w[2] |= ZXN_TXD2_FIX_RATE;
 		w[3] |= ZXN_TXD3_BA_DISABLE;
@@ -4243,17 +4297,27 @@ static int zxnpu_txwi_80211(u32 *w, const u8 *frm, int frm_len, int hdr_len,
 }
 
 /*
- * tx-bcast [dump]: build one broadcast data frame through the TXD above and
+ * tx-bcast [dump] / tx-probe [dump]: build one frame through the TXD above and
  * either only print it (dump) or hand it to qid18 and watch didx move.
+ *
+ * tx-probe is the interesting one: a probe request is a management frame with
+ * a broadcast addr1, so the firmware sends it at a fixed rate and every nearby
+ * AP answers it. Those probe responses land on the band data RX ring (qid2),
+ * which makes the pair a loopback test of the whole path - if the frames come
+ * back, the chain up to real RF works, and no second host is needed.
+ * It also carries pid 3 (MT_PACKET_ID_FIRST), so the firmware reports the frame
+ * back as a PKT_TYPE_TXS / PKT_TYPE_TXRX_NOTIFY block on the same ring.
  */
-static void zxnpu_wlan_tx_bcast(struct zxnpu_wlan *w, bool dump_only)
+#define ZXNPU_PID_FIRST		3
+
+static void zxnpu_wlan_tx_once(struct zxnpu_wlan *w, bool probe, bool dump_only)
 {
 	u8 *buf, *frm;
 	dma_addr_t dma;
 	u32 txd[8];
 	u32 before, after = 0;
-	int frm_len = ZXNPU_TX_HDR_LEN + 8;
-	int i, ret;
+	u32 pid = probe ? ZXNPU_PID_FIRST : 0;
+	int frm_len, i, ret;
 
 	if (!w->dtx_ring) {
 		zxnpu_wlan_append(w, "  no TX ring (run data-init first)\n");
@@ -4268,22 +4332,37 @@ static void zxnpu_wlan_tx_bcast(struct zxnpu_wlan *w, bool dump_only)
 	memset(buf, 0, ZXNPU_TX_BUF_LEN);
 	frm = buf + ZXNPU_TXD_LEN;
 
-	/* 802.11 data, broadcast: addr1 = ff:ff:ff:ff:ff:ff, addr2/addr3 =
-	 * the BSS MAC. Payload is one LLC/SNAP header; the frame is a
-	 * carrier for the TXD, not a serviceable packet. */
-	put_unaligned_le16(0x0008, frm + 0);	/* FC: data, no flags */
-	put_unaligned_le16(0x0000, frm + 2);	/* duration */
-	memset(frm + 4, 0xff, 6);
-	memcpy(frm + 10, w->mac, 6);
-	memcpy(frm + 16, w->mac, 6);
-	put_unaligned_le16(0x0000, frm + 22);	/* seq_ctrl */
-	frm[24] = 0xaa; frm[25] = 0xaa; frm[26] = 0x03;
-	frm[27] = 0x00; frm[28] = 0x00; frm[29] = 0x00;
-	put_unaligned_le16(0x0008, frm + 30);	/* IPv4 */
+	if (probe) {
+		/* probe request, wildcard SSID + basic rates */
+		frm_len = ZXNPU_TX_HDR_LEN + 10;
+		put_unaligned_le16(0x0040, frm + 0);	/* mgmt, probe req */
+		put_unaligned_le16(0x0000, frm + 2);
+		memset(frm + 4, 0xff, 6);		/* addr1 broadcast */
+		memcpy(frm + 10, w->mac, 6);		/* addr2 = SA */
+		memcpy(frm + 16, w->mac, 6);		/* addr3 = BSSID */
+		put_unaligned_le16(0x0000, frm + 22);
+		frm[24] = 0x00; frm[25] = 0x00;		/* SSID: wildcard */
+		frm[26] = 0x01; frm[27] = 0x04;		/* supported rates */
+		frm[28] = 0x82; frm[29] = 0x84;
+		frm[30] = 0x8b; frm[31] = 0x96;
+	} else {
+		/* broadcast data with one LLC/SNAP header: a carrier for the
+		 * TXD, not a serviceable packet */
+		frm_len = ZXNPU_TX_HDR_LEN + 8;
+		put_unaligned_le16(0x0008, frm + 0);	/* data, no flags */
+		put_unaligned_le16(0x0000, frm + 2);
+		memset(frm + 4, 0xff, 6);
+		memcpy(frm + 10, w->mac, 6);
+		memcpy(frm + 16, w->mac, 6);
+		put_unaligned_le16(0x0000, frm + 22);
+		frm[24] = 0xaa; frm[25] = 0xaa; frm[26] = 0x03;
+		frm[27] = 0x00; frm[28] = 0x00; frm[29] = 0x00;
+		put_unaligned_le16(0x0008, frm + 30);	/* IPv4 */
+	}
 
 	ret = zxnpu_txwi_80211(txd, frm, frm_len, ZXNPU_TX_HDR_LEN,
 			       0 /* wcid: the BSS itself */, 0 /* omac */,
-			       24 /* spe_idx, 2-chain band */);
+			       24 /* spe_idx, 2-chain band */, pid);
 	if (ret) {
 		zxnpu_wlan_append(w, "  txwi build failed: %d\n", ret);
 		goto out;
@@ -4347,11 +4426,130 @@ static void zxnpu_wlan_tx_bcast(struct zxnpu_wlan *w, bool dump_only)
 		zxnpu_wlan_append(w, "  desc slot %u ctrl=%08x dma_done=%u\n",
 				  slot, ctl, !!(ctl & BIT(31)));
 	}
-	zxnpu_wlan_append(w, "  draining MCU rings (TX-done is eid 0x0f)\n");
+	/* TX status, TX-free and the answers to a probe request all arrive on
+	 * the band DATA RX ring, not on the MCU event rings: mt7915_rx_check()
+	 * classifies each buffer by RXD0[31:27] (0 TXS, 2 normal frame,
+	 * 6/0x18 TX-free). Draining qid2 right here is what makes the pair a
+	 * loopback test. */
+	zxnpu_wlan_append(w, "  MCU rings:\n");
 	zxnpu_wlan_mcu_recv(w, 0);
 	zxnpu_wlan_mcu_recv(w, 1);
+	zxnpu_wlan_append(w, "  data RX qid2:\n");
+	zxnpu_wlan_data_recv(w);
 out:
 	dma_free_coherent(&w->pdev->dev, ZXNPU_TX_BUF_LEN, buf, dma);
+}
+
+/*
+ * STA_REC_UPDATE (0x25) for the BSS itself, plus the DRR group that follows
+ * it - the last two things mt7915_start_ap() sends:
+ *
+ *	mt7915_mcu_add_bss_info(phy, vif, true);
+ *	mt7915_mcu_add_sta(dev, vif, NULL, CONN_STATE_PORT_SECURE, false);
+ *
+ * With sta == NULL the "station" is the BSS's own wcid (0), and
+ * mt7915_mcu_add_sta() builds:
+ *
+ *   sta_req_hdr  { bss_idx, wlan_idx_lo = 0, tlv_num = 2, append = 1,
+ *                  muar_idx = 0xe }        (0xe because this wcid has no sta)
+ *   STA_REC_BASIC (20 B)  conn_type = CONNECTION_INFRA_BC,
+ *                         conn_state = PORT_SECURE(2), peer = broadcast,
+ *                         extra_info = EXTRA_INFO_VER
+ *   STA_REC_WTBL  (52 B)  wtbl_req_hdr { op = WTBL_RESET_AND_SET(1),
+ *                                        tlv_num = 3 } +
+ *                         WTBL_GENERIC (20) + WTBL_RX (12) +
+ *                         WTBL_HDR_TRANS (8, from_ds + no_rx_trans)
+ *
+ * then mt7915_mcu_add_group() sends SET_DRR_CTRL (0x36, 24 B) with
+ * action = MT_STA_BSS_GROUP(1) and val = the BSS group index.
+ *
+ * Skipping this is why 3.91's frames were fetched by the engine, reported
+ * dma_done, and then went nowhere: the firmware had no WTBL entry for wcid 0,
+ * so it had no peer to transmit to. BSS_INFO_BASIC's bmc_wcid only labels the
+ * broadcast wcid, it does not create the table entry.
+ */
+#define ZXNPU_MCU_EXT_STA_REC		0x25
+#define ZXNPU_MCU_EXT_SET_DRR		0x36
+
+#define ZXN_STA_REC_BASIC		0
+#define ZXN_STA_REC_WTBL		13
+#define ZXN_WTBL_GENERIC		0
+#define ZXN_WTBL_RX			1
+#define ZXN_WTBL_HDR_TRANS		6
+
+#define ZXN_CONN_INFRA_BC		0x00010020	/* STA_TYPE_BC | INFRA */
+#define ZXN_CONN_STATE_PORT_SECURE	2
+#define ZXN_EXTRA_INFO_VER		0x0001
+#define ZXN_WTBL_RESET_AND_SET		1
+#define ZXN_MUAR_IDX_NO_STA		0x0e
+
+static int zxnpu_wlan_fw_sta(struct zxnpu_wlan *w, int band)
+{
+	u8 blk[64], t[16], req[96];
+	int boff, off, ret;
+
+	/* nested WTBL block: hdr + generic + rx + hdr_trans */
+	memset(blk, 0, sizeof(blk));
+	blk[0] = 0;				/* wlan_idx_lo */
+	blk[1] = ZXN_WTBL_RESET_AND_SET;
+	put_unaligned_le16(3, blk + 2);		/* nested tlv count */
+	boff = 8;
+
+	memset(t, 0, sizeof(t));
+	memset(t, 0xff, 6);			/* peer_addr: broadcast */
+	t[6] = ZXN_MUAR_IDX_NO_STA;
+	boff = zxnpu_tlv_put(blk, boff, sizeof(blk), ZXN_WTBL_GENERIC, t, 16);
+	if (boff < 0)
+		return boff;
+
+	memset(t, 0, sizeof(t));
+	t[1] = 1;				/* rca1 */
+	t[2] = 1;				/* rca2 */
+	t[3] = 1;				/* rv */
+	boff = zxnpu_tlv_put(blk, boff, sizeof(blk), ZXN_WTBL_RX, t, 8);
+	if (boff < 0)
+		return boff;
+
+	memset(t, 0, sizeof(t));
+	t[1] = 1;				/* from_ds (AP) */
+	t[2] = 1;				/* no_rx_trans */
+	boff = zxnpu_tlv_put(blk, boff, sizeof(blk), ZXN_WTBL_HDR_TRANS, t, 4);
+	if (boff < 0)
+		return boff;
+
+	/* outer STA_REC message */
+	memset(req, 0, sizeof(req));
+	req[0] = band;				/* bss_idx */
+	req[1] = 0;				/* wlan_idx_lo */
+	put_unaligned_le16(2, req + 2);		/* tlv_num */
+	req[4] = 1;				/* is_tlv_append */
+	req[5] = ZXN_MUAR_IDX_NO_STA;
+	off = 8;
+
+	memset(t, 0, sizeof(t));
+	put_unaligned_le32(ZXN_CONN_INFRA_BC, t + 0);
+	t[4] = ZXN_CONN_STATE_PORT_SECURE;
+	memset(t + 8, 0xff, 6);			/* peer_addr */
+	put_unaligned_le16(ZXN_EXTRA_INFO_VER, t + 14);
+	off = zxnpu_tlv_put(req, off, sizeof(req), ZXN_STA_REC_BASIC, t, 16);
+	if (off < 0)
+		return off;
+	off = zxnpu_tlv_put(req, off, sizeof(req), ZXN_STA_REC_WTBL, blk, boff);
+	if (off < 0)
+		return off;
+
+	ret = zxnpu_wlan_ext_set(w, ZXNPU_MCU_EXT_STA_REC, req, off);
+	zxnpu_wlan_append(w, "  sta-rec (wcid 0, %d B): ret=%d\n", off, ret);
+	if (ret)
+		return ret;
+
+	/* SET_DRR_CTRL: action = MT_STA_BSS_GROUP, val = BSS group index */
+	memset(req, 0, 24);
+	put_unaligned_le32(1, req + 0);
+	/* wlan_idx_lo/hi and val stay 0: wcid 0, band 0 -> group 0 */
+	ret = zxnpu_wlan_ext_set(w, ZXNPU_MCU_EXT_SET_DRR, req, 24);
+	zxnpu_wlan_append(w, "  drr-ctrl (group %d): ret=%d\n", band, ret);
+	return ret;
 }
 
 static ssize_t zxnpu_wlan_ctl_write(struct file *file, const char __user *ubuf,
@@ -4719,12 +4917,26 @@ done_fwbss:
 		zxnpu_wlan_append(w, "\n");
 	} else if (!strncmp(cmd, "radio-up ", 9)) {
 		zxnpu_wlan_fw_up(w, cmd + 9);
-	} else if (!strncmp(cmd, "tx-bcast", 8)) {
-		/* tx-bcast [dump]: TXD + one broadcast data frame into qid18 */
-		zxnpu_wlan_append(w, "tx-bcast: %s\n",
+	} else if (!strncmp(cmd, "radio-sta ", 10)) {
+		unsigned int band = 0;
+
+		if (sscanf(cmd + 10, "%u", &band) < 1 || band > 1) {
+			zxnpu_wlan_append(w, "usage: radio-sta <band 0|1>\n");
+			goto done_sta;
+		}
+		zxnpu_wlan_append(w, "radio-sta band %u: ret=%d\n", band,
+				  zxnpu_wlan_fw_sta(w, band));
+done_sta:
+		zxnpu_wlan_append(w, "\n");
+	} else if (!strncmp(cmd, "tx-bcast", 8) ||
+		   !strncmp(cmd, "tx-probe", 8)) {
+		/* tx-bcast|tx-probe [dump]: TXD + one frame into qid18 */
+		bool probe = !strncmp(cmd, "tx-probe", 8);
+
+		zxnpu_wlan_append(w, "%s: %s\n", probe ? "tx-probe" : "tx-bcast",
 				  zxnpu_wlan_commit ? "COMMIT" : "dry run");
-		zxnpu_wlan_tx_bcast(w, strstr(cmd, "dump") != NULL ||
-				    !zxnpu_wlan_commit);
+		zxnpu_wlan_tx_once(w, probe, strstr(cmd, "dump") != NULL ||
+				   !zxnpu_wlan_commit);
 	} else if (!strncmp(cmd, "sync", 4)) {
 		zxnpu_wlan_ring_sync(w, zxnpu_wlan_commit);
 	} else if (!strncmp(cmd, "driver-own", 10)) {
@@ -4741,7 +4953,7 @@ done_fwbss:
 			zxnpu_wlan_append(w, "commit refused: set zxnpu_wlan.commit=1\n");
 		zxnpu_wlan_wfdma(w, commit);
 	} else {
-		zxnpu_wlan_append(w, "commands: l1profile | ack-expect | data-init | data-recv | dataplane | probe | scan | win <bar> <off> [n] | crw <a> <v> | fw | plan | mcu | rings | mcuwin | mcu-send | mcu-cmd | mcu-dl | mcu-dl-regions | fw-start | fw-info | fw-audit | fw-state | fw-plan wm|wa | fw-dl wm|wa | rx-init | mcu-recv | mac-set | radio-mac | radio-chan | radio-bss | radio-up | tx-bcast [dump] | driver-own | wfsys-reset | dma-init | commit\n");
+		zxnpu_wlan_append(w, "commands: l1profile | ack-expect | data-init | data-recv | dataplane | probe | scan | win <bar> <off> [n] | crw <a> <v> | fw | plan | mcu | rings | mcuwin | mcu-send | mcu-cmd | mcu-dl | mcu-dl-regions | fw-start | fw-info | fw-audit | fw-state | fw-plan wm|wa | fw-dl wm|wa | rx-init | mcu-recv | mac-set | radio-mac | radio-chan | radio-bss | radio-up | radio-sta | tx-bcast | tx-probe [dump] | driver-own | wfsys-reset | dma-init | commit\n");
 	}
 	mutex_unlock(&w->lock);
 	return count;
