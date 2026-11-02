@@ -372,6 +372,12 @@ done
 echo "native: .config stripped of the open-source wireless drivers (refusals written)"
 else
 echo "native: E2631_MT76=1 - stock wireless stack (mt7915e/mac80211/wpad) kept selected"
+for p in kmod-mt7915e kmod-mt7915-firmware kmod-mt7916-firmware kmod-mac80211 \
+	 kmod-cfg80211 hostapd-common wpad-mbedtls wireless-regdb; do
+	sed -i "/^# CONFIG_PACKAGE_${p} is not set\$/d" "$TREE/.config"
+	grep -q "^CONFIG_PACKAGE_${p}=y\$" "$TREE/.config" || \
+		printf 'CONFIG_PACKAGE_%s=y\n' "$p" >> "$TREE/.config"
+done
 fi
 # kmod-nft-offload stays selected: firewall4 DEPENDS on it (stock OpenWrt
 # plumbing), and an earlier refusal line would leave the dependency unsatisfied

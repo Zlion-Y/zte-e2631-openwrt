@@ -21,7 +21,12 @@ zte_caldata_from_jffs2() {
 	# /dev/mtdblock3 on /wlan type jffs2 (rw,relatime)); we only read a file
 	# out of it and unmount.
 	mkdir -p $dir
-	mount -t jffs2 $part $dir || caldata_die "failed to mount $part"
+	# The hook can run twice per boot (e2631-wifi-eeprom retries); a first
+	# pass that failed mid-way leaves the mount behind and a bare mount
+	# fails with "Resource busy". Reuse an existing mount if it is ours.
+	if ! grep -q " $dir " /proc/mounts; then
+		mount -t jffs2 $part $dir || caldata_die "failed to mount $part"
+	fi
 	id=$(hexdump -v -n 2 -e '2/1 "%02x"' $dir/caldata 2>/dev/null)
 	case "$board:$id" in
 	zte,zxhn-h3600:1579)
