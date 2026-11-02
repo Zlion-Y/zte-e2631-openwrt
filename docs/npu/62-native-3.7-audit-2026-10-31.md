@@ -3425,3 +3425,22 @@ ret=0。qid20 `cidx=didx=16`（命令被 DMA 取走）但事件环零应答，�
 3.100 刷机 → run-r93 重放：验收 = bcn-set 后 liveness 仍 ret=0（WA 活着）
 + PC 强扫看到 `e2631-test`（beacon 真上了空口）。此后按 §89.5 顺序：
 关联路径（probe req 响应/STA_REC wcid≠0）→ 数据面收发 → wiphy。
+
+## 92. R97/R98：楔死与内容无关——固件 beacon 任务自身在等一次永不完成的 TX（3.103，2026-11-03）
+
+- R98 分叉（3.103 加 `bcn-set ... zero`）：退化 TXD（仅 BYTES/FMT/QIDX）同样
+  在 ≤30 s 内楔死 WA 命令面，恢复探针全 -110、不可自愈；正常 TXD 同样。
+  **楔死由 enable=1+CONTENT 触发，与 TXD 位内容无关**。
+- 反转：WA 核**没有死**——心跳事件持续（SYSRAM/事件环计数 0x1f9→0x1fc 推进），
+  死的是**命令处理器**（qid20 didx 冻结）。固件在 beacon 命令处理内部等待。
+- 逐项排除：chip_cap[2]=0x20（vendor beacon TXD 也是 32B connac2 形态，52B
+  TMAC 理论作废）；arch_ops[0x44/0x48/0x50]=NULL（vendor Enable/DisableBeacon
+  是 no-op，不是缺步）；pre-cal 标志字节（0x19a）模板与 caldata 均 0x00
+  （mt76 GROUP/DPD pre-cal 上传不适用）；SoC 时钟树无 WiFi 域可缺（全部在芯片内）。
+- 新证：`/tmp/wlantest/caldata`（0x30000=196608 B，与 l1profile 一致）已拉回
+  `_scratch/npu-probe/caldata-e2631.bin`；与模板前 4K 仅 19 字节差异
+  （全在 0x495-0x4bf 的 5G 功率表，与 band0 无关）——功率数据不解释楔死。
+- 当前最贴切模型：**固件第一次 beacon 发射尝试挂起**（TX 链 WFDMA→PLE→TMAC→RF
+  之间的某个握手没有完成——与 qid18 帧"取走即消失"、TXS/free-notify 从未出现、
+  per-BSS TX 计数恒零全部吻合），命令处理器排在它后面一起停。
+- 待决判据：手机扫描 e2631-test（PC 强扫 3 次阴性但 Windows 扫描不可靠）。
