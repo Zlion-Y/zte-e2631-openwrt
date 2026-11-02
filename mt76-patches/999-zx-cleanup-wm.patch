@@ -1,0 +1,16 @@
+--- a/mt76_connac_mcu.c
++++ b/mt76_connac_mcu.c
+@@ -155,8 +155,12 @@
+ 		len -= cur_len;
+ 
+ 		if (dev->queue_ops->tx_cleanup)
++			/* ZX279128S: scatter data rides MT_MCUQ_WM (see
++			 * mt7915_mcu_send_message), so recycle THAT ring -
++			 * cleaning FWDL left the WM ring full after ~256
++			 * frames and the download died with -ENOMEM. */
+ 			dev->queue_ops->tx_cleanup(dev,
+-						   dev->q_mcu[MT_MCUQ_FWDL],
++						   dev->q_mcu[MT_MCUQ_WM],
+ 						   false);
+ 	}
+ 

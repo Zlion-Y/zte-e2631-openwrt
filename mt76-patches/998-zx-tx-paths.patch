@@ -1,0 +1,25 @@
+--- a/mt7915/mcu.c
++++ b/mt7915/mcu.c
+@@ -226,7 +226,10 @@
+ 	enum mt76_mcuq_id qid;
+ 
+ 	if (cmd == MCU_CMD(FW_SCATTER))
+-		qid = MT_MCUQ_FWDL;
++		/* ZX279128S: the RDMA engine behind qid16 never fetches on
++		 * this SoC (verified: didx frozen while qid17 drains), so
++		 * route firmware data over the command ring. */
++		qid = MT_MCUQ_WM;
+ 	else if (test_bit(MT76_STATE_MCU_RUNNING, &dev->mphy.state))
+ 		qid = MT_MCUQ_WA;
+ 	else
+@@ -2169,7 +2172,9 @@
+ 
+ 	ret = mt76_connac2_load_patch(&dev->mt76, fw_name_var(dev, ROM_PATCH));
+ 	if (ret)
+-		return ret;
++		dev_info(dev->mt76.dev,
++			 "ZX: rom patch unavailable (%d), continuing without it\n",
++			 ret);
+ 
+ 	ret = mt76_connac2_load_ram(&dev->mt76, fw_name_var(dev, FIRMWARE_WM),
+ 				    fw_name(dev, FIRMWARE_WA));
