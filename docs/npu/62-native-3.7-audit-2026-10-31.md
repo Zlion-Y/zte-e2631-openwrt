@@ -2833,3 +2833,66 @@ tx-bcast:  queued slot 0 len=64 kick cidx=1 didx=0
 TX status（`pid >= MT_PACKET_ID_FIRST` + `MT_TXD5_TX_STATUS_HOST`，回收
 `MT_DMA_CTL_DMA_DONE` 的环）→ RX 数据环解析（qid2，含 802.11 头 + RX status）
 → 站点关联路径（`STA_REC_UPDATE` + `WTBL_SET`，才需要 WTBL）→ wiphy 注册。
+
+## 86. BSS 自己的 STA_REC + DRR：帧终于有 peer 了（3.91 → 3.92）
+
+3.90 的帧进了 qid18、引擎每帧都置 `dma_done`，然后就没有下文。缺的不是 TXD 字段，
+而是 `mt7915_start_ap()` 在 `add_bss_info()` 之后还有两条命令：
+
+```c
+	err = mt7915_mcu_add_bss_info(phy, vif, true);
+	err = mt7915_mcu_add_sta(dev, vif, NULL, CONN_STATE_PORT_SECURE, false);
+```
+
+`sta == NULL` 时"站点"就是 BSS 自己的 wcid 0，消息是
+`sta_req_hdr` + `STA_REC_BASIC` + `STA_REC_WTBL`，其中 **`STA_REC_WTBL` 里嵌套**
+了一个 `wtbl_req_hdr`（`operation = WTBL_RESET_AND_SET`）+ 三个 TLV：
+
+| TLV | 长度 | 关键值 |
+|---|---|---|
+| `WTBL_GENERIC` | 20 B | `peer_addr = ff:ff:ff:ff:ff:ff`、`muar_idx = 0xe` |
+| `WTBL_RX` | 12 B | `rca1/rca2/rv = 1` |
+| `WTBL_HDR_TRANS` | 8 B | `from_ds = 1`、`no_rx_trans = 1` |
+
+外层的 `STA_REC_BASIC` 用 `conn_type = CONNECTION_INFRA_BC`(0x10020)、
+`conn_state = PORT_SECURE(2)`、`extra_info = EXTRA_INFO_VER`、peer 全 ff。
+最后 `mt7915_mcu_add_group()` 发 `SET_DRR_CTRL`(0x36)，`action = MT_STA_BSS_GROUP`。
+
+**3.91 的错误假设**：以为 `BSS_INFO_BASIC` 里的 `bmc_wcid` 会顺手把 WTBL 表项建好。
+它只是标注哪个 wcid 收广播，表项要等这条 STA_REC。没有它，固件没有 peer 可发。
+
+实机（3.92）：`sta-rec (wcid 0, 80 B) ret=0`、`drr-ctrl (group 0) ret=0`，
+`radio-up` 现在完整输出 dev/chan/bss/sta/drr 五条全 0。
+
+### 86.1 探针请求：TXD 与手算表全等，但只换来一次 TX-free
+
+`tx-probe`（mgmt probe request，`pid = 3` 要 TX status）：
+
+```
+txd w0=00000042 w1=80026000 w2=80000404 w3=10007800 w5=00000403 w6=00000004 w7=0000c000
+queued slot 0 len=66 -> didx 0->1 -> desc ctrl=c0420000 dma_done=1
+qid2: 一个包, type=6(TX-free) len=68
+```
+
+之后**再没有任何 TX-free**，尽管每帧仍 `dma_done=1`；qid2 的 `didx` 永远停在 1。
+
+### 86.2 卡点（已逐个排除，供下一轮直接接手）
+
+1. **RX 环只投递一次**：`cpu_idx` 现场试过 `0/1/2/63/64/65/66/128` 全部无变化，
+   描述符回填（`ctrl = LAST_SEC0 | len<<16`）也做过。注意 mt76 的
+   `mt76_dma_rx_fill()` 只填到 `ndesc-1`、kick 写 `q->head`，所以数据环的初始
+   投递值是 **63 而不是 64**，消费后 `head = (last+1) % ndesc`——这条还没按
+   mt76 原样实现，是下一轮第一件事。
+2. **第二次 `CHANNEL_SWITCH` 永不回应**（`-110`），`BSS_INFO` 关掉再切也一样，
+   所以信道只能在 `radio-up` 时选定；连试几次后 WA 核连命令都不接了
+   （TX DMA 仍然工作）⇒ 每个实验都要重新开机。
+3. **TX-free 是否按批上报**未定：只有 data-init 后的第一帧有回报。
+
+### 86.3 踩到的操作失误（记下来）
+
+- 刷机脚本**不能管道给 `head`**：`bash flash-3.92.sh | head -12` 里 head 退出后
+  SIGPIPE 打断了升级流程（幸好校验在写之前，设备仍跑旧版本）。刷机一律
+  `> log 2>&1` 再 grep。
+- 运行脚本里 `grep -v '^  slot '` 把刚加上的 RX 解码行自己过滤掉了，
+  差点误判成"没收到包"。
+- `echo 'cmd' > $P > /dev/null` 会覆盖前一个重定向，命令根本没写进 proc。
