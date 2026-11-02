@@ -2672,3 +2672,96 @@ MAC：tag 里只有 LAN/WAN 两个，`mtd2` 的 caldata 段内也没有 MAC 字�
 里的 `00:0c:43:26:60:00` 是 MediaTek 模板值。也就是说 **WiFi MAC 不在主机可见的
 flash 里**，大概率在 MT7916 自身 efuse（固件自己读），而 `EFUSE_ACCESS` 这条路
 已证明拿不到数据。bring-up 阶段先用模块参数 `mac=` 覆盖，量产前再定来源。
+
+## 84. band0 起来：MAC / DEV / 信道 / BSS 四条命令全部被接受（3.86 → 3.88）
+
+**问题**：3.85 之后固件有了校准（`flash_mode` + 4 页 `EFUSE_BUFFER_MODE` 全 ret=0），
+但一帧都发不出去。原因不是校准，而是主机从未告诉固件三件事：哪个 band 归 MAC、
+调哪个信道、上面挂哪个 BSS。mt76 用四条命令说完，本轮的载荷是这四个函数逐字节
+对照 `mt76-2026.10.08` 还原的（`mt76_connac_mcu.h` / `mt7915/mcu.c`）。
+
+全部走 `MCU_EXT_CMD`（cid 0xed），`set_query = MCU_Q_SET`(1)，`s2d = MCU_S2D_H2N`(0)，
+即 3.78 证明过的 qid20（MCU_WA）命令环：
+
+| 命令 | ext | 长度 | 载荷 |
+|---|---|---|---|
+| RX_HDR_TRANS | 0x47 | 8 B | `hdr_trans = 0`：主机自己构 802.11 头 |
+| MAC_INIT_CTRL | 0x46 | 4 B | `{enable, band}` |
+| DEV_INFO_UPDATE | 0x2a | 20 B | hdr `{omac, band, tlv_num=1, append=1}` + `DEV_INFO_ACTIVE`(tag 0) TLV |
+| CHANNEL_SWITCH | 0x08 | 76 B | control_ch/center_ch/bw/tx_path_num/rx_path/switch_reason/band_idx/channel_band |
+| BSS_INFO_UPDATE | 0x26 | 80 B | `sta_req_hdr` + OMAC(12) + BASIC(24) + RF_CH(8) + BMC_RATE(12) |
+
+### 84.1 一个字段换来一次固件卡死：`rx_path` 是数量不是掩码
+
+3.86 按「读起来最自然」的方式把 `rx_path` 填成 band0 的 0x3 掩码。结果：
+
+```
+eeprom-upload 4 页全 ret=0
+rx-hdr-trans ret=0        evtwa[?] eid=ed
+mac-init-ctrl ret=0       evtwa[?] eid=ed
+CHANNEL_SWITCH 0x08       ret=-110(timeout)   ← 从这里开始全挂
+之后 rx-hdr-trans / mac-init / FW_LOG 0x13 全部 -110
+```
+
+现场取证定性（不用重刷就能分清两种失败）：
+
+| 观测 | 值 | 结论 |
+|---|---|---|
+| WA 事件环 | `cidx=6 didx=6` | 6 帧 = 恰好前 6 条命令的应答，0x08 的应答从未产生 |
+| qid20 命令环 | `cidx=8 didx=8` | 描述符被 DMA 搬走（**不等于核在处理**） |
+| 再发已知能应答的 `FW_LOG 0x13` | `-110`，且 `didx` 不再前进 | **WA 核确实停了**，不是「慢」 |
+
+根因在 `mt7915_mcu_set_chan_info()`：
+
+```c
+	if (cmd == MCU_EXT_CMD(CHANNEL_SWITCH))
+		req.rx_path = hweight8(req.rx_path);
+```
+
+这条命令的 `rx_path` 是**链路数量**（band0 = 2），掩码只在其他命令里用。给 2 链
+band 报 3 条 RX path，WA 核在校准中途死掉。注意：`fw-state` 仍是 7（那是主机写的
+TOP_MISC，不是固件健康度），唯一的恢复手段是重新刷机——**一个 boot 只有一轮
+「复位→下载→RDY」**（3.74 就记录过）。
+
+### 84.2 3.87 实机结果（band0 / ch1 / 20 MHz / HT）
+
+```
+radio-mac 0 1:  rx-hdr-trans ret=0 | mac-init-ctrl ret=0
+radio-up 0 1:   rx-hdr-trans ret=0 | mac-init-ctrl ret=0 | dev-info ret=0
+                channel-switch ch=1 ret=0 | bss-info-update ret=0
+                band 0 up: ch=1 bssid 00:0c:43:26:60:00 tx-path 2
+liveness:       mcu-ext 13 00 -> ret=0   （调谐之后固件仍活着）
+bss-show:       band 0: active ch=1  |  fw-state 7
+```
+
+信道设置之后固件开始主动上报 `eid=00` 的异步事件（约每秒数个，载荷 ~220 B），
+这是 RF 真正动起来的直接迹象，也是下一轮 RX 上报要解析的对象。
+
+### 84.3 3.88：证据可读性（诊断，无功能改动）
+
+同一件事被两处掩盖过，都值得记住：
+
+1. 运行脚本用 `grep -A9` 截取结果块，正好把 `channel-switch` 和 `bss-info-update`
+   两行切掉，看起来像「序列停在 dev-info」。
+2. `status[]` 只有 16 KiB，`zxnpu_wlan_append()` 满了以后**静默丢写**。调谐后固件
+   每秒数个 `eid=00` 事件，每个都被 hex dump 68 B ⇒ 实测缓冲区 `16383 B` 写满，
+   之后 `radio-mac` 自己的结果行也被丢掉（表现为「命令没有任何输出」）。
+
+修法：`evt_log` 模块参数（默认 0）只打 `eid/seq` 一行，需要 hex 时置 1。
+
+### 84.4 ctl 命令面新增
+
+| 命令 | 作用 |
+|---|---|
+| `radio-mac <band> <0\|1>` | RX_HDR_TRANS + MAC_INIT_CTRL |
+| `radio-chan <band> <ch>` | CHANNEL_SWITCH（20 MHz，5 s 预算） |
+| `radio-bss <band> <0\|1>` | BSS_INFO_UPDATE（enable 带 4 个 TLV） |
+| `radio-up <band> <ch>` | 按 mt76 顺序跑完整四条 |
+| `mac-set <12hex>` | 覆盖 eeprom 模板 MAC |
+
+### 84.5 下一步
+
+WTBL 条目（`WTBL_UPDATE` 0x32 在 3.80 已验证有应答，但还没有真实 entry）→
+TXD 构帧（`mt76_connac2_mac_write_txwi` 语义，字段表已从 `mt76_connac2_mac.h`
+拿到：TXD0 包长/qidx/pkt_fmt、TXD1 long_format/hdr_format/wlan_idx、TXD2 固定速率
+与功率偏移、TXD3 seq/BA）→ RX 上报解析（`eid=00` 那批事件）→ wiphy 注册。
