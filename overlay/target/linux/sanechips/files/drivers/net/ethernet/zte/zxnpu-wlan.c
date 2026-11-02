@@ -65,6 +65,16 @@ static bool zxnpu_wlan_commit;
 module_param_named(commit, zxnpu_wlan_commit, bool, 0644);
 MODULE_PARM_DESC(commit, "allow the WFDMA init plan to actually write registers");
 
+/* The MCU starts posting unsolicited events as soon as the radio is tuned
+ * (eid 0x00 with a ~220-byte payload, several per second). The full hex dump
+ * of every consumed event is what makes those readable, but it also fills the
+ * 16 KiB status buffer in about 60 events and then every append after that is
+ * silently dropped - which is how 3.87's radio-mac result disappeared. Off by
+ * default: one line per event with eid/seq is enough to follow a command. */
+static int zxnpu_wlan_evt_log;
+module_param_named(evt_log, zxnpu_wlan_evt_log, int, 0644);
+MODULE_PARM_DESC(evt_log, "hex dump every consumed MCU event (default 0: eid/seq only)");
+
 #define ZXNPU_VAP_MAX		2
 struct zxnpu_vap;
 
@@ -2674,24 +2684,30 @@ static int zxnpu_wlan_mcu_scan_ring(struct zxnpu_wlan *w, int ring, u8 seq,
 		u8 *buf = (u8 *)bufmem + slot * ZXNPU_MCU_RX_BUF_SIZE;
 		int j;
 
-		/* dump every consumed event: the DL responses may lag the
+		/* one line per consumed event: the DL responses may lag the
 		 * command by tens of seconds and a recycled 4-bit seq makes
 		 * silent consumption unreadable. WM keeps the historical
-		 * "evt[" tag so older run logs stay greppable. */
+		 * "evt[" tag so older run logs stay greppable. The byte
+		 * window is behind evt_log: the tuned firmware posts several
+		 * unsolicited events per second and a hex dump of each one
+		 * buries the result that matters (see the param's comment). */
 		if (ring)
-			zxnpu_wlan_append(w, "  evtwa[%u] eid=%02x seq=%02x:",
+			zxnpu_wlan_append(w, "  evtwa[%u] eid=%02x seq=%02x",
 					  tail + i, buf[28], buf[29]);
 		else
-			zxnpu_wlan_append(w, "  evt[%u] eid=%02x seq=%02x:",
+			zxnpu_wlan_append(w, "  evt[%u] eid=%02x seq=%02x",
 					  tail + i, buf[28], buf[29]);
-		for (j = 0; j < 24; j++)
-			zxnpu_wlan_append(w, " %02x", buf[j]);
-		zxnpu_wlan_append(w, " |");
-		/* 36 header bytes plus 32 of payload: query answers (efuse
-		 * blocks, register reads) carry their data past +36, and a
-		 * 36-byte window made every such answer look empty. */
-		for (j = 24; j < 68; j++)
-			zxnpu_wlan_append(w, " %02x", buf[j]);
+		if (zxnpu_wlan_evt_log) {
+			for (j = 0; j < 24; j++)
+				zxnpu_wlan_append(w, " %02x", buf[j]);
+			zxnpu_wlan_append(w, " |");
+			/* 36 header bytes plus 32 of payload: query answers
+			 * (efuse blocks, register reads) carry their data past
+			 * +36, and a 36-byte window made every such answer look
+			 * empty. */
+			for (j = 24; j < 68; j++)
+				zxnpu_wlan_append(w, " %02x", buf[j]);
+		}
 		zxnpu_wlan_append(w, "\n");
 		/* Hand the slot back: mt76_dma_rx_fill() rewrites ctrl (WITH
 		 * LAST_SEC0, WITHOUT DMA_DONE) whenever it refills a consumed
@@ -3817,6 +3833,300 @@ static int zxvap_parse_mac(const char *s, u8 *out)
 	return 0;
 }
 
+/*
+ * ---- firmware bring-up: DEV / MAC / channel / BSS (doc 62 s84) ----------
+ *
+ * The MCU running (fw-state 7) and the calibration uploaded are necessary but
+ * not sufficient: the firmware will drop every frame until the host has said
+ * which bands the MAC owns, which channel to tune and which BSS sits there.
+ * mt76 does that in mt7915_mcu_set_mac(), mt7915_mcu_add_dev_info(),
+ * mt7915_mcu_set_chan_info() and mt7915_mcu_add_bss_info(); the byte layouts
+ * below are those four functions, source cross-checked against
+ * mt76-2026.10.08 (mt76_connac_mcu.h / mt7915/mcu.c).
+ *
+ * All of them are MCU_EXT_CMD (cid 0xed) with set_query = MCU_Q_SET (1) and
+ * s2d = MCU_S2D_H2N (0): after MCU_RUNNING the ring is qid20 (MCU_WA) and the
+ * WA core answers on its own event ring, which is the path 3.80 proved.
+ *
+ * Sizes are the firmware ABI and are fixed: 20 B dev_info, 4 B mac_init,
+ * 76 B channel_switch, and a sta_req_hdr + TLV list for BSS_INFO_UPDATE.
+ */
+#define ZXNPU_MCU_EXT_CHAN_SWITCH	0x08
+#define ZXNPU_MCU_EXT_DEV_INFO		0x2a
+#define ZXNPU_MCU_EXT_BSS_INFO		0x26
+#define ZXNPU_MCU_EXT_MAC_INIT		0x46
+#define ZXNPU_MCU_EXT_RX_HDR_TRANS	0x47
+
+#define ZXNPU_MCU_Q_SET			1
+#define ZXNPU_MCU_S2D_H2N		0
+
+#define ZXNPU_DEV_INFO_ACTIVE		0
+#define ZXNPU_BSS_INFO_OMAC		0
+#define ZXNPU_BSS_INFO_BASIC		1
+#define ZXNPU_BSS_INFO_RF_CH		2
+#define ZXNPU_BSS_INFO_BMC_RATE		8
+
+#define ZXNPU_NETWORK_INFRA		0x00010000
+#define ZXNPU_CONN_INFRA_AP		0x00010002	/* STA_TYPE_AP | INFRA */
+#define ZXNPU_PHY_MODE_HT24		0x00000007	/* CCK | OFDM | HT */
+#define ZXNPU_CHAN_BW_20		0
+
+/* Chains actually populated on this band, from the eeprom select (2 on
+ * band0, 3 on band1 on this board). CHAN_INFO carries both a count
+ * (tx_path_num) and a mask (rx_path); mt76 derives them from mphy->chainmask
+ * and mt7915_band_chainshift(). */
+static u8 zxnpu_band_chains(struct zxnpu_wlan *w, int band)
+{
+	return w->band_path[band] ? w->band_path[band] : 1;
+}
+
+static u8 zxnpu_band_mask(struct zxnpu_wlan *w, int band)
+{
+	return (u8)((1u << zxnpu_band_chains(w, band)) - 1);
+}
+
+static int zxnpu_wlan_ext_set(struct zxnpu_wlan *w, u8 ext, const u8 *pl, int len)
+{
+	return zxnpu_wlan_mcu_ext_big(w, ext, ZXNPU_MCU_Q_SET, pl, len,
+				      ZXNPU_MCU_S2D_H2N, 2000);
+}
+
+/* tlv { le16 tag, le16 len, payload } with len counting the header, the
+ * encoding mt76_connac_mcu_add_tlv() uses. Returns the new offset. */
+static int zxnpu_tlv_put(u8 *buf, int off, int max, u16 tag,
+			 const void *payload, int len)
+{
+	if (off + 4 + len > max)
+		return -ENOSPC;
+	put_unaligned_le16(tag, buf + off);
+	put_unaligned_le16(len + 4, buf + off + 2);
+	memcpy(buf + off + 4, payload, len);
+	return off + 4 + len;
+}
+
+/*
+ * DEV_INFO_UPDATE (ext 0x2a): mt7915_mcu_add_dev_info. The firmware binds
+ * omac_idx/band_idx to the address the MAC uses on that band; without it
+ * BSS_INFO_UPDATE is answered but has no device to attach to.
+ *   hdr: omac_idx, band_idx, tlv_num=1, is_tlv_append=1, rsv[3]
+ *   tlv DEV_INFO_ACTIVE: tag, len=12, active, band_idx, omac_addr[6]
+ */
+static int zxnpu_wlan_fw_dev_info(struct zxnpu_wlan *w, int band, bool enable)
+{
+	u8 req[20];
+
+	memset(req, 0, sizeof(req));
+	req[0] = 0;			/* omac_idx: first AP slot */
+	req[1] = band;
+	put_unaligned_le16(1, req + 2);	/* tlv_num */
+	req[4] = 1;			/* is_tlv_append */
+
+	put_unaligned_le16(ZXNPU_DEV_INFO_ACTIVE, req + 8);
+	put_unaligned_le16(12, req + 10);
+	req[12] = enable ? 1 : 0;
+	req[13] = band;
+	memcpy(req + 14, w->mac, 6);
+
+	return zxnpu_wlan_ext_set(w, ZXNPU_MCU_EXT_DEV_INFO, req, sizeof(req));
+}
+
+/*
+ * RX_HDR_TRANS (0x47) + MAC_INIT_CTRL (0x46): mt7915_mcu_set_mac.
+ * hdr_trans stays 0, i.e. the host builds the 802.11 header and the TXD, and
+ * RX arrives with its 802.11 header + RX status intact - which is what the
+ * host-side drain in data-recv needs. MAC_INIT_CTRL then enables the band.
+ */
+static int zxnpu_wlan_fw_mac(struct zxnpu_wlan *w, int band, bool enable)
+{
+	u8 rxt[8];
+	u8 req[4];
+	int ret;
+
+	memset(rxt, 0, sizeof(rxt));	/* operation 0, hdr_trans off */
+	ret = zxnpu_wlan_ext_set(w, ZXNPU_MCU_EXT_RX_HDR_TRANS, rxt,
+				 sizeof(rxt));
+	zxnpu_wlan_append(w, "  rx-hdr-trans band %d off: ret=%d\n", band, ret);
+	if (ret)
+		return ret;
+
+	memset(req, 0, sizeof(req));
+	req[0] = enable ? 1 : 0;
+	req[1] = band;
+	return zxnpu_wlan_ext_set(w, ZXNPU_MCU_EXT_MAC_INIT, req, sizeof(req));
+}
+
+/*
+ * CHANNEL_SWITCH (0x08): mt7915_mcu_set_chan_info. 76 bytes; the firmware
+ * runs the RF/BB channel set (and, with the eeprom in place, the per-channel
+ * calibration) from it. switch_reason = CH_SWITCH_NORMAL (0), so no CAC/DFS
+ * bypass games. Only 20 MHz for now: bw != 0 needs the matching center_ch.
+ *
+ * rx_path is a COUNT here, not a mask: mt7915_mcu_set_chan_info() reshapes it
+ * with `if (cmd == MCU_EXT_CMD(CHANNEL_SWITCH)) req.rx_path = hweight8(...)`.
+ * 3.86 sent the 0x3 mask on a 2-chain band and the WA core wedged inside the
+ * tune - every later command timed out, including FW_LOG which had answered
+ * minutes earlier. The timeout budget is wider for the same reason: the first
+ * tune runs the calibration, not just a PLL retune.
+ */
+static int zxnpu_wlan_fw_chan(struct zxnpu_wlan *w, int band, unsigned int ch)
+{
+	u8 req[76];
+
+	if (ch < 1 || ch > 196)
+		return -EINVAL;
+	memset(req, 0, sizeof(req));
+	req[0] = ch & 0xff;			/* control_ch */
+	req[1] = ch & 0xff;			/* center_ch (20 MHz) */
+	req[2] = ZXNPU_CHAN_BW_20;
+	req[3] = zxnpu_band_chains(w, band);	/* tx_path_num */
+	req[4] = zxnpu_band_chains(w, band);	/* rx_path: count, not mask */
+	req[5] = 0;				/* CH_SWITCH_NORMAL */
+	req[6] = band;				/* band_idx */
+	req[10] = band ? 1 : 0;			/* channel_band */
+
+	return zxnpu_wlan_mcu_ext_big(w, ZXNPU_MCU_EXT_CHAN_SWITCH,
+				      ZXNPU_MCU_Q_SET, req, sizeof(req),
+				      ZXNPU_MCU_S2D_H2N, 5000);
+}
+
+/*
+ * BSS_INFO_UPDATE (0x26): mt7915_mcu_add_bss_info. sta_req_hdr followed by
+ * the TLV list. Enable sends OMAC + BASIC + RF_CH + BMC_RATE (the HE and
+ * HW_AMSDU TLVs are omitted: no HE support advertised yet, and an optional
+ * TLV is exactly that). Disable sends BASIC alone with active = 0.
+ */
+static int zxnpu_wlan_fw_bss(struct zxnpu_wlan *w, int band, bool enable)
+{
+	struct zxnpu_bss *bss = &zxna_bss[band];
+	u8 req[128];
+	u8 tlv[24];
+	int off = 8, n = 0, ret;
+
+	if (enable && !bss->channel)
+		return -EINVAL;
+
+	memset(req, 0, sizeof(req));
+	req[0] = band;		/* bss_idx */
+	req[1] = 0;		/* wlan_idx_lo: bmc wcid 0 */
+	req[4] = 1;		/* is_tlv_append */
+	req[5] = 0;		/* muar_idx: AP bss has no wcid */
+
+	if (enable) {
+		memset(tlv, 0, sizeof(tlv));
+		tlv[0] = 0;		/* hw_bss_idx */
+		tlv[1] = 0;		/* omac_idx */
+		tlv[2] = band;		/* band_idx */
+		put_unaligned_le32(ZXNPU_CONN_INFRA_AP, tlv + 4);
+		off = zxnpu_tlv_put(req, off, sizeof(req), ZXNPU_BSS_INFO_OMAC,
+				    tlv, 12);
+		if (off < 0)
+			return off;
+		n++;
+	}
+
+	memset(tlv, 0, sizeof(tlv));
+	put_unaligned_le32(ZXNPU_NETWORK_INFRA, tlv + 0);
+	tlv[4] = enable ? 1 : 0;		/* active */
+	put_unaligned_le16(100, tlv + 6);	/* bcn_interval */
+	memcpy(tlv + 8, w->mac, 6);		/* bssid */
+	tlv[14] = 0;				/* wmm_idx: AP = 0 */
+	tlv[15] = 1;				/* dtim_period */
+	tlv[16] = 0;				/* bmc_wcid_lo */
+	tlv[17] = 0;				/* cipher: none */
+	tlv[18] = band ? 0x06 : ZXNPU_PHY_MODE_HT24;	/* OFDM|HT vs CCK|OFDM|HT */
+	tlv[19] = 0;				/* max_bssid: MBSSID off */
+	tlv[20] = 0;				/* non_tx_bssid */
+	tlv[21] = 0;				/* bmc_wcid_hi */
+	off = zxnpu_tlv_put(req, off, sizeof(req), ZXNPU_BSS_INFO_BASIC,
+			    tlv, 24);
+	if (off < 0)
+		return off;
+	n++;
+
+	if (enable) {
+		/* RF_CH: pri/center/bw, he_all_disable since no HE */
+		memset(tlv, 0, sizeof(tlv));
+		tlv[0] = bss->channel & 0xff;
+		tlv[1] = bss->channel & 0xff;
+		tlv[2] = 0;
+		tlv[3] = ZXNPU_CHAN_BW_20;
+		tlv[5] = 1;			/* he_all_disable */
+		off = zxnpu_tlv_put(req, off, sizeof(req), ZXNPU_BSS_INFO_RF_CH,
+				    tlv, 8);
+		if (off < 0)
+			return off;
+		n++;
+
+		/* BMC_RATE: 2 GHz = short preamble; 5 GHz = the two
+		 * translation words mt7915_mcu_bss_bmc_tlv uses. */
+		memset(tlv, 0, sizeof(tlv));
+		if (band) {
+			put_unaligned_le16(0x2000, tlv + 0);
+			put_unaligned_le16(0x2080, tlv + 2);
+		} else {
+			tlv[4] = 1;		/* short_preamble */
+		}
+		off = zxnpu_tlv_put(req, off, sizeof(req),
+				    ZXNPU_BSS_INFO_BMC_RATE, tlv, 12);
+		if (off < 0)
+			return off;
+		n++;
+	}
+
+	put_unaligned_le16(n, req + 2);	/* tlv_num */
+	ret = zxnpu_wlan_ext_set(w, ZXNPU_MCU_EXT_BSS_INFO, req, off);
+	if (!ret && zxnpu_wlan_commit)
+		bss->active = enable;
+	return ret;
+}
+
+/*
+ * fw-up <band> <ch>: the four steps in the order mt7915_mac_add_interface()
+ * and mt7915_bss_info_changed() apply them. Requires the full download
+ * (fw-state 7) and the eeprom upload to have happened in this boot.
+ */
+static void zxnpu_wlan_fw_up(struct zxnpu_wlan *w, const char *args)
+{
+	unsigned int band = 0, ch = 0;
+	int ret;
+
+	if (sscanf(args, "%u %u", &band, &ch) < 2 || band > 1) {
+		zxnpu_wlan_append(w, "usage: radio-up <band 0|1> <channel>\n");
+		return;
+	}
+	zxnpu_wlan_append(w, "radio-up: band %u ch %u chains %u mask %#x (%s)\n",
+			  band, ch, zxnpu_band_chains(w, band),
+			  zxnpu_band_mask(w, band),
+			  zxnpu_wlan_commit ? "COMMIT" : "dry run");
+	zxnpu_wlan_append(w, "  mac %pM (eeprom; mac-set overrides)\n", w->mac);
+
+	ret = zxnpu_wlan_fw_mac(w, band, true);
+	zxnpu_wlan_append(w, "  mac-init-ctrl: ret=%d\n", ret);
+	if (ret)
+		return;
+
+	ret = zxnpu_wlan_fw_dev_info(w, band, true);
+	zxnpu_wlan_append(w, "  dev-info: ret=%d\n", ret);
+	if (ret)
+		return;
+
+	ret = zxnpu_wlan_fw_chan(w, band, ch);
+	zxnpu_wlan_append(w, "  channel-switch ch=%u: ret=%d\n", ch, ret);
+	if (ret)
+		return;
+	if (zxnpu_wlan_commit) {
+		zxna_bss[band].band = band;
+		zxna_bss[band].channel = ch;
+	}
+
+	ret = zxnpu_wlan_fw_bss(w, band, true);
+	zxnpu_wlan_append(w, "  bss-info-update: ret=%d\n", ret);
+	if (ret)
+		return;
+	zxnpu_wlan_append(w, "  band %u up: ch=%u bssid %pM tx-path %u\n",
+			  band, ch, w->mac, zxnpu_band_chains(w, band));
+}
+
 static ssize_t zxnpu_wlan_ctl_write(struct file *file, const char __user *ubuf,
 				    size_t count, loff_t *ppos)
 {
@@ -4116,6 +4426,8 @@ done_ctl:
 			goto done_bss;
 		}
 		zxna_bss[band].band = band;
+		zxna_bss[band].channel = ch;
+		strscpy(zxna_bss[band].ssid, ssid, sizeof(zxna_bss[band].ssid));
 		zxnpu_wlan_append(w, "bss-set: band %u staged ch=%u ssid='%s'%s\n",
 				  band, ch, ssid,
 				  zxnpu_wlan_commit ?
@@ -4123,6 +4435,63 @@ done_ctl:
 				  " (dry run)");
 done_bss:
 		zxnpu_wlan_append(w, "\n");
+	} else if (!strncmp(cmd, "mac-set ", 8)) {
+		/* mac-set <12 hex>: override the MAC taken from the eeprom
+		 * template (00:0c:43:26:60:00). The unit MAC lives in the
+		 * MT7916's own efuse, which this host path cannot read. */
+		u8 mac[6];
+
+		if (zxvap_parse_mac(cmd + 8, mac)) {
+			zxnpu_wlan_append(w, "usage: mac-set <12 hex digits>\n");
+		} else {
+			memcpy(w->mac, mac, 6);
+			zxnpu_wlan_append(w, "mac-set: %pM\n", w->mac);
+		}
+	} else if (!strncmp(cmd, "radio-mac ", 10)) {
+		unsigned int band = 0, en = 0;
+
+		if (sscanf(cmd + 10, "%u %u", &band, &en) < 2 || band > 1) {
+			zxnpu_wlan_append(w, "usage: radio-mac <band 0|1> <0|1>\n");
+			goto done_fw;
+		}
+		zxnpu_wlan_append(w, "radio-mac band %u enable %u: ret=%d\n",
+				  band, en,
+				  zxnpu_wlan_fw_mac(w, band, !!en));
+done_fw:
+		zxnpu_wlan_append(w, "\n");
+	} else if (!strncmp(cmd, "radio-chan ", 11)) {
+		unsigned int band = 0, ch = 0;
+		int ret;
+
+		if (sscanf(cmd + 11, "%u %u", &band, &ch) < 2 || band > 1) {
+			zxnpu_wlan_append(w, "usage: radio-chan <band 0|1> <channel>\n");
+			goto done_chan;
+		}
+		ret = zxnpu_wlan_fw_chan(w, band, ch);
+		if (!ret && zxnpu_wlan_commit) {
+			zxna_bss[band].band = band;
+			zxna_bss[band].channel = ch;
+		}
+		zxnpu_wlan_append(w, "radio-chan band %u ch %u chains %u mask %#x: ret=%d\n",
+				  band, ch, zxnpu_band_chains(w, band),
+				  zxnpu_band_mask(w, band), ret);
+done_chan:
+		zxnpu_wlan_append(w, "\n");
+	} else if (!strncmp(cmd, "radio-bss ", 10)) {
+		unsigned int band = 0, en = 0;
+		int ret;
+
+		if (sscanf(cmd + 10, "%u %u", &band, &en) < 2 || band > 1) {
+			zxnpu_wlan_append(w, "usage: radio-bss <band 0|1> <0|1>\n");
+			goto done_fwbss;
+		}
+		ret = zxnpu_wlan_fw_bss(w, band, !!en);
+		zxnpu_wlan_append(w, "radio-bss band %u enable %u (ch %u): ret=%d\n",
+				  band, en, zxna_bss[band].channel, ret);
+done_fwbss:
+		zxnpu_wlan_append(w, "\n");
+	} else if (!strncmp(cmd, "radio-up ", 9)) {
+		zxnpu_wlan_fw_up(w, cmd + 9);
 	} else if (!strncmp(cmd, "sync", 4)) {
 		zxnpu_wlan_ring_sync(w, zxnpu_wlan_commit);
 	} else if (!strncmp(cmd, "driver-own", 10)) {
@@ -4139,7 +4508,7 @@ done_bss:
 			zxnpu_wlan_append(w, "commit refused: set zxnpu_wlan.commit=1\n");
 		zxnpu_wlan_wfdma(w, commit);
 	} else {
-		zxnpu_wlan_append(w, "commands: l1profile | ack-expect | data-init | data-recv | dataplane | probe | scan | win <bar> <off> [n] | crw <a> <v> | fw | plan | mcu | rings | mcuwin | mcu-send | mcu-cmd | mcu-dl | mcu-dl-regions | fw-start | fw-info | fw-audit | fw-state | fw-plan wm|wa | fw-dl wm|wa | rx-init | mcu-recv | driver-own | wfsys-reset | dma-init | commit\n");
+		zxnpu_wlan_append(w, "commands: l1profile | ack-expect | data-init | data-recv | dataplane | probe | scan | win <bar> <off> [n] | crw <a> <v> | fw | plan | mcu | rings | mcuwin | mcu-send | mcu-cmd | mcu-dl | mcu-dl-regions | fw-start | fw-info | fw-audit | fw-state | fw-plan wm|wa | fw-dl wm|wa | rx-init | mcu-recv | mac-set | radio-mac | radio-chan | radio-bss | radio-up | driver-own | wfsys-reset | dma-init | commit\n");
 	}
 	mutex_unlock(&w->lock);
 	return count;
