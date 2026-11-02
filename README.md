@@ -44,6 +44,28 @@
 | PPPoE 硬件转发 | ❌ | 未验证（同族 ZX279133 实测不走硬件路径） |
 | Wi-Fi 关联死机 / 冷启挂死 | ❌ | 未根治；有 pending 标记自愈兜底（损失一次断电） |
 
+## 原厂驱动重写线（`native` 分支，实验）
+
+主固件用 mt76 驱动 MT7916，能用。`native` 分支做的是另一件事：**不用 mt76**，把原厂
+4.1.25 的 `mt7916.ko`（未 strip，25 345 个符号）当作唯一行为规范，在 6.18 上把
+WFDMA / MCU 双核 / 私有 TXD 这一层显式重写出来，目标是让无线侧也能接上 SoC 的硬件加速，
+而不是停在 mt76 的 CPU 路径上。
+
+三条做法：
+
+1. **读二进制，不猜**。宿主 binutils 不认 ARM，所以自带 ELF32 解析 + capstone 的反汇编工具
+   （`native/tools/re/`），按符号取函数、按重定位还原调用目标；
+2. **先算再刷**。字段表读全、手算期望值，刷机只验证固件行为，不验证"我算错没有"；
+3. **一次一个假设**。一个 boot 只有一轮"复位→下载→RDY"，命令写错会把 WA 核打死只能重刷。
+
+**结论（版本 3.97，2026-11-02）**：前四段对齐成立——固件下载（`fw-state=7`）、校准上传
+（4 页 `ret=0`）、band0 的 MAC/DEV/信道/BSS/STA_REC/DRR 全部 `ret=0`、数据帧描述符字节正确
+且被 DMA 引擎取走。**但"引擎读走描述符"与"帧真的出现在空中"之间还差两层主机侧初始化**
+（MAC 层的 band 寄存器、AP 启动的信标/TBTT/中断收尾），这两层目前是空白，也是下一步唯一要做的事。
+
+完整过程、已确证的寄存器事实、已排除的假设与后续路线见
+[docs/原生无线驱动重写-2026-11-02.md](docs/原生无线驱动重写-2026-11-02.md)。
+
 ## 构建
 
 WSL（或任意 Linux）内：
@@ -63,48 +85,22 @@ make build                  # make world + 打包成原厂 .bin
 
 ## 致谢
 
-- **@ghahramani** —— H3600 这一整条线：[openwrt/openwrt#25469](https://github.com/openwrt/openwrt/pull/25469)、
-  构建分支 [ghahramani/openwrt 的 `zte-zxhn-h3600`](https://github.com/ghahramani/openwrt/tree/zte-zxhn-h3600)、
-  24 补丁的主线 RFC [ghahramani/linux 的 `h3600-linux-rfc` 分支](https://github.com/ghahramani/linux/tree/h3600-linux-rfc)，
-  以及那篇[工程长文](https://ghahremani.medium.com/resurrecting-isp-e-waste-how-an-ai-breakthrough-unlocked-the-hyperoptic-zte-h3600-ported-modern-60e74c87c11e)。
-  本仓库 overlay 的那棵基线树就是该分支的镜像
-  （[`Zlion-Y/openwrt-sanechips-mirror`](https://github.com/Zlion-Y/openwrt-sanechips-mirror)，钉在 `db8b8d4`）——
-  没有它，这个端口得从一个空 `target/` 开始啃。同时要说清楚：其中若干公开说法在这块板子上没活下来
-  （`kernel1`/`kernel2` 这两个分区名、"`mtd erase kernel1` 就能回原厂"、`TESTED.md` 里那个 sha256 和它的"USB 3.0"），
-  每条都连同"是哪个实测把它关掉"的记在
-  [docs/01-情报汇总与事实核验-2026-10-13.md](docs/01-情报汇总与事实核验-2026-10-13.md) 里。
-  感谢和更正都是认真的。
-- **[@zwzzrl](https://github.com/zwzzrl/zte-e2631-openwrt)** —— 同型端口的真机迭代者，本仓库
-  v1.4–v1.8 的很大一部分来自他的实测与代码：
-  - **手动 WAN 口选择**整个功能（`sbin/e2631-wanport`、LuCI「网络 → WAN 口」页、`e2631_ports`、
-    14 场景离线自检）连同他的真机整链验收（wan → lan3 → 回退）一起采纳；他同时用两起真实事故
-    证明了「自动盲插」不可取（PPPoE/静态上行探不到；自动切换会把管理网口切成 WAN，WAN 区
-    input=REJECT → SSH/HTTP 全断，只能到现场换线）。
-  - **硬件卸载打断 IPv6 TCP** 是他先在真机上测出来的（握手 1ms、载荷 0 字节），并定位到
-    `zx_update_traps()` 清 IPv6 ethertype trap + MAC 移出 trap-DMAC 表的联动。本仓库据此
-    选择「改驱动而非关功能」（PPE 激活时 IPv6 trap 恒开），但问题的发现与因果链是他的。
-  - `e2631-wifi-boot` 的**重配网修复**（标记存在但 uci 里没有 wifi-device 时重新 provision，
-    否则整个开机周期 LuCI 都没有无线页）、出厂 `wireless` 段、apply.sh 的
-    **overlay-removed 删除同步**机制、rpcd 插件执行位、`/etc/config` 权限归一，均来自他的真机踩坑。
-  - 他对 **PPE/IPv6 卸载的外部哈希表**、原厂 CLA 初始化寄存器、520 槽/5 张 hash 表、以及
-    「PPE 模块 AUTOLOAD 会把机器搞成开机挂死」的警告，构成了 `docs/原厂加速方案逆向-2026-10-28.md`
-    的重要输入（其中「开机挂死只能串口救」那条，直接决定了我们不在未验证的情况下发货 FFE 控制面）。
-- **[@zwthys-cyber](https://github.com/zwthys-cyber/zte-e2631-openwrt)** —— 升级加固与 CI：
-  强制且严格解析的 `SHA256SUMS`、镜像加速仅 https、限定发布仓库、升级失败路径回归测试
-  （`tests/test_upgrade.py`），以及本仓库 `.github/workflows/` 的两个 workflow 的基线。
-- [cubingmucus998/zte-zx279128s-recon](https://github.com/cubingmucus998/zte-zx279128s-recon) —— 这颗 SoC 的公开侦察材料。
-  最早那批 DTB、分区表和 flash 事实，很大一块出自这里。
-- **@cnjn** —— [linux-mainline-zte-zxslc-sr1010](https://github.com/cnjn/linux-mainline-zte-zxslc-sr1010)：
-  ZX279133 的 UART 逆向与主线补丁系列，是这条线上的前序工作。E2631 的若干结论是拿它当对照才确认（或被推翻）的。
-  同作者的 [zte-mesh](https://github.com/cnjn/zte-mesh)（原厂 multiapd 沙箱化当 mesh 主控，[恩山帖](https://www.right.com.cn/forum/thread-8486503-1-1.html)）
-  自 v1.3 起以 `overlay/package/network/zte-mesh` 整体引入：PAUSE 帧压上传、PPPoE 不走硬转、JFFS2 清除标记放数据区
-  这几条同族坑也是他的实测先指出来的。
-- [openwrt.style.dev/h3600](https://openwrt.style.dev/h3600/) —— 海外的 H3600 适配记录。
-  2026-10-15 抓它时返回 502，而且站内并存三套互不兼容的回退说法 ⇒ 把它当线索，不要当权威。
-- [恩山无线论坛上关于这台机器的讨论](https://www.right.com.cn/forum/thread-8487689-1-3.html) —— 中文社区那一侧的记录，
-  包括一些没人用英文写下来的原厂行为。
-- **OpenWrt 与 Linux kernel 两个上游项目**，以及 mt76 的维护者们（**@nbd168** 等）。我们只带了**一个** mt76 补丁
-  （`overlay/package/kernel/mt76/patches/002-mt7915-use-caldata-file-before-efuse.patch`）和**三个** target 补丁
-  （`029`/`030` 是 SPI-NAND 上的 JFFS2，`031` 是 PCIe 链路重训练那道闸）；其余全是上游原样。
-
-上面这些若有写错或漏掉的，正确的地方是把它连同证据一起补进 `docs/01-...md`，而不是在这里加个脚注。
+- **[@ghahramani](https://github.com/ghahramani)** —— H3600 整条线：
+  [openwrt#25469](https://github.com/openwrt/openwrt/pull/25469)、
+  [构建分支](https://github.com/ghahramani/openwrt/tree/zte-zxhn-h3600)、
+  [主线 RFC](https://github.com/ghahramani/linux/tree/h3600-linux-rfc)、
+  [工程长文](https://ghahremani.medium.com/resurrecting-isp-e-waste-how-an-ai-breakthrough-unlocked-the-hyperoptic-zte-h3600-ported-modern-60e74c87c11e)。
+  本仓库 overlay 基线树即该分支镜像（钉在 `db8b8d4`）；其中若干公开说法在这块板子上不成立，
+  逐条更正见 [docs/01](docs/01-情报汇总与事实核验-2026-10-13.md)。
+- **[@zwzzrl](https://github.com/zwzzrl/zte-e2631-openwrt)** —— 手动 WAN 口选择、IPv6 硬件卸载打断 TCP
+  的发现与因果链、`e2631-wifi-boot` 重配网修复，以及 PPE 逆向的多项输入。
+- **[@zwthys-cyber](https://github.com/zwthys-cyber/zte-e2631-openwrt)** —— 升级加固
+  （`SHA256SUMS`、仅 https 镜像加速、失败路径回归）与 CI 基线。
+- **[cubingmucus998/zte-zx279128s-recon](https://github.com/cubingmucus998/zte-zx279128s-recon)** ——
+  这颗 SoC 最早的公开 DTB、分区表与 flash 事实。
+- **[@cnjn](https://github.com/cnjn)** —— [zxslc-sr1010](https://github.com/cnjn/linux-mainline-zte-zxslc-sr1010)
+  的 UART 逆向与主线补丁；[zte-mesh](https://github.com/cnjn/zte-mesh) 自 v1.3 起整体引入。
+- **[openwrt.style.dev/h3600](https://openwrt.style.dev/h3600/)** 与
+  [恩山讨论帖](https://www.right.com.cn/forum/thread-8487689-1-3.html) —— 只当线索：前者抓取时 502
+  且站内说法互斥，后者补了不少没被英文记录的原始行为。
+- **OpenWrt / Linux 上游与 mt76 维护者（@nbd168 等）** —— 本仓库只带一个 mt76 补丁与三个 target 补丁。
