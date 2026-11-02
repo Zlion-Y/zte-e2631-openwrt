@@ -3485,3 +3485,22 @@ ret=0。qid20 `cidx=didx=16`（命令被 DMA 取走）但事件环零应答，�
   于 v1.3-v1.8.0 实测过 TX（200M/HE80），若它在 native 内核上同样工作，
   二分定位 native TX 缺口；顺带得到可用 WiFi 基线。native zxnpu-wlan 默认
   parked（enable=0）不冲突。构建 3.107-mt76（mac80211 全新编译，长）。
+
+## 95. R103/R104：mt7915e 对照线——构建链全通，bind 即重启（3.108-mt76，2026-11-03）
+
+- `E2631_MT76=1` 对照构建打通（apply.sh 开关 + overlay 恢复 v1.x 全套 +
+  config 写入 + kmod-mt76-core/connac/mt7615-common 依赖链 + stale apk 清理
+  + 两枚 v1.x 手写补丁的 hunk 头/空格前缀修复——**机械重生成**落地为
+  `998-zx-tx-paths.patch`）。构建时序坑：build.sh 重入会重跑 apply 清掉
+  mt76 =y（须全程带 E2631_MT76=1）；stale mt76 apk 带旧内核 hash 卡 apk
+  world-solve（"unable to select: breaks: kmod-mt76-core"），全家族
+  apk+stamp 清零后 make world 顺序重生成即过。
+- 3.108-mt76 上机：有线正常（device-verify 全过）、mt76 全家族模块加载
+  （mt7915e/mt76_connac_lib/mt76/mac80211/cfg80211）、caldata staging 成功。
+- **mt7915e probe 即崩**：解绑 zxnpu-wlan → `bind mt7915e` → 整机重启
+  （dmesg 归零、无 panic 留存——无 pstore）。背景：zxnpu-wlan（parked）与
+  mt7915e 竞争同一 PCI 设备，wifi-on 脚本每轮把设备绑回 zxnpu-wlan。
+- 待做：TTL（COM7）复现抓 probe 崩溃现场；或出"纯 mt76"变体镜像
+  （MT76=1 时移除 zxnpu-wlan/NPU 驱动）排除共存干扰。
+- pack.sh 的 verify_img 含 "native line 无开源无线驱动" 静态门禁，对
+  MT76=1 构建误报 BLOCKER（镜像本身正确，设备已运行 3.108-mt76）。
