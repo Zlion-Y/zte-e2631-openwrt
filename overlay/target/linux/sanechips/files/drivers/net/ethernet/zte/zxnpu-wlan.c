@@ -2454,7 +2454,11 @@ static void zxnpu_wlan_txfree_init(struct zxnpu_wlan *w, bool commit)
 		return;
 	zxnpu_cr_write(w, ZXNPU_TXFREE_RX_REG, (u32)w->dtf_ring_dma);
 	zxnpu_cr_write(w, ZXNPU_TXFREE_RX_REG + 4, ZXNPU_TXFREE_DEPTH);
-	zxnpu_cr_write(w, ZXNPU_TXFREE_RX_REG + 8, ZXNPU_TXFREE_DEPTH);
+	/* RX rings start EMPTY with cpu_idx = depth-1 (vendor
+	 * mt_asic_init_txrx_ring second loop, and mt76_dma_rx_fill's
+	 * ndesc-1) - posting the full depth made the engine read the ring
+	 * as full and stalled the TX-free path. */
+	zxnpu_cr_write(w, ZXNPU_TXFREE_RX_REG + 8, ZXNPU_TXFREE_DEPTH - 1);
 	w->dtf_cidx = 0;
 	zxnpu_wlan_append(w, "  after:  base=%08x cnt=%u cidx=%u didx=%u\n",
 			  zxnpu_cr_read(w, ZXNPU_TXFREE_RX_REG),
@@ -4773,11 +4777,13 @@ static int zxnpu_wlan_bcn_set(struct zxnpu_wlan *w, const char *args, bool dump)
 	/* OFFLOAD TLV body: [ver][enable][sub_ntlv] + nested CONTENT. Lengths
 	 * follow mt76's add_tlv convention where the len field counts the
 	 * TLV's OWN 4-byte tag+len header: sizeof(bss_info_bcn_cont) = 12
-	 * already includes its header, so the sub-TLV total is 4(hdr of the
-	 * wrapper we build here) + 12 + 32 + frame. Getting this +4 too big
-	 * once made the firmware ack the command and then die parsing it -
-	 * WA stopped answering anything and the beacon never transmitted. */
+	 * already includes its header, so the sub-TLV total is 12 + 32 +
+	 * frame. mt76 additionally 4-byte aligns the nested sub-TLV size
+	 * before accumulating it into the parent - the firmware's walker
+	 * strides aligned, and an unaligned stride had it parse zeros past
+	 * our TLV and take the WA core down with it. */
 	sub_len = 12 + 32 + flen;		/* CONTENT sub-TLV total */
+	sub_len = (sub_len + 3) & ~3;		/* mt76: align to 4 bytes */
 	plen = 4 + sub_len;			/* ver/en/subntlv + sub-TLV */
 	memset(tlv, 0, sizeof(tlv));
 	tlv[0] = 0;				/* ver */
