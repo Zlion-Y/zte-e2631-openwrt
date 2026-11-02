@@ -136,11 +136,23 @@ struct zxnpu_wlan {
 	void *dband_ring;	/* qid19 / BAND1 TX data ring (empty: TXD undecoded) */
 	dma_addr_t dband_ring_dma;
 	dma_addr_t dtx_ring_dma;
-	void *drx_ring;		/* qid1 RX data ring, 64 x 36 descriptors */
+	void *drx_ring;		/* qid4 / 0x18024540: BAND0 data RX ring, 64 desc */
 	dma_addr_t drx_ring_dma;
 	void *drx_buf;		/* 64 x 1700 buffers with 16B RXD */
 	dma_addr_t drx_buf_dma;
 	u32 drx_cidx;
+	/* qid2 / 0x18024520: MT7916_RXQ_MCU_WA_MAIN, the band0 TX-free
+	 * notification ring ("tx free notify event from WA for band0" in
+	 * mt76). The firmware does NOT arm this one: 3.95 read it back as
+	 * base=00000000 cnt=512, so the host has to - which is what
+	 * mt76_dma_rx_fill() does for MT_RXQ_MAIN_WA. Before that, the only
+	 * TX-free ever seen was the one 3.90-3.94 accidentally collected by
+	 * pointing the *data* ring at this address. */
+	void *dtf_ring;
+	dma_addr_t dtf_ring_dma;
+	void *dtf_buf;
+	dma_addr_t dtf_buf_dma;
+	u32 dtf_cidx;
 	u32 dtx_cidx;		/* qid18 band0 TX ring producer index */
 	/* MT7916_EEPROM.bin: the full 0x1000 v2 map the vendor image ships.
 	 * mt7915_eeprom_load_default() is the same fallback in mt76, and it is
@@ -2152,12 +2164,28 @@ MODULE_PARM_DESC(rx_repost,
  * ring stays empty until that lands (documented gap, doc 42).
  */
 #define ZXNPU_DATA_TX_REG	(ZXNPU_WFDMA_TX_RING0 + 0x10 * 2)
-/* qid2, NOT qid1: the RX ring block is shared with the MCU event rings, and
- * +0x10 is the WA event ring (0x18024510). data-init used to write its data
- * RX base there, i.e. it would have replaced the ring the firmware answers
- * commands on. mt76's queue map is 0 = MCU WM events, 1 = MCU WA events,
- * 2 = band0 data, 3 = band1 data. */
-#define ZXNPU_DATA_RX_REG	(ZXNPU_WFDMA_RX_RING0 + 0x10 * 2)
+/* The RX ring block is shared by six rings, 0x10 apart from 0x18024500:
+ *
+ *   0  MCU_WM event          1  MCU_WA event        2  MCU_WA_MAIN (band0
+ *                                                       TX-free notify)
+ *   3  MCU_WA_EXT            4  BAND0 data          5  BAND1 data
+ *
+ * That is `enum mt7916_rxq_id` (mt7915.h), and `mt76_dma_alloc_queue()` puts
+ * ring `idx` at `MT_RXQ_RING_BASE(q) + idx * MT_RING_SIZE` with
+ * MT_RING_SIZE = 0x10, MT_RXQ_RING_BASE = 0x18024500 - so band0 data is
+ * 0x18024540. The vendor image agrees: chip_show_dma_info() dumps six RX
+ * rings at 0x18024500..0x18024550.
+ *
+ * 3.90-3.94 used 0x18024520, which is MCU_WA_MAIN, i.e. "tx free notify event
+ * from WA for band0" (mt76's own comment on that queue). That is exactly why
+ * the only packet ever seen there was one TX-free, right after data-init, and
+ * never a received frame - and why it stopped after one: the ring was being
+ * serviced with data-ring index semantics while the WA core kept it as an
+ * event ring. */
+#define ZXNPU_DATA_RX_REG	(ZXNPU_WFDMA_RX_RING0 + 0x10 * 4)
+#define ZXNPU_TXFREE_RX_REG	(ZXNPU_WFDMA_RX_RING0 + 0x10 * 2)
+#define ZXNPU_TXFREE_DEPTH	64
+#define ZXNPU_TXFREE_BUF_SIZE	1024
 #define ZXNPU_DATA_DEPTH	64
 #define ZXNPU_DATA_BUF_SIZE	1700
 
@@ -2207,16 +2235,29 @@ static void zxnpu_wlan_data_init(struct zxnpu_wlan *w, bool commit)
 	glo = zxnpu_cr_read(w, ZXNPU_WFDMA_GLO_CFG);
 	zxnpu_cr_write(w, ZXNPU_WFDMA_GLO_CFG, glo | 0x7);
 	/* Vendor order and vendor values, mt_asic_init_txrx_ring() in
-	 * mt7916.ko. Its SECOND loop is the RX rings and it does:
-	 *     r8 = [r4+0x14]                         ; depth
-	 *     hif_io_write32(hc, [r4+0x4c], buf_dma) ; base      first
-	 *     hif_io_write32(hc, [r4+0x3c], [r4+0x34]); base+8 <- depth-1
-	 *     hif_io_write32(hc, [r4+0x50], r8)      ; base+4 <- depth
-	 * so an RX ring is armed with CPU_IDX = depth-1, i.e. "all but one
-	 * slot are free", and the counter is written last. The FIRST loop in
-	 * that function is the TX/MCU side, where CPU_IDX is 0 - 3.93 read
-	 * that one and armed RX with 0, which the engine took as "no free
-	 * slot" and delivered nothing at all. */
+	 * mt7916.ko. Its SECOND loop is the RX rings; the ring struct fields it
+	 * uses are now known exactly (see also pci_rx_dma_done_handle, which
+	 * publishes ring->[+0x34] to the register held in ring->[+0x3c]):
+	 *
+	 *     +0x14 depth (h)     +0x4c base  reg     +0x50 cnt reg
+	 *     +0x34 publish value +0x3c cpu_idx reg   +0x08 dma_idx reg
+	 *
+	 *     ldrh r8, [r4, #0x14]                    ; depth
+	 *     hif_io_write32(hc, [r4+0x4c], desc_dma) ; base   first
+	 *     hif_io_write32(hc, [r4+0x3c], [r4+0x34]); cpu_idx <- depth-1
+	 *     hif_io_write32(hc, [r4+0x50], r8)       ; cnt <- depth
+	 *
+	 * and [r4+0x34] is initialised to depth-1 just before the loop. So an
+	 * RX ring starts EMPTY with cpu_idx = depth-1, and the vendor's own
+	 * pending arithmetic in dump_dma_rx_ring_info() is
+	 *   pending = dma_idx - cpu_idx - 1   (mod cnt)
+	 * which is 0 in that state and 1 after the engine writes slot 0. This
+	 * is the same model as mt76's (fill ndesc-1, kick q->head = ndesc-1),
+	 * which is why the publish below is (consumed - 1) mod depth.
+	 *
+	 * The FIRST loop in that function is the TX/MCU side, where CPU_IDX is
+	 * 0 - 3.93 read that one and armed RX with 0, which the engine took as
+	 * "no free slot" and delivered nothing at all. */
 	zxnpu_cr_write(w, ZXNPU_DATA_RX_REG, (u32)w->drx_ring_dma);
 	zxnpu_cr_write(w, ZXNPU_DATA_RX_REG + 8,
 		       ZXNPU_DATA_DEPTH - 1);
@@ -2244,6 +2285,16 @@ static void zxnpu_wlan_data_init(struct zxnpu_wlan *w, bool commit)
 			  zxnpu_cr_read(w, ZXNPU_DATA_TX_REG + 4),
 			  zxnpu_cr_read(w, ZXNPU_DATA_TX_REG + 8),
 			  zxnpu_cr_read(w, ZXNPU_DATA_TX_REG + 12));
+	/* Read-only: is the band0 TX-free ring (qid2) armed by the WA core
+	 * itself, or does it need the host? Either way data-init must not
+	 * touch it - 3.90-3.94 pointed the data ring here and lost every
+	 * received frame. */
+	zxnpu_wlan_append(w, "  txfree %08x: base=%08x cnt=%u cidx=%u didx=%u (read-only)\n",
+			  ZXNPU_TXFREE_RX_REG,
+			  zxnpu_cr_read(w, ZXNPU_TXFREE_RX_REG),
+			  zxnpu_cr_read(w, ZXNPU_TXFREE_RX_REG + 4),
+			  zxnpu_cr_read(w, ZXNPU_TXFREE_RX_REG + 8),
+			  zxnpu_cr_read(w, ZXNPU_TXFREE_RX_REG + 12));
 }
 
 static void zxnpu_wlan_data_recv(struct zxnpu_wlan *w)
@@ -2268,6 +2319,13 @@ static void zxnpu_wlan_data_recv(struct zxnpu_wlan *w)
 	cidx = done;
 	zxnpu_wlan_append(w, "data-recv: head=%u done=%u didx=%u pending=%u\n",
 			  w->drx_cidx, done, didx, n);
+	/* Counters only (the buffers there are the WA core's, not ours): every
+	 * transmitted frame produces one TX-free on qid2, so didx is the honest
+	 * "the firmware finished this many frames" number. */
+	zxnpu_wlan_append(w, "  txfree-ring cidx=%u didx=%u cnt=%u\n",
+			  zxnpu_cr_read(w, ZXNPU_TXFREE_RX_REG + 8),
+			  zxnpu_cr_read(w, ZXNPU_TXFREE_RX_REG + 12),
+			  zxnpu_cr_read(w, ZXNPU_TXFREE_RX_REG + 4));
 	for (i = 0; i < n && i < 8; i++) {
 		u32 slot = (cidx + i) % ZXNPU_DATA_DEPTH;
 		u8 *buf = (u8 *)w->drx_buf + slot * ZXNPU_DATA_BUF_SIZE;
@@ -2320,6 +2378,115 @@ static void zxnpu_wlan_data_recv(struct zxnpu_wlan *w)
 		}
 	}
 }
+
+/*
+ * txfree-init: arm qid2 (MT7916_RXQ_MCU_WA_MAIN), the band0 TX-free
+ * notification ring. Descriptor and index model are the MCU event rings'
+ * (they are the only ones on this board proven to deliver): ctrl =
+ * 0x40000000 | len << 16 with the RXD template at the buffer head, base and
+ * count, then CPU_IDX = depth as the "posted" announcement, and after each
+ * drain the same free-running post (didx + depth) that mcu-recv uses.
+ */
+static void zxnpu_wlan_txfree_init(struct zxnpu_wlan *w, bool commit)
+{
+	int i;
+
+	zxnpu_wlan_append(w, "txfree-init (qid2 %08x): %s\n",
+			  ZXNPU_TXFREE_RX_REG, commit ? "COMMIT" : "dry run");
+	if (!w->dtf_ring || !w->dtf_buf) {
+		zxnpu_wlan_append(w, "  no txfree memory (probe with enable=1)\n");
+		return;
+	}
+	for (i = 0; i < ZXNPU_TXFREE_DEPTH; i++) {
+		u8 *d = (u8 *)w->dtf_ring + i * ZXNPU_MCU_DESC_SIZE;
+		u8 *buf = (u8 *)w->dtf_buf + i * ZXNPU_TXFREE_BUF_SIZE;
+		dma_addr_t bd = w->dtf_buf_dma + i * ZXNPU_TXFREE_BUF_SIZE;
+
+		memset(d, 0, ZXNPU_MCU_DESC_SIZE);
+		put_unaligned_le32(bd, d + 0);
+		put_unaligned_le32(0x40000000u |
+				   (ZXNPU_TXFREE_BUF_SIZE << 16), d + 4);
+
+		memset(buf, 0, ZXNPU_MCU_RXD_SIZE);
+		put_unaligned_le32(bd, buf);
+		buf[6] = ZXNPU_TXFREE_BUF_SIZE & 0xff;
+		buf[7] = 0x40 | ((ZXNPU_TXFREE_BUF_SIZE >> 8) & 0x3f);
+	}
+	dma_wmb();
+	zxnpu_wlan_append(w, "  before: base=%08x cnt=%u cidx=%u didx=%u\n",
+			  zxnpu_cr_read(w, ZXNPU_TXFREE_RX_REG),
+			  zxnpu_cr_read(w, ZXNPU_TXFREE_RX_REG + 4),
+			  zxnpu_cr_read(w, ZXNPU_TXFREE_RX_REG + 8),
+			  zxnpu_cr_read(w, ZXNPU_TXFREE_RX_REG + 12));
+	if (!commit)
+		return;
+	zxnpu_cr_write(w, ZXNPU_TXFREE_RX_REG, (u32)w->dtf_ring_dma);
+	zxnpu_cr_write(w, ZXNPU_TXFREE_RX_REG + 4, ZXNPU_TXFREE_DEPTH);
+	zxnpu_cr_write(w, ZXNPU_TXFREE_RX_REG + 8, ZXNPU_TXFREE_DEPTH);
+	w->dtf_cidx = 0;
+	zxnpu_wlan_append(w, "  after:  base=%08x cnt=%u cidx=%u didx=%u\n",
+			  zxnpu_cr_read(w, ZXNPU_TXFREE_RX_REG),
+			  zxnpu_cr_read(w, ZXNPU_TXFREE_RX_REG + 4),
+			  zxnpu_cr_read(w, ZXNPU_TXFREE_RX_REG + 8),
+			  zxnpu_cr_read(w, ZXNPU_TXFREE_RX_REG + 12));
+}
+
+/*
+ * txfree-recv: drain qid2. Each transmitted frame produces one of these, so
+ * didx moving by one per tx-probe is the host-side proof that the frame left
+ * the chip - dma_done on the TX descriptor only proves the engine read it.
+ */
+static void zxnpu_wlan_txfree_recv(struct zxnpu_wlan *w)
+{
+	u32 didx, cidx, n, i;
+
+	if (!w->dtf_buf) {
+		zxnpu_wlan_append(w, "txfree-recv: no memory\n");
+		return;
+	}
+	didx = zxnpu_cr_read(w, ZXNPU_TXFREE_RX_REG + 12) % ZXNPU_TXFREE_DEPTH;
+	cidx = w->dtf_cidx % ZXNPU_TXFREE_DEPTH;
+	n = (didx + ZXNPU_TXFREE_DEPTH - cidx) % ZXNPU_TXFREE_DEPTH;
+	zxnpu_wlan_append(w, "txfree-recv: cidx=%u didx=%u pending=%u\n",
+			  cidx, didx, n);
+	for (i = 0; i < n && i < 8; i++) {
+		u32 slot = (cidx + i) % ZXNPU_TXFREE_DEPTH;
+		u8 *buf = (u8 *)w->dtf_buf + slot * ZXNPU_TXFREE_BUF_SIZE;
+		u32 rxd0 = get_unaligned_le32(buf);
+		u32 ptype = (rxd0 >> 27) & 0x1f;
+		u32 plen = rxd0 & 0xffff;
+		int j;
+
+		zxnpu_wlan_append(w, "  slot %u: type=%u(%s) len=%u:", slot,
+				  ptype,
+				  ptype == 6 ? "txfree" :
+				  ptype == 0x18 ? "txfree0" :
+				  ptype == 0 ? "TXS" : "?", plen);
+		for (j = 16; j < 56; j++)
+			zxnpu_wlan_append(w, " %02x", buf[j]);
+		zxnpu_wlan_append(w, "\n");
+		/* hand the slot back, same shape as txfree-init */
+		{
+			u8 *d = (u8 *)w->dtf_ring +
+				slot * ZXNPU_MCU_DESC_SIZE;
+
+			put_unaligned_le32((u32)(w->dtf_buf_dma +
+					   (dma_addr_t)slot *
+					   ZXNPU_TXFREE_BUF_SIZE), d + 0);
+			put_unaligned_le32(0x40000000u |
+					   (ZXNPU_TXFREE_BUF_SIZE << 16), d + 4);
+		}
+	}
+	if (n) {
+		w->dtf_cidx = didx;
+		if (zxnpu_wlan_commit) {
+			dma_wmb();
+			zxnpu_cr_write(w, ZXNPU_TXFREE_RX_REG + 8,
+				       didx + ZXNPU_TXFREE_DEPTH);
+		}
+	}
+}
+
 
 /*
  * TX path (doc 43 R4b + doc 44 R4c decode): the vendor TX architecture is
@@ -4328,8 +4495,8 @@ static int zxnpu_txwi_80211(u32 *w, const u8 *frm, int frm_len, int hdr_len,
 
 static void zxnpu_wlan_tx_once(struct zxnpu_wlan *w, bool probe, bool dump_only)
 {
-	u8 *buf, *frm;
-	dma_addr_t dma;
+	u8 *buf, *frm, *txdbuf;
+	dma_addr_t dma, txd_dma;
 	u32 txd[8];
 	u32 before, after = 0;
 	u32 pid = probe ? ZXNPU_PID_FIRST : 0;
@@ -4339,14 +4506,33 @@ static void zxnpu_wlan_tx_once(struct zxnpu_wlan *w, bool probe, bool dump_only)
 		zxnpu_wlan_append(w, "  no TX ring (run data-init first)\n");
 		return;
 	}
+	/* The TXD is its own DMA segment, not a prefix of the frame. mt76's
+	 * mt76_dma_tx_queue_skb() hands dev->drv->txwi_size + skb->len as TWO
+	 * buffers, and mt76_dma_add_buf() then writes
+	 *     buf0 = txwi,  SD_LEN0 = 32
+	 *     buf1 = frame, SD_LEN1 = len, flag LAST_SEC1 (bit 14)
+	 * A single contiguous segment with LAST_SEC0 (bit 30) is what the MCU
+	 * command rings need (their 32-byte header IS the first bytes of the
+	 * message), and it is why every data frame until now was fetched by
+	 * the engine, reported dma_done, and then vanished: the TMAC took the
+	 * 802.11 header from buf1, which pointed at address 0. No TX-free, no
+	 * TX-done and no answer ever followed. */
 	buf = dma_alloc_coherent(&w->pdev->dev, ZXNPU_TX_BUF_LEN, &dma,
 				 GFP_KERNEL);
-	if (!buf) {
+	txdbuf = dma_alloc_coherent(&w->pdev->dev, ZXNPU_TXD_LEN, &txd_dma,
+				    GFP_KERNEL);
+	if (!buf || !txdbuf) {
+		if (buf)
+			dma_free_coherent(&w->pdev->dev, ZXNPU_TX_BUF_LEN, buf, dma);
+		if (txdbuf)
+			dma_free_coherent(&w->pdev->dev, ZXNPU_TXD_LEN, txdbuf,
+					  txd_dma);
 		zxnpu_wlan_append(w, "  dma_alloc_coherent failed\n");
 		return;
 	}
 	memset(buf, 0, ZXNPU_TX_BUF_LEN);
-	frm = buf + ZXNPU_TXD_LEN;
+	memset(txdbuf, 0, ZXNPU_TXD_LEN);
+	frm = buf;
 
 	if (probe) {
 		/* probe request, wildcard SSID + basic rates */
@@ -4384,17 +4570,17 @@ static void zxnpu_wlan_tx_once(struct zxnpu_wlan *w, bool probe, bool dump_only)
 		goto out;
 	}
 	for (i = 0; i < 8; i++)
-		put_unaligned_le32(txd[i], buf + i * 4);
+		put_unaligned_le32(txd[i], txdbuf + i * 4);
 
 	zxnpu_wlan_append(w, "  txd: w0=%08x w1=%08x w2=%08x w3=%08x\n",
 			  txd[0], txd[1], txd[2], txd[3]);
 	zxnpu_wlan_append(w, "       w4=%08x w5=%08x w6=%08x w7=%08x\n",
 			  txd[4], txd[5], txd[6], txd[7]);
-	zxnpu_wlan_append(w, "  frm %d B + txd %d B = %d B, dma=%pad\n",
+	zxnpu_wlan_append(w, "  frm %d B + txd %d B = %d B, dma=%pad txd=%pad\n",
 			  frm_len, ZXNPU_TXD_LEN, frm_len + ZXNPU_TXD_LEN,
-			  &dma);
+			  &dma, &txd_dma);
 	zxnpu_wlan_append(w, "  frm:");
-	for (i = 0; i < ZXNPU_TXD_LEN + frm_len; i++)
+	for (i = 0; i < frm_len; i++)
 		zxnpu_wlan_append(w, " %02x", buf[i]);
 	zxnpu_wlan_append(w, "\n");
 
@@ -4408,18 +4594,21 @@ static void zxnpu_wlan_tx_once(struct zxnpu_wlan *w, bool probe, bool dump_only)
 		u8 *d = (u8 *)w->dtx_ring + slot * ZXNPU_MCU_DESC_SIZE;
 
 		memset(d, 0, ZXNPU_MCU_DESC_SIZE);
-		put_unaligned_le32((u32)dma, d + 0);
-		put_unaligned_le32((ZXNPU_TXD_LEN + frm_len) << 16 | BIT(30),
-				   d + 4);
-		put_unaligned_le32(0, d + 8);
+		put_unaligned_le32((u32)txd_dma, d + 0);
+		/* SD_LEN0 = 32 (the TXD), SD_LEN1 = frame, LAST_SEC1 */
+		put_unaligned_le32((u32)(ZXNPU_TXD_LEN << 16) |
+				   (u32)(frm_len & 0x3fff) | BIT(14), d + 4);
+		put_unaligned_le32((u32)dma, d + 8);
 		put_unaligned_le32(0, d + 12);
 		dma_wmb();
 		before = zxnpu_cr_read(w, ZXNPU_DATA_TX_REG + 12);
 		w->dtx_cidx = (slot + 1) % ZXNPU_DATA_DEPTH;
 		zxnpu_cr_write(w, ZXNPU_DATA_TX_REG + 8, w->dtx_cidx);
+		zxnpu_wlan_append(w, "  desc: buf0=%08x buf1=%08x ctrl=%08x\n",
+				  (u32)txd_dma, (u32)dma, (u32)((ZXNPU_TXD_LEN << 16) |
+				   (u32)(frm_len & 0x3fff) | BIT(14)));
 		zxnpu_wlan_append(w, "  queued slot %u len=%d kick cidx=%u didx=%u\n",
-				  slot, ZXNPU_TXD_LEN + frm_len, w->dtx_cidx,
-				  before);
+				  slot, frm_len, w->dtx_cidx, before);
 	}
 	for (i = 0; i < 200; i++) {
 		after = zxnpu_cr_read(w, ZXNPU_DATA_TX_REG + 12);
@@ -4443,17 +4632,21 @@ static void zxnpu_wlan_tx_once(struct zxnpu_wlan *w, bool probe, bool dump_only)
 				  slot, ctl, !!(ctl & BIT(31)));
 	}
 	/* TX status, TX-free and the answers to a probe request all arrive on
-	 * the band DATA RX ring, not on the MCU event rings: mt7915_rx_check()
-	 * classifies each buffer by RXD0[31:27] (0 TXS, 2 normal frame,
-	 * 6/0x18 TX-free). Draining qid2 right here is what makes the pair a
-	 * loopback test. */
+	 * the band DATA RX ring (qid4), not on the MCU event rings:
+	 * mt7915_rx_check() classifies each buffer by RXD0[31:27] (0 TXS,
+	 * 2 normal frame, 6/0x18 TX-free). Draining qid2 (band0 TX-free
+	 * notify) and qid4 right here is what makes the pair a loopback
+	 * test. */
 	zxnpu_wlan_append(w, "  MCU rings:\n");
 	zxnpu_wlan_mcu_recv(w, 0);
 	zxnpu_wlan_mcu_recv(w, 1);
-	zxnpu_wlan_append(w, "  data RX qid2:\n");
+	zxnpu_wlan_append(w, "  data RX qid4:\n");
 	zxnpu_wlan_data_recv(w);
+	zxnpu_wlan_append(w, "  txfree qid2:\n");
+	zxnpu_wlan_txfree_recv(w);
 out:
 	dma_free_coherent(&w->pdev->dev, ZXNPU_TX_BUF_LEN, buf, dma);
+	dma_free_coherent(&w->pdev->dev, ZXNPU_TXD_LEN, txdbuf, txd_dma);
 }
 
 /*
@@ -4757,6 +4950,10 @@ static ssize_t zxnpu_wlan_ctl_write(struct file *file, const char __user *ubuf,
 		zxnpu_wlan_data_init(w, zxnpu_wlan_commit);
 	} else if (!strncmp(cmd, "data-recv", 9)) {
 		zxnpu_wlan_data_recv(w);
+	} else if (!strncmp(cmd, "txfree-init", 11)) {
+		zxnpu_wlan_txfree_init(w, zxnpu_wlan_commit);
+	} else if (!strncmp(cmd, "txfree-recv", 11)) {
+		zxnpu_wlan_txfree_recv(w);
 	} else if (!strncmp(cmd, "data-tx", 7)) {
 		zxnpu_wlan_data_tx(w);
 	} else if (!strncmp(cmd, "dataplane", 9)) {
@@ -4969,7 +5166,7 @@ done_sta:
 			zxnpu_wlan_append(w, "commit refused: set zxnpu_wlan.commit=1\n");
 		zxnpu_wlan_wfdma(w, commit);
 	} else {
-		zxnpu_wlan_append(w, "commands: l1profile | ack-expect | data-init | data-recv | dataplane | probe | scan | win <bar> <off> [n] | crw <a> <v> | fw | plan | mcu | rings | mcuwin | mcu-send | mcu-cmd | mcu-dl | mcu-dl-regions | fw-start | fw-info | fw-audit | fw-state | fw-plan wm|wa | fw-dl wm|wa | rx-init | mcu-recv | mac-set | radio-mac | radio-chan | radio-bss | radio-up | radio-sta | tx-bcast | tx-probe [dump] | driver-own | wfsys-reset | dma-init | commit\n");
+		zxnpu_wlan_append(w, "commands: l1profile | ack-expect | data-init | data-recv | dataplane | probe | scan | win <bar> <off> [n] | crw <a> <v> | fw | plan | mcu | rings | mcuwin | mcu-send | mcu-cmd | mcu-dl | mcu-dl-regions | fw-start | fw-info | fw-audit | fw-state | fw-plan wm|wa | fw-dl wm|wa | rx-init | mcu-recv | mac-set | radio-mac | radio-chan | radio-bss | radio-up | radio-sta | tx-bcast | tx-probe [dump] | txfree-init | txfree-recv | driver-own | wfsys-reset | dma-init | commit\n");
 	}
 	mutex_unlock(&w->lock);
 	return count;
@@ -5063,6 +5260,12 @@ static int zxnpu_wlan_probe(struct pci_dev *pdev,
 		w->drx_buf = dmam_alloc_coherent(&pdev->dev,
 						 ZXNPU_DATA_DEPTH * ZXNPU_DATA_BUF_SIZE,
 						 &w->drx_buf_dma, GFP_KERNEL);
+		w->dtf_ring = dmam_alloc_coherent(&pdev->dev,
+						  ZXNPU_TXFREE_DEPTH * ZXNPU_MCU_DESC_SIZE,
+						  &w->dtf_ring_dma, GFP_KERNEL);
+		w->dtf_buf = dmam_alloc_coherent(&pdev->dev,
+						 ZXNPU_TXFREE_DEPTH * ZXNPU_TXFREE_BUF_SIZE,
+						 &w->dtf_buf_dma, GFP_KERNEL);
 		w->dband_ring = dmam_alloc_coherent(&pdev->dev,
 						    ZXNPU_DATA_DEPTH * ZXNPU_MCU_DESC_SIZE,
 						    &w->dband_ring_dma, GFP_KERNEL);
@@ -5074,6 +5277,7 @@ static int zxnpu_wlan_probe(struct pci_dev *pdev,
 		    !w->wac_ring || !w->wac_bufs ||
 		    !w->rx_ring || !w->rx_buf || !w->wa_ring || !w->wa_buf ||
 		    !w->dtx_ring || !w->drx_ring || !w->drx_buf ||
+		    !w->dtf_ring || !w->dtf_buf ||
 		    !w->dband_ring)
 			return -ENOMEM;
 		/* w->bar[i] mirrors the real 64-bit BAR indices 0/2/4;
