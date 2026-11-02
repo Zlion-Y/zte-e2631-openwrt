@@ -2955,3 +2955,101 @@ movw r1, #0   -> pci_kick_out_data_tx
 1. `pci_init_txrx_ring_mem` 的填充循环：步长、`ctrl` 字段编码、RXD 头是否预置；
 2. RX 侧的 publish 点（`pci_rx_data_done_func` 里 `[sb+0x1c]` 那类 ops 回调的真实目标）；
 3. 以上两条闭合后，才允许再刷机。
+
+## 88. 两个静态错误：数据 RX 环是 qid4；数据帧是两段 DMA（3.95 → 3.97）
+
+前四轮「RX 环只投递一次」「TX 有 dma_done 但没下文」其实是两个可以直接从参考源码
+读出来的错误，不需要在硬件上试。
+
+### 88.1 band0 数据 RX 环从来不是 0x18024520
+
+`enum mt7916_rxq_id`（`mt7915/mt7915.h`）：
+
+| idx | 环 | 寄存器 |
+|---|---|---|
+| 0 | `MCU_WM` | `0x18024500` |
+| 1 | `MCU_WA` | `0x18024510` |
+| 2 | `MCU_WA_MAIN`（band0 TX-free 通知） | `0x18024520` |
+| 3 | `MCU_WA_EXT` | `0x18024530` |
+| **4** | **`BAND0` 数据** | **`0x18024540`** |
+| 5 | `BAND1` | `0x18024550` |
+
+`mt76_dma_alloc_queue()` 的地址是 `MT_RXQ_RING_BASE(q) + idx * MT_RING_SIZE`
+（`MT_RING_SIZE = 0x10`）。原厂镜像独立印证：`chip_show_dma_info()` 逐个 dump 六个
+RX 环，地址正是 `0x18024500`–`0x18024550`。
+
+3.90–3.94 用的 `0x18024520` 是 **MCU_WA_MAIN**，mt76 对它的注释原话是
+“tx free notify event from WA for band0”。所以我们唯一收到的那一个 `type=6` 包是
+TX-free，而不是收到的帧；而且它是「事件环被当成数据环用」——这既解释了「只投递一次」，
+也解释了为什么再怎么改 `cpu_idx` 都没用。
+
+### 88.2 数据帧是两段 DMA：TXD 一段，帧一段
+
+`mt76_dma_tx_queue_skb()` 把 `txwi_size` 与 `skb->len` 作为**两个 buffer** 传下去，
+`mt76_dma_add_buf()` 写：
+
+```
+buf0 = txwi(32B)   SD_LEN0 = 32
+buf1 = frame       SD_LEN1 = len
+flag = LAST_SEC1 (bit14)      ← 两段时是 bit14，不是 bit30
+```
+
+单段 + `LAST_SEC0`（bit30）是 **MCU 命令环**需要的（它的 32 字节头确实是消息的前
+32 字节），而数据帧沿用同一写法时，TMAC 会去 `buf1` 取 802.11 头，而 `buf1 = 0`
+⇒ 帧被静默丢弃：DMA 取走描述符、置 `DMA_DONE`，但**没有 TXS、没有 TX-free、
+WA 事件环里也没有 TX-done**。
+
+修好后的实机描述符：
+
+```
+desc: buf0=4f21e000 (TXD 32B) buf1=4f21d000 (frame 34B) ctrl=00204022
+      处理前 00204022 → 处理后 80204022
+      （SD_LEN0=32、SD_LEN1=34、LAST_SEC1、DMA_DONE）
+```
+
+**仍然没有完成事件**。所以 TXD 与描述符已不再是嫌疑，剩下的嫌疑是主机侧从未编程的
+band 级 WF 状态与 PSE↔WFDMA 队列映射：
+
+| 来源 | 内容 |
+|---|---|
+| `mt7915_mac_init_band()` | `MT_TMAC_CTCR0`（INS_DDLMT）、`MT_MDP_BNRCFR0/1`（band 速率/RX 路径）、`MT_DMA_DCR0`（MAX_RX_LEN 0x680）、`MT_WF_RMAC_RSVD0`、`MT_WF_RMAC_MIB_AIRTIME0/1/3/4`、`MT_WTBLOFF_TOP_ACR`、`MT_WTBLOFF_TOP_RSCR` |
+| `mt7915_mac_init()` | `MT_MDP_DCR1/2`、`MT_MDP_DCR0`（DAMSDU）、288 个 wcid 的 `WTBL_UPDATE(ADM_COUNT_CLEAR)`、`MT_WF_PP_TOP_RXQ_WFDMA_CF_5`（qid6 端口选择） |
+
+这些都在 WF 空间（`0x820e4000` 起，band1 为 `0x820f4000`），要走 BAR 窗口访问，
+不是现在 `crw` 直接打 CR 的路径。
+
+### 88.3 qid2 必须由主机武装
+
+`mt7915_dma_init()` 在非 WED 路径下同样会 `mt76_queue_alloc()` 一个
+`MT_RXQ_MAIN_WA`（`MT7915_RX_MCU_RING_SIZE` = 512）。3.95 读回
+`base=00000000 cnt=512` ⇒ **固件不武装它**。新增：
+
+| 命令 | 作用 |
+|---|---|
+| `txfree-init` | 按 MCU 事件环模型武装 qid2：`ctrl = 0x40000000 | len<<16` + RXD 模板，然后 base / cnt / `CPU_IDX = depth` |
+| `txfree-recv` | 排空 qid2，回填描述符并按 `didx + depth` 重新发布（与 `mcu-recv` 同） |
+
+3.92 唯一那次 TX-free，就是 `data-init` 误把这个环当数据环喂出来的。
+
+### 88.4 原厂 RX 环结构（本轮从 `mt7916.ko` 读出，记录备用）
+
+| 偏移 | 含义 |
+|---|---|
+| `+0x14` | depth（h） |
+| `+0x4c` | base 寄存器地址 |
+| `+0x50` | cnt 寄存器地址 |
+| `+0x3c` | cpu_idx 寄存器地址 |
+| `+0x34` | 发布到 cpu_idx 的**值**（初值 depth-1） |
+| `+0x08` | dma_idx 寄存器地址 |
+| `+0x30` | 门铃挂起计数（h） |
+
+`pci_rx_dma_done_handle()` 的尾部就是 `hif_io_write32(hc, ring[+0x3c], ring[+0x34])`；
+`dump_dma_rx_ring_info()` 的 pending 算术是 `dma_idx - cpu_idx - 1 (mod cnt)`，
+即武装后为 0（空环）——与 mt76「填 ndesc-1 再 kick `q->head`」是同一个模型。
+
+### 88.5 下一步（按依赖顺序）
+
+1. 补 `mt7915_mac_init_band` 的 WF 寄存器编程（先 tb 窗口读回现场值，确认哪些是 0）；
+2. 查 PSE↔WFDMA 的 TX 队列映射（原厂 `hif_init_WFDMA` 里 0x4680/0x4640 两张表已确认
+   只是 prefetch 分区，不是队列映射）；
+3. 以上两条闭合后，TX-free/TXS 才有意义；再谈 RX 侧信道与 wiphy 注册。
