@@ -4770,10 +4770,14 @@ static int zxnpu_wlan_bcn_set(struct zxnpu_wlan *w, const char *args, bool dump)
 		return ret;
 	}
 
-	/* OFFLOAD TLV body: [ver][enable][sub_ntlv] + nested CONTENT. TLV
-	 * length counts the 4-byte header (zxnpu_tlv_put adds it), matching
-	 * mt76's add_tlv(skb, tag, sizeof(struct ...)) convention. */
-	sub_len = 4 + 12 + 32 + flen;		/* subhdr + cont + txd + frame */
+	/* OFFLOAD TLV body: [ver][enable][sub_ntlv] + nested CONTENT. Lengths
+	 * follow mt76's add_tlv convention where the len field counts the
+	 * TLV's OWN 4-byte tag+len header: sizeof(bss_info_bcn_cont) = 12
+	 * already includes its header, so the sub-TLV total is 4(hdr of the
+	 * wrapper we build here) + 12 + 32 + frame. Getting this +4 too big
+	 * once made the firmware ack the command and then die parsing it -
+	 * WA stopped answering anything and the beacon never transmitted. */
+	sub_len = 12 + 32 + flen;		/* CONTENT sub-TLV total */
 	plen = 4 + sub_len;			/* ver/en/subntlv + sub-TLV */
 	memset(tlv, 0, sizeof(tlv));
 	tlv[0] = 0;				/* ver */
