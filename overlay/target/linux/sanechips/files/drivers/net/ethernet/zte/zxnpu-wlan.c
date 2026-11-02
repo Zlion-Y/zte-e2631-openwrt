@@ -4736,9 +4736,10 @@ static int zxnpu_wlan_bcn_set(struct zxnpu_wlan *w, const char *args, bool dump)
 	unsigned int band = 0;
 	int off, flen, tim_ofs, i, ret, ssid_len;
 	int sub_len, plen;
+	bool degenerate = strstr(args, " zero") != NULL;
 
 	if (sscanf(args, "%u %32s", &band, ssid) != 2 || band > 1) {
-		zxnpu_wlan_append(w, "usage: bcn-set <band 0|1> <ssid> [dump]\n");
+		zxnpu_wlan_append(w, "usage: bcn-set <band 0|1> <ssid> [dump|zero]\n");
 		return -EINVAL;
 	}
 	bss = &zxna_bss[band];
@@ -4791,6 +4792,15 @@ static int zxnpu_wlan_bcn_set(struct zxnpu_wlan *w, const char *args, bool dump)
 	if (ret) {
 		zxnpu_wlan_append(w, "  txwi build failed: %d\n", ret);
 		return ret;
+	}
+	if (degenerate) {
+		/* A/B probe: is the WA wedge driven by our TXD CONTENT or by
+		 * the firmware's beacon task itself? Everything zeroed except
+		 * the fields the previous boots proved necessary. */
+		memset(txd, 0, ZXNPU_TXD_LEN);
+		txd[0] = ZXN_PREP(ZXN_TXD0_BYTES, flen + ZXNPU_TXD_LEN) |
+			 ZXN_PREP(ZXN_TXD0_PKT_FMT, 3) |
+			 ZXN_PREP(ZXN_TXD0_Q_IDX, 0x12);
 	}
 
 	/* OFFLOAD TLV body: [ver][enable][sub_ntlv] + nested CONTENT. Lengths
