@@ -4458,6 +4458,7 @@ static void zxnpu_wlan_fw_up(struct zxnpu_wlan *w, const char *args)
 #define ZXN_TXD2_FRAME_TYPE	GENMASK(5, 4)
 #define ZXN_TXD2_SUB_TYPE	GENMASK(3, 0)
 #define ZXN_TXD3_BA_DISABLE	BIT(28)
+#define ZXN_TXD3_NO_ACK		BIT(0)
 #define ZXN_TXD3_REM_TX_COUNT	GENMASK(15, 11)
 #define ZXN_TXD5_TX_STATUS_HOST	BIT(10)
 #define ZXN_TXD5_PID		GENMASK(7, 0)
@@ -4488,9 +4489,21 @@ static int zxnpu_txwi_80211(u32 *w, const u8 *frm, int frm_len, int hdr_len,
 		return -EINVAL;
 	memset(w, 0, ZXNPU_TXD_LEN);
 
-	w[0] = ZXN_PREP(ZXN_TXD0_BYTES, total) |
-	       ZXN_PREP(ZXN_TXD0_PKT_FMT, ZXN_TX_TYPE_CT) |
-	       ZXN_PREP(ZXN_TXD0_Q_IDX, ZXN_LMAC_AC00);
+	/* Beacon templates ride the firmware offload path: mt76's
+	 * mt76_connac2_mac_write_txwi() puts them on PKT_FMT=MT_TX_TYPE_FW
+	 * (3) and Q_IDX=MT_LMAC_BCN0 (0x12 - the same index as the band0
+	 * TX data ring, which is what the BSS_INFO_OFFLOAD template arms).
+	 * Q_IDX=0/CT made the firmware's beacon task wedge the WA command
+	 * loop: the upload acked, then every later command timed out. */
+	if (type == 0 && subtype == 8) {	/* mgmt beacon */
+		w[0] = ZXN_PREP(ZXN_TXD0_BYTES, total) |
+		       ZXN_PREP(ZXN_TXD0_PKT_FMT, 3 /* MT_TX_TYPE_FW */) |
+		       ZXN_PREP(ZXN_TXD0_Q_IDX, 0x12 /* MT_LMAC_BCN0 */);
+	} else {
+		w[0] = ZXN_PREP(ZXN_TXD0_BYTES, total) |
+		       ZXN_PREP(ZXN_TXD0_PKT_FMT, ZXN_TX_TYPE_CT) |
+		       ZXN_PREP(ZXN_TXD0_Q_IDX, ZXN_LMAC_AC00);
+	}
 	w[1] = ZXN_TXD1_LONG_FORMAT |
 	       ZXN_PREP(ZXN_TXD1_HDR_FORMAT, ZXN_HDR_FORMAT_802_11) |
 	       ZXN_PREP(ZXN_TXD1_HDR_INFO, hdr_len / 2) |
@@ -4500,6 +4513,12 @@ static int zxnpu_txwi_80211(u32 *w, const u8 *frm, int frm_len, int hdr_len,
 	       ZXN_PREP(ZXN_TXD2_SUB_TYPE, subtype) |
 	       ZXN_PREP(ZXN_TXD2_MULTICAST, mcast ? 1 : 0);
 	w[3] = ZXN_PREP(ZXN_TXD3_REM_TX_COUNT, 15);
+	/* Group-addressed frames are never acked (mac80211 sets
+	 * IEEE80211_TX_CTL_NO_ACK): without the bit the firmware parks the
+	 * frame in the retry path waiting for an ack that never comes -
+	 * exactly the "fetched, dma_done, then nothing" signature. */
+	if (mcast)
+		w[3] |= ZXN_TXD3_NO_ACK;
 	/* pid >= MT_PACKET_ID_FIRST (3) asks the firmware for a host TX
 	 * status: it then reports the frame back as a PKT_TYPE_TXS block and
 	 * a PKT_TYPE_TXRX_NOTIFY on the data RX ring (mt7915_rx_check()). */
