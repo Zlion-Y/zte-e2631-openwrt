@@ -594,7 +594,9 @@ assert "npu CSP_WLAN source present" \
 	test -f "$TREE/target/linux/sanechips/files/drivers/net/ethernet/zte/zxnpu-wlan.c"
 assert "npu CSP_WLAN wiring patch present" \
 	test -f "$TREE/target/linux/sanechips/patches-6.18/042-zte-add-the-ZX279128S-NPU-wiring.patch"
+if [ "${E2631_MT76:-0}" != "1" ]; then
 assert "npu CSP_WLAN enabled in target config" grep -q '^CONFIG_ZX_CSP_WLAN=y$' "$CFG"
+fi
 assert "npu CSP_WLAN carries the WFDMA init plan" grep -q 'hif_init_WFDMA' "$TREE/target/linux/sanechips/files/drivers/net/ethernet/zte/zxnpu-wlan.c"
 assert "npu CSP_WLAN parses the patch header" grep -q 'platform=%.4s' "$TREE/target/linux/sanechips/files/drivers/net/ethernet/zte/zxnpu-wlan.c"
 assert "npu CSP_WLAN gates register writes on commit" grep -q 'zxnpu_wlan.commit=1' "$TREE/target/linux/sanechips/files/drivers/net/ethernet/zte/zxnpu-wlan.c"
@@ -664,7 +666,9 @@ assert "npu CSP_WLAN source present" \
 	test -f "$TREE/target/linux/sanechips/files/drivers/net/ethernet/zte/zxnpu-wlan.c"
 assert "npu CSP_WLAN wiring patch present" \
 	test -f "$TREE/target/linux/sanechips/patches-6.18/042-zte-add-the-ZX279128S-NPU-wiring.patch"
+if [ "${E2631_MT76:-0}" != "1" ]; then
 assert "npu CSP_WLAN enabled in target config" grep -q '^CONFIG_ZX_CSP_WLAN=y$' "$CFG"
+fi
 assert "npu CSP_WLAN carries the WFDMA init plan" grep -q 'hif_init_WFDMA' "$TREE/target/linux/sanechips/files/drivers/net/ethernet/zte/zxnpu-wlan.c"
 assert "npu CSP_WLAN parses the patch header" grep -q 'platform=%.4s' "$TREE/target/linux/sanechips/files/drivers/net/ethernet/zte/zxnpu-wlan.c"
 assert "npu CSP_WLAN gates register writes on commit" grep -q 'zxnpu_wlan.commit=1' "$TREE/target/linux/sanechips/files/drivers/net/ethernet/zte/zxnpu-wlan.c"
