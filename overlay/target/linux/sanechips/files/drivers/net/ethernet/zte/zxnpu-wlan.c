@@ -131,6 +131,17 @@ struct zxnpu_wlan {
 	void *drx_buf;		/* 64 x 1700 buffers with 16B RXD */
 	dma_addr_t drx_buf_dma;
 	u32 drx_cidx;
+	/* MT7916_EEPROM.bin: the full 0x1000 v2 map the vendor image ships.
+	 * mt7915_eeprom_load_default() is the same fallback in mt76, and it is
+	 * what makes flash_mode true, i.e. the map has to be uploaded to the
+	 * firmware later. Parsed out of it: chip id, MAC, per-band select and
+	 * tx path (chainmask). */
+	u8 *eeprom;
+	bool flash_mode;
+	u8 mac[6];
+	u8 band_sel[2];		/* MT_EE_V2_BAND_SEL_* per band */
+	u8 band_path[2];	/* tx path count per band, 0 = band unused */
+	u8 chainmask;
 	struct zxnpu_vap *vaps[ZXNPU_VAP_MAX];
 	char status[16384];
 	/* persistent probe evidence (identity, BARs, firmware CRCs): status[]
@@ -1512,6 +1523,228 @@ static void zxnpu_wlan_fw_info(struct zxnpu_wlan *w, const char *args)
 		zxnpu_wlan_fw_info(w, names[i]);
 }
 
+/* ---------------------------------------------------------------- eeprom */
+
+/* The vendor image ships the whole MT7916 map at
+ * /lib/firmware/zte/mt7916/MT7916_EEPROM.bin: exactly 4096 bytes = MT_EE_MAX_V2.
+ * That is the same fallback mt76 uses (mt7915_eeprom_load_default()), and the
+ * offsets prove it is a plain mt7915 v2 map rather than a private blob:
+ *   0x000 chip id 0x7916     0x004 MAC
+ *   0x190 WIFI_CONF per band 0x441/0x445 TX0_POWER_2G_V2 / 5G_V2
+ * The efuse was tried first: MCU_EXT_QUERY(EFUSE_ACCESS) with the full
+ * 24-byte mt7915_mcu_eeprom_info request is acknowledged but answers with no
+ * payload for every address, so the file is the authoritative source here.
+ * It is also what sets flash_mode, which obliges the driver to push the map
+ * back to the firmware (MCU_EXT_CMD_EFUSE_BUFFER_MODE) before any TX.
+ */
+#define ZXNPU_EEPROM_FILE	"zte/mt7916/MT7916_EEPROM.bin"
+#define ZXNPU_EEPROM_SIZE	0x1000
+#define ZXNPU_EE_CHIP_ID	0x000
+#define ZXNPU_EE_MAC_ADDR	0x004
+#define ZXNPU_EE_WIFI_CONF	0x190
+#define ZXNPU_EE_BAND_SEL	GENMASK(7, 6)
+#define ZXNPU_EE_TX_PATH	GENMASK(2, 0)
+
+static const char *zxnpu_wlan_band_name(u8 sel)
+{
+	switch (sel) {
+	case 0:
+		return "2GHz";
+	case 1:
+		return "5GHz";
+	case 2:
+		return "6GHz";
+	default:
+		return "5+6GHz";
+	}
+}
+
+static int zxnpu_wlan_eeprom_load(struct zxnpu_wlan *w)
+{
+	const struct firmware *fw = NULL;
+	u16 chip;
+	int ret, band;
+	u8 chain = 0;
+
+	if (w->eeprom)
+		return 0;
+	ret = request_firmware_direct(&fw, ZXNPU_EEPROM_FILE, &w->pdev->dev);
+	if (ret) {
+		zxnpu_wlan_append(w, "eeprom: %s unavailable (%d)\n",
+				  ZXNPU_EEPROM_FILE, ret);
+		return ret;
+	}
+	if (fw->size < ZXNPU_EEPROM_SIZE) {
+		zxnpu_wlan_append(w, "eeprom: %s is %zu bytes, need %#x\n",
+				  ZXNPU_EEPROM_FILE, fw->size, ZXNPU_EEPROM_SIZE);
+		release_firmware(fw);
+		return -EINVAL;
+	}
+	w->eeprom = kzalloc(ZXNPU_EEPROM_SIZE, GFP_KERNEL);
+	if (!w->eeprom) {
+		release_firmware(fw);
+		return -ENOMEM;
+	}
+	memcpy(w->eeprom, fw->data, ZXNPU_EEPROM_SIZE);
+	release_firmware(fw);
+
+	chip = get_unaligned_le16(w->eeprom + ZXNPU_EE_CHIP_ID);
+	if (chip != 0x7916 && chip != 0x7915) {
+		zxnpu_wlan_append(w, "eeprom: chip id %04x is not 7915/7916\n",
+				  chip);
+		kfree(w->eeprom);
+		w->eeprom = NULL;
+		return -EINVAL;
+	}
+	memcpy(w->mac, w->eeprom + ZXNPU_EE_MAC_ADDR, ETH_ALEN);
+	for (band = 0; band < 2; band++) {
+		u8 v = w->eeprom[ZXNPU_EE_WIFI_CONF + band];
+
+		w->band_sel[band] = FIELD_GET(ZXNPU_EE_BAND_SEL, v);
+		w->band_path[band] = FIELD_GET(ZXNPU_EE_TX_PATH, v);
+		if (w->band_path[band] > 4)
+			w->band_path[band] = 4;
+		if (w->band_path[band])
+			chain |= (BIT(w->band_path[band]) - 1) <<
+				 (band ? w->band_path[0] : 0);
+	}
+	w->chainmask = chain;
+	w->flash_mode = true;
+	zxnpu_wlan_append(w,
+			  "eeprom: chip=%04x mac=%pM band0=%s/%u band1=%s/%u chainmask=%x flash_mode=1\n",
+			  chip, w->mac,
+			  zxnpu_wlan_band_name(w->band_sel[0]), w->band_path[0],
+			  zxnpu_wlan_band_name(w->band_sel[1]), w->band_path[1],
+			  w->chainmask);
+	return 0;
+}
+
+/* eeprom-show [offset-hex] [len] */static void zxnpu_wlan_eeprom_show(struct zxnpu_wlan *w, const char *args)
+{
+	unsigned int off = 0, len = 64;
+	int i, j;
+
+	sscanf(args, "%x %u", &off, &len);
+	if (!w->eeprom) {
+		zxnpu_wlan_append(w, "eeprom-show: not loaded (run eeprom-init)\n");
+		return;
+	}
+	if (off >= ZXNPU_EEPROM_SIZE)
+		off = 0;
+	if (!len || len > 256)
+		len = 64;
+	if (off + len > ZXNPU_EEPROM_SIZE)
+		len = ZXNPU_EEPROM_SIZE - off;
+	for (i = 0; i < (int)len; i += 16) {
+		zxnpu_wlan_append(w, "ee[%04x]:", off + i);
+		for (j = 0; j < 16 && i + j < (int)len; j++)
+			zxnpu_wlan_append(w, " %02x", w->eeprom[off + i + j]);
+		zxnpu_wlan_append(w, "\n");
+	}
+}
+
+/* Send one extended command with a payload larger than the 64 bytes mcu-ext
+ * can put on the stack, and wait for its ack. */
+static int zxnpu_wlan_mcu_ext_big(struct zxnpu_wlan *w, u8 ext, u8 q,
+				  const u8 *pl, int pl_len, u8 s2d,
+				  int timeout_ms)
+{
+	u8 *msg;
+	u8 seq;
+	int ret;
+
+	msg = kmalloc(ZXNPU_MCU_TXD_LEN + pl_len, GFP_KERNEL);
+	if (!msg)
+		return -ENOMEM;
+	seq = ++zxnpu_wlan_mcu_seq;
+	memset(msg, 0, ZXNPU_MCU_TXD_LEN);
+	zxnpu_mcu_txd_header_ext(msg, pl_len, 0xed, ext, q, s2d, seq);
+	memcpy(msg + ZXNPU_MCU_TXD_LEN, pl, pl_len);
+	ret = zxnpu_mcu_submit(w, msg, ZXNPU_MCU_TXD_LEN + pl_len,
+			       zxnpu_wlan_commit, false);
+	kfree(msg);
+	if (ret || !zxnpu_wlan_commit)
+		return ret;
+	return zxnpu_wlan_mcu_wait_event_st(w, seq, timeout_ms, NULL);
+}
+
+/*
+ * eeprom-upload: hand the map to the firmware.
+ *
+ * mt7915_mcu_set_eeprom() branches on flash_mode: with a real efuse it merely
+ * selects EE_MODE_EFUSE, but when the map came from a file it has to be pushed
+ * page by page (mt7915_mcu_set_eeprom_flash):
+ *
+ *	MCU_EXT_CMD(EFUSE_BUFFER_MODE) = cid 0xed, ext 0x21
+ *	header struct mt7915_mcu_eeprom { u8 buffer_mode; u8 format;
+ *					  __le16 len; }
+ *	  buffer_mode = EE_MODE_BUFFER (1)
+ *	  format      = ((total_pages - 1) << 5) | (page_index << 2) |
+ *			EE_FORMAT_WHOLE (1)
+ *	  len         = page size, 0x400 except for the last page
+ *	followed by len bytes of map.
+ *
+ * Without this the firmware has no calibration at all: RX may work but every
+ * TX attempt is refused, so it is not optional once flash_mode is set.
+ */
+#define ZXNPU_EE_PAGE			0x400
+#define ZXNPU_EE_BUFFER_MODE		0x01
+#define ZXNPU_EE_FORMAT_WHOLE		0x01
+#define ZXNPU_MCU_EXT_EFUSE_BUFFER	0x21
+
+static int zxnpu_wlan_eeprom_upload(struct zxnpu_wlan *w)
+{
+	int i, total, ret = 0;
+	u8 *page;
+
+	if (!w->eeprom) {
+		zxnpu_wlan_append(w, "eeprom-upload: run eeprom-init first\n");
+		return -EINVAL;
+	}
+	total = DIV_ROUND_UP(ZXNPU_EEPROM_SIZE, ZXNPU_EE_PAGE);
+	page = kmalloc(4 + ZXNPU_EE_PAGE, GFP_KERNEL);
+	if (!page)
+		return -ENOMEM;
+	zxnpu_wlan_append(w,
+			  "eeprom-upload: %d pages of %#x via ext 0x%02x: %s\n",
+			  total, ZXNPU_EE_PAGE, ZXNPU_MCU_EXT_EFUSE_BUFFER,
+			  zxnpu_wlan_commit ? "COMMIT" : "dry run");
+	for (i = 0; i < total; i++) {
+		int len = ZXNPU_EE_PAGE;
+
+		if (i == total - 1 && ZXNPU_EEPROM_SIZE % ZXNPU_EE_PAGE)
+			len = ZXNPU_EEPROM_SIZE % ZXNPU_EE_PAGE;
+		page[0] = ZXNPU_EE_BUFFER_MODE;
+		page[1] = ((total - 1) << 5) | (i << 2) | ZXNPU_EE_FORMAT_WHOLE;
+		put_unaligned_le16(len, page + 2);
+		memcpy(page + 4, w->eeprom + i * ZXNPU_EE_PAGE, len);
+		ret = zxnpu_wlan_mcu_ext_big(w, ZXNPU_MCU_EXT_EFUSE_BUFFER,
+					     3 /* MCU_Q_NA */, page, 4 + len, 0,
+					     5000);
+		zxnpu_wlan_append(w,
+				  "  page %d/%d len=%#x fmt=%02x: ret=%d (didx=%u cidx=%u)\n",
+				  i + 1, total, len, page[1], ret,
+				  zxnpu_cr_read(w, ZXNPU_WFDMA_RX_RING0 + 0x10 + 12),
+				  zxnpu_cr_read(w, ZXNPU_WFDMA_RX_RING0 + 0x10 + 8));
+		if (ret == -ETIMEDOUT) {
+			/* the last page makes the firmware commit what it has
+			 * written; its ack has been observed to land well past
+			 * the 2 s command budget, so give it its own retry
+			 * instead of failing the whole upload */
+			zxnpu_wlan_append(w, "  page %d: retrying\n", i + 1);
+			ret = zxnpu_wlan_mcu_ext_big(w,
+						     ZXNPU_MCU_EXT_EFUSE_BUFFER,
+						     3, page, 4 + len, 0, 5000);
+			zxnpu_wlan_append(w, "  page %d: retry ret=%d\n",
+					  i + 1, ret);
+		}
+		if (ret)
+			break;
+	}
+	kfree(page);
+	return ret;
+}
+
 /* mcu-cmd <type> <cmd> <hex payload>: raw diagnostic command. */
 static void zxnpu_wlan_mcu_cmd(struct zxnpu_wlan *w, const char *args, bool commit)
 {
@@ -1651,6 +1884,100 @@ static void zxnpu_wlan_mcu_ext(struct zxnpu_wlan *w, const char *args,
 	}
 }
 
+
+/*
+ * efuse: the first command that returns *data* rather than an ack.
+ *
+ * MCU_EXT_QUERY(EFUSE_ACCESS) takes {addr, valid=0} and answers
+ * {addr, valid, data[16]} (mt7915_mcu_eeprom_info). It is mt7915_mcu_get_eeprom()
+ * and it is the gate in front of everything else: the map holds the chip id,
+ * the MAC address and the band capabilities, none of which can be invented.
+ * The response layout is confirmed at runtime rather than assumed - the raw
+ * payload is printed so the first boot tells us whether the {addr, valid}
+ * echo is present or the data starts at offset 0.
+ */
+#define ZXNPU_MCU_EXT_EFUSE_ACCESS	0x01
+#define ZXNPU_EFUSE_BLOCK		16
+
+/* defined with the event-ring code further down; the efuse reader above it
+ * needs the payload-capturing form */
+static int zxnpu_wlan_mcu_wait_event_buf(struct zxnpu_wlan *w, u8 seq,
+					 int timeout_ms, int *status,
+					 u8 *out, int out_cap, int *out_len);
+
+static int zxnpu_wlan_efuse_block(struct zxnpu_wlan *w, u32 addr, u8 *out,
+				  bool commit, bool verbose)
+{
+	u8 msg[ZXNPU_MCU_TXD_LEN + 8];
+	u8 payload[8];
+	u8 rbuf[64];
+	u8 seq;
+	int ret, got = 0, i;
+
+	put_unaligned_le32(addr, payload + 0);
+	put_unaligned_le32(0, payload + 4);
+	seq = ++zxnpu_wlan_mcu_seq;
+	memset(msg, 0, sizeof(msg));
+	zxnpu_mcu_txd_header_ext(msg, sizeof(payload), 0xed,
+				 ZXNPU_MCU_EXT_EFUSE_ACCESS, 0 /* MCU_Q_QUERY */,
+				 2, seq);
+	memcpy(msg + ZXNPU_MCU_TXD_LEN, payload, sizeof(payload));
+	ret = zxnpu_mcu_submit(w, msg, ZXNPU_MCU_TXD_LEN + sizeof(payload),
+			       commit, false);
+	if (ret || !commit)
+		return ret;
+	ret = zxnpu_wlan_mcu_wait_event_buf(w, seq, 500, NULL, rbuf,
+					    sizeof(rbuf), &got);
+	if (ret)
+		return ret;
+	if (verbose) {
+		zxnpu_wlan_append(w, "  efuse[%04x] got=%d raw:", addr, got);
+		for (i = 0; i < got; i++)
+			zxnpu_wlan_append(w, " %02x", rbuf[i]);
+		zxnpu_wlan_append(w, "\n");
+	}
+	/* Layout is learned, not assumed: mt7915_mcu_eeprom_info is
+	 * {addr, valid, data[16]}, so the echoed address must be the first
+	 * word. If it is not there the window above is the answer and this
+	 * block is reported as "no data" rather than as bytes of garbage. */
+	if (get_unaligned_le32(rbuf) == addr) {
+		memcpy(out, rbuf + 8, ZXNPU_EFUSE_BLOCK);
+		return 0;
+	}
+	return -ENODATA;
+}
+
+/* efuse-dump [start-hex] [blocks] */
+static void zxnpu_wlan_efuse_dump(struct zxnpu_wlan *w, const char *args,
+				  bool commit)
+{
+	unsigned int start = 0, nblk = 16;
+	u32 a;
+	int i, j;
+
+	if (sscanf(args, "%x %u", &start, &nblk) < 1)
+		start = 0;
+	if (!nblk || nblk > 256)
+		nblk = 16;
+	start &= ~(u32)(ZXNPU_EFUSE_BLOCK - 1);
+	zxnpu_wlan_append(w, "efuse-dump: start=%04x blocks=%u%s\n",
+			  start, nblk, commit ? "" : " (dry run)");
+	for (i = 0; i < (int)nblk; i++) {
+		u8 blk[ZXNPU_EFUSE_BLOCK];
+		int ret;
+
+		a = start + (u32)i * ZXNPU_EFUSE_BLOCK;
+		ret = zxnpu_wlan_efuse_block(w, a, blk, commit, true);
+		if (ret) {
+			zxnpu_wlan_append(w, "  stop at %04x ret=%d\n", a, ret);
+			break;
+		}
+		zxnpu_wlan_append(w, "efuse[%04x]:", a);
+		for (j = 0; j < ZXNPU_EFUSE_BLOCK; j++)
+			zxnpu_wlan_append(w, " %02x", blk[j]);
+		zxnpu_wlan_append(w, "\n");
+	}
+}
 
 /*
  * mcu-tri   <type> <cmd> <band> [hex]   -> [64B connac2 TXD][32B Andes][payload]
@@ -2304,14 +2631,14 @@ static void zxnpu_wlan_rx_raw(struct zxnpu_wlan *w, int ring, int first,
 		u8 *b = (u8 *)bufmem + i * ZXNPU_MCU_RX_BUF_SIZE;
 		bool zero = true;
 
-		for (j = 0; j < 36; j++)
+		for (j = 0; j < 68; j++)
 			if (b[j])
 				zero = false;
 		zxnpu_wlan_append(w, "  slot[%d]%s:", i, zero ? " (empty)" : "");
 		if (zero)
 			zxnpu_wlan_append(w, "\n");
 		else {
-			for (j = 0; j < 36; j++)
+			for (j = 0; j < 68; j++)
 				zxnpu_wlan_append(w, " %02x", b[j]);
 			zxnpu_wlan_append(w, "\n");
 		}
@@ -2322,7 +2649,8 @@ static void zxnpu_wlan_rx_raw(struct zxnpu_wlan *w, int ring, int first,
  * is the WM ring (0x18024500), ring 1 the WA ring (0x18024510); events are
  * 36-byte Andes frames with eid at +28, seq at +29, ext_eid at +32. */
 static int zxnpu_wlan_mcu_scan_ring(struct zxnpu_wlan *w, int ring, u8 seq,
-				    int *ext_eid)
+				    int *ext_eid, u8 *out, int out_cap,
+				    int *out_len)
 {
 	u32 reg = ZXNPU_WFDMA_RX_RING0 + 0x10 * ring;
 	void *bufmem = ring ? w->wa_buf : w->rx_buf;
@@ -2359,7 +2687,10 @@ static int zxnpu_wlan_mcu_scan_ring(struct zxnpu_wlan *w, int ring, u8 seq,
 		for (j = 0; j < 24; j++)
 			zxnpu_wlan_append(w, " %02x", buf[j]);
 		zxnpu_wlan_append(w, " |");
-		for (j = 24; j < 44; j++)
+		/* 36 header bytes plus 32 of payload: query answers (efuse
+		 * blocks, register reads) carry their data past +36, and a
+		 * 36-byte window made every such answer look empty. */
+		for (j = 24; j < 68; j++)
 			zxnpu_wlan_append(w, " %02x", buf[j]);
 		zxnpu_wlan_append(w, "\n");
 		/* Hand the slot back: mt76_dma_rx_fill() rewrites ctrl (WITH
@@ -2386,6 +2717,17 @@ static int zxnpu_wlan_mcu_scan_ring(struct zxnpu_wlan *w, int ring, u8 seq,
 			 * two retry loops and a hang. */
 			if (ext_eid)
 				*ext_eid = buf[32];
+			/* The TLV payload starts right after the 36-byte
+			 * connac2 header (+36). Do NOT trust the length field
+			 * at +24: it reads 0x0014 both for an 8-byte FW_LOG
+			 * reply and for an efuse reply, so it is not the frame
+			 * length. Copy a fixed window and let the caller
+			 * validate it (efuse checks that the echoed address
+			 * matches). */
+			if (out && out_len) {
+				memcpy(out, buf + 36, out_cap);
+				*out_len = out_cap;
+			}
 		}
 	}
 	/* consumed tail advances to didx, then the posted-buffer count is
@@ -2406,17 +2748,22 @@ static int zxnpu_wlan_mcu_scan_ring(struct zxnpu_wlan *w, int ring, u8 seq,
 	return found;
 }
 
-static int zxnpu_wlan_mcu_wait_event_st(struct zxnpu_wlan *w, u8 seq,
-					int timeout_ms, int *status)
+static int zxnpu_wlan_mcu_wait_event_buf(struct zxnpu_wlan *w, u8 seq,
+					 int timeout_ms, int *status,
+					 u8 *out, int out_cap, int *out_len)
 {
 	int waited = 0;
 
 	if (!w->rx_buf && !w->wa_buf)
 		return -ENODEV;
 
+	if (out_len)
+		*out_len = 0;
 	while (waited < timeout_ms) {
-		int f0 = zxnpu_wlan_mcu_scan_ring(w, 0, seq, status);
-		int f1 = zxnpu_wlan_mcu_scan_ring(w, 1, seq, status);
+		int f0 = zxnpu_wlan_mcu_scan_ring(w, 0, seq, status,
+						  out, out_cap, out_len);
+		int f1 = zxnpu_wlan_mcu_scan_ring(w, 1, seq, status,
+						  out, out_cap, out_len);
 
 		if (f0 || f1)
 			return 0;
@@ -2426,6 +2773,13 @@ static int zxnpu_wlan_mcu_wait_event_st(struct zxnpu_wlan *w, u8 seq,
 	zxnpu_wlan_append(w, "  wait_event seq=%u: timeout (%dms)\n",
 			  seq & 0xf, timeout_ms);
 	return -ETIMEDOUT;
+}
+
+static int zxnpu_wlan_mcu_wait_event_st(struct zxnpu_wlan *w, u8 seq,
+					int timeout_ms, int *status)
+{
+	return zxnpu_wlan_mcu_wait_event_buf(w, seq, timeout_ms, status,
+					     NULL, 0, NULL);
 }
 
 static int zxnpu_wlan_mcu_wait_event(struct zxnpu_wlan *w, u8 seq, int timeout_ms)
@@ -3595,6 +3949,14 @@ static ssize_t zxnpu_wlan_ctl_write(struct file *file, const char __user *ubuf,
 		} else {
 			zxnpu_wlan_append(w, "usage: mcu-ring 0|1|4 (qid16 FWDL / qid17 MCU_WM / qid20 MCU_WA)\n");
 		}
+	} else if (!strncmp(cmd, "eeprom-upload", 13)) {
+		zxnpu_wlan_eeprom_upload(w);
+	} else if (!strncmp(cmd, "eeprom-init", 11)) {
+		zxnpu_wlan_eeprom_load(w);
+	} else if (!strncmp(cmd, "eeprom-show", 11)) {
+		zxnpu_wlan_eeprom_show(w, cmd + 11);
+	} else if (!strncmp(cmd, "efuse-dump", 10)) {
+		zxnpu_wlan_efuse_dump(w, cmd + 10, zxnpu_wlan_commit);
 	} else if (!strncmp(cmd, "mcu-tri ", 8)) {
 		zxnpu_wlan_mcu_frame(w, cmd + 8, zxnpu_wlan_commit, true);
 	} else if (!strncmp(cmd, "mcu-andes ", 10)) {
@@ -4009,6 +4371,8 @@ static void zxnpu_wlan_remove(struct pci_dev *pdev)
 	 * enable-toggle remove/rescan iteration would free the adapter under
 	 * live netdevs with dangling ->w pointers (doc 62 finding 2). */
 	zxnpu_wlan_vaps_exit(w);
+	kfree(w->eeprom);
+	w->eeprom = NULL;
 	if (w->proc)
 		proc_remove(w->proc);
 	if (w->is_main)

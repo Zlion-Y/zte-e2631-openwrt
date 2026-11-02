@@ -2529,3 +2529,146 @@ mt76_dma_kick_queue(struct mt76_dev *dev, struct mt76_queue *q)
 这几条是 mt76 在碰 MAC 之前必须走完的路径，逐条被应答即说明 MCU 真正在服务，
 而不只是回显一条探针。下一步才是 `MCU_CE_CMD_GET_NIC_CAPAB`(0x8a)、
 host 侧 band0 数据环与 wiphy 注册。
+
+## 83. efuse 读不通 → 用厂商 eeprom 镜像（3.81 → 3.84）
+
+### 83.1 3.81：先把事件载荷取出来
+
+`mcu-ext` 只匹配 seq、只读 `+32` 的 ext_eid，从来没把应答的**数据**读出来过。
+3.81 给 `scan_ring()` 加了载荷捕获，并新增：
+
+```
+efuse-dump [start-hex] [blocks]      # MCU_EXT_QUERY(EFUSE_ACCESS) per 16B block
+```
+
+载荷长度按 `len@24 - 36` 计算。实机第一块就是 `got=0`、`ret=-5`（`-EIO`）：
+事件确实到了、seq 也匹配，但算出来的长度为 0。
+
+### 83.2 3.82：`len@24` 不是帧长
+
+把转储窗口从 36 字节扩到 68 字节后，同一个 `0x0014` 同时出现在两处：
+
+| 帧 | `len@24` | 实际载荷 |
+|---|---|---|
+| FW_LOG_2_HOST 应答 | `0x14` | 8 字节（`13 00 …`） |
+| EFUSE_ACCESS 应答 | `0x14` | 0 字节 |
+
+所以 `len` 字段不能用来算载荷长度。改成**固定窗口**：从 `+36` 起拷贝 32 字节，
+由调用方自己校验（efuse 校验回显地址）。此时能看到完整应答：
+
+```
+evtwa[0] eid=ed seq=05: 2c 00 00 38 … | 14 00 07 00 ed 05 00 00 00 00 00 02 01 00 00 00 00 …
+                                                                          ^^^^^^^^^^^ +36 起
+```
+
+地址 `0x000` 与 `0x2c0` 的应答**载荷完全相同**（`01 00 00 00` 后全零），说明固件
+只是回了个 ack，没有做地址相关的读。
+
+### 83.3 24 字节请求与 s2d 变体（都在 3.82 上就地验证，不重刷）
+
+| 变体 | 请求 | 结果 |
+|---|---|---|
+| A | 8 B `{addr, valid=0}` | ack，`got=0` |
+| B | 24 B `mt7915_mcu_eeprom_info` 全结构 | ack，`len@24 = 0x24 = 36` ⇒ 无载荷，`ext_eid=1` |
+| C | 24 B + `s2d_index=2`（H2C） | ack，同样无载荷 |
+| D | `ext 0x4f`（EFUSE_FREE_BLOCK） | ack，`ext_eid=0x4d` |
+
+`mt7915_mcu_get_eeprom()` 只要 `res->valid` 为 0 就返回 `-ENODATA`，也就是说
+这条路即使通了也要先有 `valid` 位；本机固件连 `data` 都不给。**结论：MT7916 这版
+固件不通过 EFUSE_ACCESS 交数据**，继续在这条路上花时间没有意义。
+
+### 83.4 厂商镜像就是答案
+
+设备上有 `/lib/firmware/zte/mt7916/MT7916_EEPROM.bin`，**恰好 4096 字节
+= `MT_EE_MAX_V2`**，且按 mt76 的 v2 偏移逐项对得上：
+
+| 偏移 | 值 | 含义 |
+|---|---|---|
+| `0x000` | `16 79` | chip id `0x7916` |
+| `0x002` | `00 00` | version |
+| `0x004` | `00 0c 43 26 60 00` | MAC（MediaTek 模板 OUI） |
+| `0x190` | `12 5b 48 4c 01 28 …` | band0 = 2GHz/tx_path 2，band1 = 5GHz/tx_path 3 |
+| `0x441` / `0x445` | 功率表 | `TX0_POWER_2G_V2` / `TX0_POWER_5G_V2` |
+
+这正是 `mt7915_eeprom_load_default()` 的回退路径：efuse 不够用时读同名文件、
+`dev->flash_mode = true`。厂商固件不需要 MCU 读 efuse，正是因为它走这条路。
+
+### 83.5 3.83 实机
+
+```
+eeprom: chip=7916 mac=00:0c:43:26:60:00 band0=2GHz/2 band1=5GHz/3 chainmask=1f flash_mode=1
+```
+
+`chainmask=0x1f`（2 + 3 条链）与 MT7916 的 2×2 + 3×3 配置一致；`eeprom-show`
+逐段核对 `0x000/0x190/0x440` 三处与镜像字节完全一致。
+
+### 83.6 flash_mode 的义务：把映射推回固件（3.84）
+
+`mt7915_mcu_set_eeprom()` 在 `flash_mode` 下走的是
+`mt7915_mcu_set_eeprom_flash()`，不是一句 `EE_MODE_EFUSE`：
+
+```
+MCU_EXT_CMD(EFUSE_BUFFER_MODE) = cid 0xed, ext 0x21
+header struct mt7915_mcu_eeprom { u8 buffer_mode; u8 format; __le16 len; }
+  buffer_mode = EE_MODE_BUFFER (1)
+  format      = ((pages - 1) << 5) | (page_index << 2) | EE_FORMAT_WHOLE (1)
+  len         = 0x400，最后一页取余
++ len 字节映射
+```
+
+0x1000 的映射 = 4 页、4 条命令，每页一条并各等一次 ack。**不上传就没有校准**：
+RX 或许能收，但每次发射都会被固件拒掉，所以一旦 `flash_mode` 为真这一步不可省。
+
+### 83.7 整机参数与 caldata 的位置
+
+`mtd1 "tag"` 是整机参数表，已完整解出。布局：
+
+```
++0x00  12 B 头：33 33 33 33 | f7 01 00 00 | 65 0d 18 de
+之后是**紧凑排布**（不对齐）的条目：
+  u32 flag = 0x00000002
+  u32 len
+  u8  pad[9]
+  u8  type
+  u8  data[len]
+```
+
+解出的 16 条（`type` 语义据内容判定）：
+
+| type | len | 内容 | 判定 |
+|---|---|---|---|
+| 1 | 6 | `f8 73 1a d3 ef a8` | LAN MAC |
+| 1 | 6 | `f8 73 1a d3 ef a9` | WAN MAC |
+| 4 | 15 | `ChinaNet-ygckk9` | 2.4G SSID |
+| 4 | 18 | `ChinaNet-ygckk9-5G` | 5G SSID |
+| 5 | 8 | `dthe3524` | 2.4G 口令（出现两次） |
+| 5 | 8 | `dthe3524` | 5G 口令 |
+| 7 | 9 | `1630@CTCC` | 管理账号 |
+| 3 | 6 | `F8731A` | OUI 前缀（ASCII） |
+| 0x82 | 15 | `180122801586397` | **SN** |
+| 0x82 | 34 | `16C2RNEtye3vN1742627722795FFM4bvRz` | 设备密钥 |
+| 2 | 15 | `214221173286740` | 运营商参数 |
+| 2 | 15 | `54892T9T585A450` | 运营商参数 |
+| 2 | 21 | `21422154892T9T585A450` | 两者拼接 |
+| 2 | 14 | `12-6467-214221` | 运营商参数 |
+| 0x81 | 10 | `ZXHN E2631` | **型号** |
+| 2 | 15 | `HN5D800R9GA8909` | 授权/注册码 |
+
+`mtd2 "wifi"`（1 MB）**不是空的**。前 `0xC0000` 全是 `0xFF`，从 `0xC0000`
+起有一段 **55 281 字节**的连续数据，整体 3456 个 16 字节块里只有 1514 个互不
+相同 ⇒ 结构化表（非压缩、非加密）：
+
+- 记录头 `85 19 02 e0`，其后 4 字节长度（`0x6a` / `0x74` …），整段共 434 条；
+- 段内既没有 `16 79 00 00`（mt7915 eeprom 的 chip id 头），也没有 `f8 73 1a`
+  （本机 MAC），所以它**不是**一张裸的 mt7915 eeprom 映射，而是厂商自己的
+  校准容器。
+
+结论：驱动用的映射仍取 `MT7916_EEPROM.bin`（与 mt76 v2 偏移完全吻合、且是
+`mt7915_eeprom_load_default()` 的同款文件）；`0xC0000` 的容器是**每台机器的
+工厂校准**，格式厂商私有，暂时只登记不解析。若后续发现发射功率被压得过低或
+需要 DPD 校准，再回来解这个容器。
+
+MAC：tag 里只有 LAN/WAN 两个，`mtd2` 的 caldata 段内也没有 MAC 字符串，而镜像
+里的 `00:0c:43:26:60:00` 是 MediaTek 模板值。也就是说 **WiFi MAC 不在主机可见的
+flash 里**，大概率在 MT7916 自身 efuse（固件自己读），而 `EFUSE_ACCESS` 这条路
+已证明拿不到数据。bring-up 阶段先用模块参数 `mac=` 覆盖，量产前再定来源。

@@ -655,4 +655,13 @@ if [ "$APPLY_FAILED" != 0 ]; then
 	exit 1
 fi
 
+assert "npu CSP_WLAN reads efuse over MCU" grep -q 'ZXNPU_MCU_EXT_EFUSE_ACCESS' "$TREE/target/linux/sanechips/files/drivers/net/ethernet/zte/zxnpu-wlan.c"
+assert "npu CSP_WLAN captures query payloads" grep -q 'zxnpu_wlan_mcu_wait_event_buf' "$TREE/target/linux/sanechips/files/drivers/net/ethernet/zte/zxnpu-wlan.c"
+assert "npu CSP_WLAN loads the shipped MT7916 eeprom map" grep -q 'MT7916_EEPROM.bin' "$TREE/target/linux/sanechips/files/drivers/net/ethernet/zte/zxnpu-wlan.c"
+
+if [ "$APPLY_FAILED" != 0 ]; then
+	echo "apply.sh: $REPORT records structural failures; the tree is NOT in the state this script promises" >&2
+	exit 1
+fi
+
 echo "overlay applied to $TREE (base $BASE_SHA); assertions recorded in $REPORT"
