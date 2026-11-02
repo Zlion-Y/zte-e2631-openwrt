@@ -430,8 +430,17 @@ fi
 CSP_WLAN_MARK="# E2631: npu vendor-native MT7916 G3 skeleton (see apply.sh / npu branch)"
 if [ -f "$TREE/target/linux/sanechips/patches-6.18/042-zte-add-the-ZX279128S-NPU-wiring.patch" ]; then
 	awk -v m="$CSP_WLAN_MARK" '$0 != m && $0 != "CONFIG_ZX_CSP_WLAN=y" && $0 != "# CONFIG_ZX_CSP_WLAN is not set"' "$CFG" > "$CFG.tmp" && mv "$CFG.tmp" "$CFG"
-	printf '%s\n' "$CSP_WLAN_MARK" 'CONFIG_ZX_CSP_WLAN=y' >> "$CFG"
-	echo "kernel config: npu CSP_WLAN G3.2 ON (device opt-in)"
+	if [ "${E2631_MT76:-0}" = "1" ]; then
+		# mt7915e comparison build: zxnpu-wlan must not claim the PCI
+		# functions (it parks enable=0 but still binds, and wifi-on keeps
+		# re-binding it ahead of mt7915e; a bare bind of mt7915e crashed
+		# the box once already - remove the coexistence variable).
+		printf '%s\n' "$CSP_WLAN_MARK" '# CONFIG_ZX_CSP_WLAN is not set' >> "$CFG"
+		echo "kernel config: E2631_MT76=1 - zxnpu-wlan excluded, mt7915e owns the card"
+	else
+		printf '%s\n' "$CSP_WLAN_MARK" 'CONFIG_ZX_CSP_WLAN=y' >> "$CFG"
+		echo "kernel config: npu CSP_WLAN G3.2 ON (device opt-in)"
+	fi
 fi
 
 # The slot-aware partition parser (P0-3): the driver source ships in files/,
