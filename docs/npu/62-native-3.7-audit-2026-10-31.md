@@ -3504,3 +3504,21 @@ ret=0。qid20 `cidx=didx=16`（命令被 DMA 取走）但事件环零应答，�
   （MT76=1 时移除 zxnpu-wlan/NPU 驱动）排除共存干扰。
 - pack.sh 的 verify_img 含 "native line 无开源无线驱动" 静态门禁，对
   MT76=1 构建误报 BLOCKER（镜像本身正确，设备已运行 3.108-mt76）。
+
+## 96. R105：mt7915e 在 native 内核上 probe 成功、固件下载中崩溃——两线互补（3.109-mt76，2026-11-03）
+
+- `E2631_MT76=1` 排除共存（CONFIG_ZX_CSP_WLAN=n，zxnpu-wlan 不进镜像）+
+  两处 apply 断言条件化后，**mt7915e 首次自动 probe 成功**：
+  `mt7915e 0000:01:00.0: HW/SW Version 0x8a108a10` → `WM Firmware Version
+  ____000000` → `WA Firmware Version DEV_000000`（**vendor 固件文件**，
+  Build Time 20240823）→ 固件下载启动。
+- **固件下载中途整机重启**（`Retry message 00000001 (seq 10)` 后、up 归零，
+  无 panic 留存——无 pstore；TTL 会话已断开未能取证）。
+- 与 native 线的对照意义：**同一颗芯片、同一份固件文件**——native 自研栈
+  （3.105）下载全绿、fw-state=7、RX 全通但 TX 挂；mt7915e 连下载都过不去
+  （998 scatter→WM 补丁在，仍挂在 Retry 循环）。两个栈的故障面互补，
+  TTL panic 现场是共同钥匙。
+- 基础设施沉淀：E2631_MT76=1 开关全链（apply 条件化/断言条件化/overlay
+  v1.x 恢复/998-zx-tx-paths.patch 机械重生成/kmod 依赖链 core+connac+
+  mt7615-common+hwmon+thermal/stale apk 清理）——commit 记录在案。
+- pack.sh verify_img 的 native 无线门禁对 MT76 线误报（已记录，镜像可刷）。
