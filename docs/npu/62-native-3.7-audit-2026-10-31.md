@@ -3053,3 +3053,272 @@ band 级 WF 状态与 PSE↔WFDMA 队列映射：
 2. 查 PSE↔WFDMA 的 TX 队列映射（原厂 `hif_init_WFDMA` 里 0x4680/0x4640 两张表已确认
    只是 prefetch 分区，不是队列映射）；
 3. 以上两条闭合后，TX-free/TXS 才有意义；再谈 RX 侧信道与 wiphy 注册。
+
+## 89. 原厂 WiFi 启动全流程核对（mt7916.ko 符号级）
+
+本节把原厂驱动的启动过程按阶段拆开，逐个给出**函数名、体量、做的事、证据来源**，
+再对照我们 `zxnpu-wlan.c` 的现状，最后列出当前验证里**还没被覆盖的环节**。
+
+### 89.0 方法与证据等级
+
+本板 `mt7916.ko` 未 strip（25 345 个符号），用 `native/tools/re/armdis.py` 按符号反汇编，
+重定位已注解（`bl -> name`、`movw r1,#0 -> name`），可读性足够做流程核对。
+
+| 等级 | 含义 |
+|---|---|
+| **S** | 静态确证：反汇编直接读出函数体/调用点 |
+| **B** | 行为确证：本机实测日志可复现 |
+| **I** | 推断：由命名/调用关系推测，尚未取证 |
+
+**结构性限制（必须写明）**：这套驱动是 **ops 表驱动**的。大量关键路径是
+`ldr r3,[ops,#0xNN]; bx r3`，例如：
+
+```
+asic_wa_update:   ldr r3, [arch_ops, #0x1ec]; cmp r3,#0; bx r3
+AsicInitMac:      bl hc_get_arch_ops        ; 之后全部间接
+wdev_do_open:     ldr r3,[wdev+0xd20]; ldr r3,[r3+0xa0]; bx r3
+```
+
+所以**静态调用图到不了叶子**，下文凡涉及间接跳转的，顺序取自同函数内可见的 `bl`
+序列，语义按函数名 + mt76 对照给出（标 I）。
+
+### 89.1 阶段总表
+
+| # | 阶段 | 入口函数 | 体量 | 关键子函数 | 证据 |
+|---|---|---|---|---|---|
+| 1 | 模块加载 | `init_module` | 108 B | `os_module_init`, `__pci_register_driver` ×2 | S |
+| 2 | 芯片能力注册 | `mt7916_init` | 3 956 B | `hc_register_chip_ops`, `mt7916_chip_dbg_init`, `mt_phy_probe`, `mt7916_get_chip_info`, `mt7916_get_default_bin_image` | S |
+| 3 | MCU 子系统 + 固件下载 | `WfMcuInit` | 636 B | `WfMcuSysInit`, `NICLoadRomPatch`, `NICLoadFirmware`, `HWCtrlOpsReg`, `MtCmdCr4Set`, `asic_wa_update` | S |
+| 3b | 下载数据面 | `mt_load_fw` → `mt_load_patch` → `load_patch_v1` | — | `parse_patch_v1/v2`, `fwdl_datapath_setup`, `pci_kick_out_fwdl_msg`, `mt7916_kick_out_fwdl_msg`, `pci_fwdl_dma_done_handle` | S+B |
+| 3c | MCU 命令面 | `AndesSendCmdMsg` | — | `AndesInitCmdMsg`, `AndesMTFillCmdHeader`, `AndesRxProcessCmdMsg`, `AndesMTRxProcessEvent`, `AndesBhSchedule`, `AndesGetCmdMsgSeq` | S+B |
+| 4 | WFDMA 全局 + 分区 | `hif_init_WFDMA` | 740 B | prefetch 表 11 项、`GLO_CFG` | S+B |
+| 5 | 环内存与回调 | `pci_init_txrx_ring_mem` | 2 868 B | `alloc_rx_buf_1k/64k`, `RTMP_AllocateRxPacketBuffer`, 回调注册 | S |
+| 6 | 环武装 | `mt_asic_init_txrx_ring` | 392 B | TX 环与 RX 环两套初值 | S+B |
+| 7 | MAC/PHY 初始化 | `NICInitializeAdapter` | 92 B | `WfMacInit` → `WfPhyInit` → `NICInitializeAsic` | S |
+| 7b | MAC 子层 | `WfMacInit` | — | `chip_wait_hif_dma_idle`, `AsicInitMac`, `AsicAutoFallbackInit`, `AsicSetMacMaxLen`, `asic_init_wtbl`, `AsicRxHeaderTransCtl`, `AsicRxHeaderTaranBLCtl` ×3, `AsicAutoBATrigger` | S |
+| 7c | PHY 子层 | `WfPhyInit` | — | `NICInitBBP` | S |
+| 8 | BSS 启动 | `APStartUp` → `APStartUpByBss` | 424 B | `MlmeSetTxPreamble`, `wdev_do_open`, `RTMP_IndicateMediaState`, `UpdateBeaconHandler`, `APStartRekeyTimer`, `AsicSetPreTbtt`, `chip_interrupt_enable` | S |
+| 9 | 数据面 TX | `ge_/fp_tx_pkt_deq_func` → `hif_kickout_data_tx` → `pci_kick_out_data_tx` | 72 B | `fill_tx_blk`, `ap_fill_non_offload_tx_blk` | S+B |
+| 10 | 数据面 RX | `pci_rx_dma_done_handle` / `pci_rx_dma_done_rxq_handle` | 344 / 420 B | `pci_free_rx_buf`；`asic_rx_pkt_process` 在本 build 里是空壳（转到 `AsicNotSupportFunc`），真正的逐包处理经 arch_ops | S |
+
+### 89.2 逐阶段处理逻辑
+
+#### 阶段 1–2：绑定与能力注册
+
+```
+init_module:
+    os_module_init()
+    __pci_register_driver(&driver0, ...)     ; 两个 driver（hif0 / hif1）
+    __pci_register_driver(&driver1, ...)
+```
+
+`mt7916_init` 不碰硬件，只填能力表：`hc_register_chip_ops()` 把 chip_ops / arch_ops /
+hif_ops 三张表装好（`pci_core_ops_register` 就是其中 hif_ops 那张，见 §87.2），
+`mt_phy_probe()` 建 phy 实体，`mt7916_get_default_bin_image()` 取固件镜像描述。
+
+**注意**：`hif_init_WFDMA` 与 `pci_init_txrx_ring_mem` 在这个函数里的两处引用是
+**把函数指针存进 ops 表**，不是直接调用（`--callers` 报的是重定位点）。真正的调用
+时机由 ops 使用者决定（标 I）。
+
+#### 阶段 3：MCU 子系统与固件下载（`WfMcuInit`，顺序 S）
+
+```
+WfMcuInit:
+    WfMcuSysInit()          ; MCU 子系统初始化（内部再走 MCUSysInit → NICLoadFirmware）
+    NICLoadRomPatch()       ; ROM patch
+    hw_io_read32 / hw_io_write32   ; 握手位（读-改-写）
+    NICLoadFirmware()       ; → mt_load_fw()
+    WfMcuSysExit()          ; 错误路径
+    HWCtrlOpsReg()
+    MtCmdCr4Set()
+    hw_io_read32 / hw_io_write32
+    asic_wa_update()        ; WA 核更新（arch_ops[0x1ec]）
+    hw_io_read32 / hw_io_write32
+```
+
+下载本体（`load_patch_v1`，**S+B**，我们 3.32–3.37 按它实现并在机器上验过）：
+
+```
+SemGet(type 0x10 cmd 0x17)                 ; 申请信号量
+AddressLen(type 0x01 cmd 0x17, dst,total)  ; 目标地址 + 总长
+FwScatter(type 0xEE cmd 0x10, 分片)        ; 数据分片下发
+Finish(type 0x07 cmd 0x17)                 ; 结束
+```
+
+`parse_patch_v1 / parse_patch_v2` 负责解析镜像头（v1 单段 / v2 多段）。
+下载走的是 **FWDL 专用环**（`fwdl_datapath_setup` + `pci_kick_out_fwdl_msg` +
+`mt7916_kick_out_fwdl_msg`，完成中断由 `pci_fwdl_dma_done_handle` 处理），
+与我们 qid16 的做法一致。
+
+命令面是 Andes 消息层：`AndesInitCmdMsg` 初始化队列，`AndesSendCmdMsg` 提交，
+`AndesMTFillCmdHeader` 填 32 字节头（`txd[0]=0x41000000|len`，`Q_IDX 0x20`，
+`PKT_FMT 2`），`AndesRxProcessCmdMsg` / `AndesMTRxProcessEvent` 处理事件环，
+`AndesBhSchedule` 是下半部调度，`AndesGetCmdMsgSeq` 产生 seq。
+
+#### 阶段 4–6：WFDMA 与环（全部 S，且大部分已 B）
+
+`hif_init_WFDMA`（740 B）实测写入顺序（`mac_io_write32`）：
+
+```
+0x18024208 (GLO_CFG)  ← 清 bit27(OMIT_RX_INFO)，置 bit28(OMIT_TX_INFO)|bit21
+0x18024680..0x18024694 ← 0x00040004, 0x00800004, 0x00c00004,
+                          0x01000004, 0x01400004, 0x01800004
+0x18024640..0x18024650 ← 0x01c00004, 0x02000004, 0x02400004,
+                          0x02800004, 0x02c00004
+0x1802420c ← 0xffffffff   (中断全部清除/关闭)
+```
+
+这 11 条就是 **prefetch SRAM 分区**（`PREFETCH(base,depth) = base<<16 | depth`）。
+原厂把 RX 六个环放在 `0x040..0x1c0`、TX/MCU 五个环放在 `0x1c0..0x2c0`；mt76 的顺序
+相反（TX `0x000..0x140`、RX `0x140..0x2c0`）。两种都是连续不重叠的分区，
+所以 mt76 的表可以照用——我们驱动里的 `zxnpu_prefetch[]` 用的就是 mt76 那张。
+
+`pci_init_txrx_ring_mem`（2 868 B）做三件事：
+
+1. 分配每个环的**描述符数组**与 **buffer 表**（表项 **12 字节**：`+0` 标记、`+4` DMA、`+8` 长度等，`alloc_rx_buf_1k` 里 `idx*3*4` 可见）；
+2. 分配并预填 RX buffer（`RTMP_AllocateRxPacketBuffer`，buffer 头 16 字节 RXD 模板）；
+3. **注册完成回调**：`pci_rx_event_dma_done_handle`、`pci_rx_dma_done_handle`、`pci_rx_dma_done_rxq_handle`、`pci_tx_dma_done_handle`、`pci_cmd_dma_done_handle`、`pci_fwdl_dma_done_handle`（I：环→回调的具体对应按命名与注册偏移推断）。
+
+`mt_asic_init_txrx_ring`（392 B）两个循环，**初值不同**：
+
+```
+第一循环（TX/MCU 环，hif_ctrl+8 数组）：
+    write(base,    desc_dma)
+    write(base+8,  0)              ; CPU_IDX ← 0
+    write(base+4,  depth)          ; CNT
+第二循环（RX 环，hif_ctrl+4 数组），顺序 base → CPU_IDX → CNT：
+    write(base,    desc_dma)
+    write(base+8,  depth-1)        ; CPU_IDX ← depth-1
+    write(base+4,  depth)          ; CNT
+```
+
+配套的 `dump_dma_rx_ring_info` 给出 pending 算法
+`dma_idx - cpu_idx - 1 (mod cnt)`，即武装后为 **0（空环）**，与 mt76
+「填 `ndesc-1` 再 kick `q->head`」等价。
+
+#### 阶段 7：MAC/PHY 初始化（`NICInitializeAdapter`）
+
+```
+NICInitializeAdapter:
+    if (WfMacInit())  return 1
+    if (WfPhyInit())  return 1
+    return NICInitializeAsic()      ; 本 build 里只是两个 printk，实质为空
+```
+
+`WfMacInit`（S）：
+
+```
+chip_wait_hif_dma_idle()
+AsicInitMac()                  ; 主体，经 arch_ops 间接
+AsicAutoFallbackInit()
+AsicSetMacMaxLen()
+asic_init_wtbl()
+AsicRxHeaderTransCtl()
+AsicRxHeaderTaranBLCtl() ×3
+AsicAutoBATrigger()
+```
+
+**这一层我们完全没有对应实现**。mt76 的对应物是 `mt7915_mac_init()` +
+`mt7915_mac_init_band()`（`MT_TMAC_CTCR0`、`MT_MDP_BNRCFR0/1`、`MT_DMA_DCR0`、
+`MT_WF_RMAC_RSVD0`、`MT_WF_RMAC_MIB_AIRTIME0/1/3/4`、`MT_WTBLOFF_TOP_ACR`、
+`MT_WTBLOFF_TOP_RSCR`、`MT_MDP_DCR0/1/2`、288 个 wcid 的 `WTBL_UPDATE`），
+全部在 WF 空间。
+
+`WfPhyInit` → `NICInitBBP()`（BBP 层初始化，对应 mt76 的 `mt7915_init_bb`）。
+
+#### 阶段 8：BSS 启动（`APStartUpByBss`，顺序 S）
+
+```
+APStartUpByBss:
+    MlmeSetTxPreamble()
+    wdev_do_open()                 ; 间接：[wdev+0xd20]+0xa0，BSS 打开主体
+    RTMP_IndicateMediaState()
+    UpdateBeaconHandler()          ; 信标更新（内部 bcn_buf_init）
+    APStartRekeyTimer()
+    AsicSetPreTbtt()               ; TBTT（信标定时）预置
+    chip_interrupt_enable()        ; 最后才开中断
+```
+
+**信标 + TBTT + 开中断**这三步在 BSS open 之后、数据面之前，是厂商 AP 启动的固定
+收尾。我们做到 BSS/STA_REC/DRR 就停了，后三步都没做。
+
+#### 阶段 9–10：数据面
+
+```
+TX（S+B）:
+  ap_fill_non_offload_tx_blk / ap_fill_offload_tx_blk     ; 组帧（含 52B TMAC）
+  fill_tx_blk
+  ge_tx_pkt_deq_func / fp_tx_pkt_deq_func                 ; 出队
+  hif_kickout_data_tx → pci_kick_out_data_tx              ; 门铃
+      = hif_io_write32(hc, ring->cpu_idx_reg[+0x24], ring->sw_idx[+0x28])
+
+RX（S）:
+  pci_rx_dma_done_handle      ; 事件环：按 ring->[+0x1d]/[+0x1f] 索引回调表，blx
+                              ; 尾部 write32(hc, ring[+0x3c], ring[+0x34]) 并清 [+0x30]
+  pci_rx_dma_done_rxq_handle  ; 数据环：加锁 → 两个 blx（逐包处理）→ IsStopingPdma
+                              ; → 解锁 → hif_io_write32 → smp_call_function_single
+```
+
+**数据环和事件环是两套完成处理函数**，这一点此前没注意：事件环的发布值在
+`ring[+0x34]`，数据环走另一套（含 `smp_call_function_single` 调度软中断）。
+
+### 89.3 对照表：原厂阶段 vs 我们已实现
+
+| 阶段 | 原厂 | 我们的实现 | 状态 |
+|---|---|---|---|
+| 1 绑定 | `init_module` + pci probe | 内核 PCI 驱动 | ✅ |
+| 2 能力注册 | `mt7916_init` | 不需要（无 ops 层） | — |
+| 3 FW 下载 | `WfMcuInit` → `load_patch_v1` | `mcu-dl / mcu-dl-regions / fw-start` | ✅ B（fw-state=7） |
+| 3 校准 | `mt7915_mcu_set_eeprom` 等价 | `eeprom-init` + `eeprom-upload` 4 页 ret=0 | ✅ B |
+| 4 WFDMA | `hif_init_WFDMA` | `dma-init`（GLO_CFG + 同款 prefetch 表） | ✅ B |
+| 5 环内存 | `pci_init_txrx_ring_mem` | `queue-init`（TX 三环）+ `data-init`/`rx-init` | ⚠ 部分 |
+| 6 环武装 | `mt_asic_init_txrx_ring` | 同 | ✅ B（TX 环 didx 前进） |
+| 7 MAC 初始化 | `WfMacInit`（7 个子步） | **无** | ❌ |
+| 7 PHY 初始化 | `WfPhyInit` → `NICInitBBP` | 部分（BBP 由 FW 侧做） | ❓ |
+| 8 BSS 启动 | `APStartUpByBss`（含 beacon/TBTT/IRQ） | `radio-up`（MAC/DEV/CHAN/BSS/STA/DRR） | ⚠ 缺 beacon、TBTT、IRQ |
+| 9 TX | `pci_kick_out_data_tx` | `tx-probe`（两段式描述符） | ⚠ 描述符正确，无完成事件 |
+| 10 RX | 双回调 | `data-recv` / `txfree-recv` | ⚠ 从未收到过数据帧 |
+
+### 89.4 当前测试中的盲目环节
+
+1. **把 `dma_done` 当成"帧发出去了"**。`DMA_DONE` 是 WFDMA 引擎写回描述符的位，
+   只证明它读完了 buffer。3.90 的结论「第一手证据」是错的，真正的判据只有
+   TXS / TX-free / TX-done 三者之一，而这三个从未出现过。
+2. **空口零观测**。没有第二台设备监听，也没有抓包；探针请求是否有 AP 应答取决于
+   环境里恰好有 AP，而信道只能在 `radio-up` 时定一次（第二次 `CHANNEL_SWITCH` 不应答），
+   所以一次开机只能试一个信道。**"RX 收不到"无法区分"环不通"和"空中没帧"**。
+3. **观测面只覆盖 CR 空间**。`crw` 打的是 `0x1802xxxx`；WF 空间（`0x820e4000+`）的
+   TMAC/MDP/RMAC/WTBLOFF 状态从未读回，于是阶段 7 那一层一直是盲的。
+4. **曾经的"TX-free 只有一帧"是伪证据**。那是 `data-init` 把 qid2（TX-free 事件环）
+   当数据环武装出来的产物，3.90–3.94 基于它的推断全部作废。
+5. **`fw-state` 被当成固件健康度**。它是主机写的 TOP_MISC 镜像；3.86 把 WA 核打死时
+   它仍然是 7。健康判据只能是「命令环 didx 前进 + 已知命令有应答」。
+6. **一个 boot 只能验证一个信道、一轮下载**。多次 `wfsys-reset` 后 ROM 不再回下载态，
+   所以实验变量必须一次收敛，否则结果不可归因。
+7. **`status[]` 16 KiB 静默丢写**。已踩两次（事件 hex 把结果行挤掉），现在靠
+   `evt_log=0` 默认关 hex；任何新增打印都要按这个约束设计。
+
+### 89.5 缺失的验证点（按依赖顺序）
+
+| # | 缺什么 | 为什么必须先补 |
+|---|---|---|
+| 1 | **一次真正的空口证据**（第二台设备在目标信道抓探针/信标） | 否则 TX 是否成功永远只能靠 FW 的间接信号 |
+| 2 | **WF 空间寄存器读回**（`MT_TMAC_CTCR0`、`MT_MDP_BNRCFR0/1`、`MT_DMA_DCR0`、RMAC/WTBLOFF） | 决定阶段 7 是"FW 已配好"还是"全 0"，是当前最大盲区 |
+| 3 | **BEACON / TBTT**（`BCN_UPDATE` + `AsicSetPreTbtt` 等价） | 厂商 AP 启动的固定收尾，我们跳过了 |
+| 4 | **WFDMA 中断使能**（现在 `INT_ENA=0` 全轮询） | 轮询可用，但会掩盖"中断没配好"，接 wiphy 时必须补 |
+| 5 | **TXS 语义验证**（`pid>=3` + `TX_STATUS_HOST` 已设但从未有 TXS） | 区分"FW 没发"与"FW 发了但不回报" |
+| 6 | **WTBL 速率表（RA）**：只发了 BASIC + GENERIC/RX/HDR_TRANS，没有 RA 项 | 固定速率是否绕过这一层未经验证 |
+| 7 | **RXD 解析偏移**：按 `RXD0[31:27]` 类型 + `[15:0]` 长度，但从未有真包核对 | 拿到第一个真包前，这套解析都是假设 |
+| 8 | **MAC 来源**：空口上 BSSID 仍是 eeprom 模板 `00:0c:43:26:60:00` | 与 tag 分区的 LAN/WAN MAC 不一致，上线前必须解决 |
+| 9 | **band1 / 5G**：eeprom 写着 5GHz/3 链，从未碰过 | 双频产品的必要面 |
+| 10 | **`AsicRxHeaderTaranBLCtl` 对应的 header-trans 配置** | 我们发了 `RX_HDR_TRANS(0x47)=off`，但厂商在 MAC 层还有一组 RxHeaderTrans 开关 |
+
+### 89.6 结论：现在"已知良好"的边界
+
+- **已经可以复现到**：固件下载完成（fw-state=7）、校准上传（4 页 ret=0）、
+  WFDMA 起来、band0 的 MAC/DEV/CHANNEL/BSS/STA_REC/DRR 六条命令全部 `ret=0`、
+  数据帧描述符字节正确并被引擎取走（`dma_done`）。
+- **尚未跨过的坎**：从"引擎读走描述符"到"帧真的出现在空中"之间，
+  阶段 7（MAC 初始化）和阶段 8 的收尾（beacon/TBTT/IRQ）是空白。
+- 因此下一轮工作的正确顺序是：**先补 WF 空间读回能力**（只读，不刷机也能做）→
+  照 `mt7915_mac_init_band` 补寄存器 → 再谈 beacon/TBTT → 最后才有资格验证 TXS/RX。
