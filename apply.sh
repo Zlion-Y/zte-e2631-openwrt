@@ -300,8 +300,11 @@ rm -f "$TREE/target/linux/sanechips/patches-6.18/044-zte-add-the-ZX279128S-nativ
 echo "native: FFE wiring removed; 037-041 superseded by 042-zte-add-the-ZX279128S-NPU-wiring.patch"
 
 # The target-level DEFAULT_PACKAGES still names wpad-basic-mbedtls; on the
-# native line the open AP userspace is gone with the driver.
-sed -i '/^\twpad-basic-mbedtls$/d' "$TREE/target/linux/sanechips/Makefile"
+# native line the open AP userspace is gone with the driver. E2631_MT76=1
+# (mt7915e comparison builds) keeps the stock open wireless stack instead.
+if [ "${E2631_MT76:-0}" != "1" ]; then
+	sed -i '/^\twpad-basic-mbedtls$/d' "$TREE/target/linux/sanechips/Makefile"
+fi
 
 # make defconfig merges CONFIG_DEFAULT_* from tmp/.targetinfo; that file is
 # generated from the *original* device definitions (mt7915e, nft-offload, ...)
@@ -319,12 +322,16 @@ rm -rf "$TREE"/build_dir/target-arm_cortex-a9_musl_eabi/linux-sanechips_generic/
 # apply.sh is additive: overlay files removed from this repo stay in the tree
 # from earlier applies. Delete the wifi bring-up set explicitly (native has no
 # wireless driver until P4, so nothing emits their firmware events).
-rm -f "$TREE"/target/linux/sanechips/base-files/etc/hotplug.d/firmware/11-mt76-caldata \
-	"$TREE"/target/linux/sanechips/base-files/etc/init.d/e2631-wifi-eeprom \
-	"$TREE"/target/linux/sanechips/base-files/etc/init.d/e2631-wifi-load \
-	"$TREE"/target/linux/sanechips/base-files/sbin/e2631-wifi-boot \
-	"$TREE"/target/linux/sanechips/base-files/sbin/e2631-wifi-on \
-	"$TREE"/target/linux/sanechips/base-files/sbin/e2631-wifi-ap
+# E2631_MT76=1 keeps the whole v1.x bring-up set - it is exactly the sequence
+# that drove mt7915e on this hardware (caldata staging, module load order).
+if [ "${E2631_MT76:-0}" != "1" ]; then
+	rm -f "$TREE"/target/linux/sanechips/base-files/etc/hotplug.d/firmware/11-mt76-caldata \
+		"$TREE"/target/linux/sanechips/base-files/etc/init.d/e2631-wifi-eeprom \
+		"$TREE"/target/linux/sanechips/base-files/etc/init.d/e2631-wifi-load \
+		"$TREE"/target/linux/sanechips/base-files/sbin/e2631-wifi-boot \
+		"$TREE"/target/linux/sanechips/base-files/sbin/e2631-wifi-on \
+		"$TREE"/target/linux/sanechips/base-files/sbin/e2631-wifi-ap
+fi
 # Stale kmod-nft-offload apks from the pre-native kernel pin the old kernel hash
 # and make apk world-solve fail ("breaks:"); force a rebuild against the current
 # kernel by removing the built artifacts and the published apks. The root-sanechips
@@ -340,7 +347,9 @@ echo "native: stale targetinfo/package caches purged (DEFAULT_ re-derivation)"
 # The tree .config dates from the original bootstrap and still carries the
 # open-source wireless selection as =y; build.sh reuses it verbatim (it never
 # re-seeds). Strip every banned selection and leave an explicit refusal in its
-# place so defconfig keeps it unset.
+# place so defconfig keeps it unset. E2631_MT76=1 keeps the stock wireless
+# stack selected - the mt7915e comparison build needs mac80211/cfg80211/wpad.
+if [ "${E2631_MT76:-0}" != "1" ]; then
 sed -i -e '/^CONFIG_PACKAGE_kmod-mt7915e=y$/d' \
 	-e '/^CONFIG_PACKAGE_kmod-mt7915-firmware=y$/d' \
 	-e '/^CONFIG_PACKAGE_kmod-mt7916-firmware=y$/d' \
@@ -360,12 +369,15 @@ for p in kmod-mt7915e kmod-mt7915-firmware kmod-mt7916-firmware kmod-mac80211 \
 	grep -q "^# CONFIG_PACKAGE_${p} is not set\$" "$TREE/.config" || \
 		printf '# CONFIG_PACKAGE_%s is not set\n' "$p" >> "$TREE/.config"
 done
+echo "native: .config stripped of the open-source wireless drivers (refusals written)"
+else
+echo "native: E2631_MT76=1 - stock wireless stack (mt7915e/mac80211/wpad) kept selected"
+fi
 # kmod-nft-offload stays selected: firewall4 DEPENDS on it (stock OpenWrt
 # plumbing), and an earlier refusal line would leave the dependency unsatisfied
 # at apk world-solve. Inert on this line - see the image Makefile comment.
 sed -i '/^# CONFIG_PACKAGE_kmod-nft-offload is not set$/d' "$TREE/.config"
 printf 'CONFIG_PACKAGE_kmod-nft-offload=y\n' >> "$TREE/.config"
-echo "native: .config stripped of the open-source wireless drivers (refusals written)"
 
 # npu branch: the scaffold is the branch's identity and has no MMIO access, so
 # unlike FFE it is always built. The kernel-build wiring ships as patch 037;

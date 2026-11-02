@@ -1,0 +1,186 @@
+#!/bin/sh
+# Turn "driver loaded" into "SSID a phone can see".
+#
+# This image boots silent on purpose, and there are TWO separate gates:
+#   1) the driver is not loaded at all (/etc/init.d/e2631-wifi-load only does it when
+#      /etc/e2631-wifi-autoload exists -- see /sbin/e2631-wifi-on);
+#   2) there is no /etc/config/wireless in the squashfs, and when netifd generates one,
+#      every interface it writes carries "option disabled '1'" because this board has no
+#      board.json wlan.defaults.  So even with the phy up, nothing is transmitting.
+# This script is gate 2.  It only touches configuration and netifd; it never loads a
+# module, so it is safe to run before or after e2631-wifi-on.
+#
+#   e2631-wifi-ap                  # open network "E2631-OpenWrt" on every radio
+#   e2631-wifi-ap MySSID 12345678   # WPA2-PSK (key must be >= 8 chars)
+#   e2631-wifi-ap off               # disable every interface again (driver stays loaded)
+#
+# Heads-up, measured on this board: a client ASSOCIATING has been hanging the whole
+# machine (no AER, no oops, only a power cycle). Scanning is not the risky part.
+set -u
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+WIRELESS=/etc/config/wireless
+
+log() { echo "wifi-ap: $*"; }
+
+# section names, not indexes: works for anonymous "@wifi-iface[n]" and for the named
+# "default_radioN" form this script writes when it has to build the config itself
+iface_sections() {
+	uci -q show wireless 2>/dev/null | sed -n 's/^\(wireless\.[^=]*\)=wifi-iface$/\1/p'
+}
+device_sections() {
+	uci -q show wireless 2>/dev/null | sed -n 's/^\(wireless\.[^=]*\)=wifi-device$/\1/p'
+}
+
+[ "$(id -u)" = 0 ] || { log "needs root"; exit 1; }
+
+if [ "${1:-}" = off ]; then
+	secs=$(iface_sections)
+	[ -n "$secs" ] || { log "no wifi-iface configured, nothing to turn off"; exit 0; }
+	for s in $secs; do uci set "$s.disabled=1"; done
+	uci commit wireless
+	wifi reload
+	wifi down >/dev/null 2>&1
+	log "interfaces disabled (driver still loaded; 'rmmod' is not offered because it has hung the box)"
+	exit 0
+fi
+
+SSID=${1:-E2631-OpenWrt}
+KEY=${2:-}
+
+# gate 1 has to be done by hand or by autoload: a missing phy is not this script's job
+if ! iw phy 2>/dev/null | grep -q '^Wiphy'; then
+	log "no wireless phy yet -- run:  /sbin/e2631-wifi-on 0"
+	log "then come back to this command"
+	exit 1
+fi
+
+# Let netifd pick up a phy that appeared after it started (the driver is loaded by hand here).
+ubus call network reload >/dev/null 2>&1
+sleep 1
+
+if [ ! -f "$WIRELESS" ]; then
+	log "no $WIRELESS, asking the stock generator for one (wifi config)"
+	wifi config
+fi
+
+secs=$(iface_sections)
+
+# Still nothing: build the device sections from sysfs.  Two reasons the generator can produce
+# nothing here: netifd enumerates radios when it is (re)loaded, and /lib/wifi/mac80211.uc exits
+# immediately when /etc/board.json has no "wlan" section -- which is this board, since its
+# board.d scripts only fill in model/network/leds.  netifd takes the PCI path exactly as it
+# appears under /sys/devices, which is what its own generator would have written.
+if [ -z "$secs" ]; then
+	log "the generator produced no interface (no board.json wlan section), building devices from sysfs"
+	n=0
+	for d in /sys/class/ieee80211/phy*; do
+		[ -e "$d" ] || continue
+		phy=$(basename "$d")
+		dev=$(readlink -f "$d/device" 2>/dev/null)
+		case "$dev" in
+			/sys/devices/*) devpath=${dev#/sys/devices/} ;;
+			*) log "cannot resolve a PCI path for $phy (device -> ${dev:-none})"; continue ;;
+		esac
+		# the same shape /usr/share/hostap/wifi-detect.uc writes: strip a leading platform/ on
+		# paths that go through a platform device, then add "+N" for the Nth phy on that same
+		# device.  This board has ONE pci function hosting two phys (phy0 = Band 1 = 2.4G,
+		# phy1 = Band 2 = 5G), so the plain path means the first phy and "+1" the second --
+		# getting this wrong makes netifd show the radio as "type unknown, channel 0".
+		case "$devpath" in platform/*/pci*) devpath=${devpath#platform/} ;; esac
+		ofs=0
+		for o in /sys/class/ieee80211/phy*; do
+			[ "$(readlink -f "$o/device" 2>/dev/null)" = "$dev" ] || continue
+			[ "$(basename "$o")" = "$phy" ] && break
+			ofs=$((ofs + 1))
+		done
+		[ "$ofs" -gt 0 ] && devpath="$devpath+$ofs"
+		uci -q delete "wireless.radio$n"
+		uci set "wireless.radio$n=wifi-device"
+		uci set "wireless.radio$n.type=mac80211"
+		uci set "wireless.radio$n.path=$devpath"
+		uci set "wireless.radio$n.channel=auto"
+		# country CN, not the mt76 default "00": the global regdomain caps every
+		# band at 20 dBm, which cost 3 dB on 5 GHz vs what the vendor ships
+		# (verified live: 20.00 -> 23.00 dBm on ch36 after the switch, 2026-10-24)
+		uci set "wireless.radio$n.country=CN"
+		# Band profiles - the v1.4 provisioning set NO htmode, and netifd then
+		# falls back to HT20: 2.4G negotiated at most ~287 Mbit/s PHY and never
+		# reached the ~500 the vendor runs (their DBDC profile is 2x2 HE40,
+		# 574 Mbit/s PHY - the "cannot reach 500M" complaint), and 5G lost the
+		# 80 MHz rates too. phy0 (ofs 0) is Band 1 = 2.4G, phy1 (+1) Band 2 =
+		# 5G. HE40 + noscan pins the 2.4G behaviour to the vendor's forced
+		# 40 MHz; 5G runs HE80 (2x2 80 MHz). The RF calibration itself is the
+		# vendor's own (the /wlan/caldata blob, chip id 0x7916, handed to the
+		# driver through the mt7916_eeprom.bin request); what remains
+		# vendor-only is the proprietary per-rate SKU tuning in their
+		# mt7916.dbdc.*.dat profiles, which mt76 does not consume.
+		case "$ofs" in
+		0)	uci set "wireless.radio$n.htmode=HE40"
+			uci set "wireless.radio$n.noscan=1" ;;
+		*)	uci set "wireless.radio$n.htmode=HE80" ;;
+		esac
+		uci set "wireless.radio$n.disabled=0"
+		uci -q delete "wireless.default_radio$n"
+		uci set "wireless.default_radio$n=wifi-iface"
+		uci set "wireless.default_radio$n.device=radio$n"
+		uci set "wireless.default_radio$n.network=lan"
+		uci set "wireless.default_radio$n.mode=ap"
+		log "  $phy -> radio$n path=$devpath"
+		n=$((n + 1))
+	done
+	if [ "$n" -gt 0 ]; then
+		uci commit wireless
+		secs=$(iface_sections)
+	fi
+fi
+
+if [ -z "$secs" ]; then
+	log "no interface to configure -- diagnostics:"
+	echo "--- iw phy ---"; iw phy 2>&1 | head -4
+	echo "--- /sys/class/ieee80211 ---"; ls -l /sys/class/ieee80211/ 2>&1
+	echo "--- ubus network.wireless status ---"; ubus call network.wireless status 2>&1 | head -20
+	echo "--- $WIRELESS ---"; cat "$WIRELESS" 2>&1 | head -20
+	exit 1
+fi
+
+if [ ${#KEY} -lt 8 ]; then
+	[ -z "$KEY" ] || log "key shorter than 8 chars, ignoring it -> open network"
+	enc_val=none
+else
+	enc_val=psk2
+fi
+
+# the wifi-device can be disabled too; clear both gates for what we are about to start.
+# country goes on BOTH paths: netifd's generator (which wrote these sections)
+# leaves it unset, and mt76 then runs the "00" global regdomain - that caps
+# every band at 20 dBm, 3 dB below what this radio ships with on 5 GHz.
+for d in $(device_sections); do
+	uci set "$d.disabled=0"
+	uci -q get "$d.country" >/dev/null || uci set "$d.country=CN"
+done
+
+for s in $secs; do
+	uci set "$s.disabled=0"
+	uci set "$s.mode=ap"
+	uci set "$s.network=lan"
+	uci set "$s.ssid=$SSID"
+	uci set "$s.encryption=$enc_val"
+	if [ "$enc_val" = psk2 ]; then uci set "$s.key=$KEY"; fi
+done
+uci commit wireless
+# A bare `wifi reload` has left the interfaces torn down after a config change on this board;
+# the sequence that reliably brings them up is a down/up cycle.
+wifi down >/dev/null 2>&1
+sleep 1
+wifi up >/dev/null 2>&1
+sleep 3
+if ! iw dev 2>/dev/null | grep -q "type AP"; then
+	log "no AP after wifi up, retrying once"
+	wifi down >/dev/null 2>&1; sleep 2; wifi up >/dev/null 2>&1; sleep 5
+fi
+
+log "configured $(echo "$secs" | wc -w) interface(s), ssid '$SSID', encryption $enc_val"
+log "state now:"
+iw dev
+ubus call network.wireless status 2>/dev/null | sed -n '1,40p'
+log "if a client connecting hangs the box, that is the known association stall, not this script"

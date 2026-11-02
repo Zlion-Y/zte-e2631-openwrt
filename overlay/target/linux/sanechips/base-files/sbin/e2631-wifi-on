@@ -1,0 +1,39 @@
+#!/bin/sh
+# Bring up the MT7916 outside the boot-critical path.
+#
+# Called by /etc/init.d/e2631-wifi-load (START=95) with a delay, or by hand.
+# Rationale, measured on this board: the stall that used to eat boots always sat
+# inside rc.d (console dies right after "WA Firmware Version", during the
+# firmware DMA window), so keeping the load out of rc.d means a stall can no
+# longer keep ssh from coming up. That is a recovery property, not a cure: on
+# three cold boots of this image a hand-run bind at up=251 hung, at up=336
+# worked, at up=307 hung, so the first download after a power cycle is still
+# roughly one success in three whatever moment it is attempted at.
+#
+# The bind order matters: with drivers_autoprobe restored first, the PCI core
+# grabs the ext-HIF (14c3:790a) itself and the main function then claims it as
+# hif2 -- the dual-HIF configuration that dies on the first client.
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+DEFER=${1:-25}
+log() { echo "wifi-on: $*" > /dev/kmsg; }
+
+log "waiting ${DEFER}s after boot before touching the card"
+sleep "$DEFER"
+
+fw=mediatek/mt7916_eeprom.bin
+[ -e "/lib/firmware/$fw" ] || FIRMWARE=$fw /etc/hotplug.d/firmware/11-mt76-caldata
+[ -e "/lib/firmware/$fw" ] || { log "no caldata staged, giving up"; exit 0; }
+
+echo 0 > /sys/bus/pci/drivers_autoprobe
+modprobe mt7915e || log "modprobe failed rc=$?"
+
+# bind the main function while autoprobe is still off
+for d in /sys/bus/pci/devices/*; do
+	[ "$(cat "$d/device" 2>/dev/null)" = "0x7906" ] || continue
+	[ -e "$d/driver" ] && continue
+	log "binding ${d##*/}"
+	echo "${d##*/}" > /sys/bus/pci/drivers/mt7915e/bind
+done
+
+echo 1 > /sys/bus/pci/drivers_autoprobe
+log "done: 7906=$(basename "$(readlink /sys/bus/pci/devices/0000:01:00.0/driver)" 2>/dev/null || echo none) 790a=$(basename "$(readlink /sys/bus/pci/devices/0001:01:00.0/driver)" 2>/dev/null || echo none)"
