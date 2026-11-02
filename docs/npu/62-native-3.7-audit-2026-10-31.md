@@ -1609,3 +1609,650 @@ H1 获取定制版固件**文件**（不刷机），解压对比 wifi init 代�
 H2 用 TTL 在我们 3.44 固件上观察 vendor 系统启动日志（如果用户
    愿意刷定制版到备用设备）
 H3 联系 ZTE/MTK 获取 MT7916 在 ZX279128S 平台的 reference driver
+
+## 65. mt7916.ko（MTK SDK 7.6.2.0）全解析——vendor 固件下载协议闭合（2026-11-01）
+
+**H1 完成**：用户提供 E2633 25B4.6000 完整解包
+（`D:\AI\中兴\E2633_25B4.6000_解包`，JFFS2 AES 解密 + squashfs 全展开）。
+
+### 65.1 驱动本体
+- `04_kmodule根/lib/modules/mt7916.ko` 5,704,776B，ARM32 ELF，
+  **全符号**（17,689 个 .symtab 符号），MTK SDK 7.6.2.0，vermagic 4.1.25 SMP
+- 全量反汇编 `_scratch/mt7916.dis`（751,064 行）
+- PCI probe：`rt_pci_probe`(0x1fa3e0) 主设备 7906="mt_drv_7916"；
+  `rt_pci_slave_probe`(0x1fa0cc) 790a="mt_pci_slave" → `pci_hif_chip_init`
+
+### 65.2 初始化调用链（全符号闭合）
+```
+rt_pci_probe → RTMPAllocAdapterBlock → netdev open
+→ mt_wifi_open → mt_wifi_init → WfInit → WfMcuInit → WfMcuSysInit
+→ chip_fw_init → MCUSysInit → NICLoadFirmware = mt_load_fw(0x1e18c8)
+```
+- driver-own（0x19d2e8）：LPCR 写 2 → 轮询 bit2 清 → 写 1（band 数组），
+  重试 ≤4 次，每轮 3000ms —— **与我们 zxnpu-wlan.c 实现逐字段一致**
+- fw_prepare(0x1a11a0) 经函数指针装入 mcu_ctl+0x100（此前"死代码"结论错误：
+  objdump -d 看不到指针引用，重定位 .text+0x1aa0d0 才是真身）
+
+### 65.3 实机串口日志（用户 COM7，2026-11-01 17:10，E2633 同代固件）
+```
+mt_drv_7916 0000:00:00.0: enabling device (0140 -> 0142)
+mt_pci_slave 0000:01:00.0: enabling device (0140 -> 0142)
+mt7916_init()--> Use the default iPAiLNA bin image! <--mt7916_init()
+Error 2 opening /wlan/mt7916_patch_e1_hdr.bin        ← ENOENT
+Error 2 opening /wlan/WIFI_RAM_CODE_MT7916.bin
+Error 2 opening /wlan/7916_WACPU_RAM_CODE_release.bin
+current sync CR = 0x1                                ← TOP_MISC&7 = 1 (DL 态)
+  Chip ID: 0xe00  Eco version: 0x2
+  Ram version: 000000                                ← patch 阶段报告
+  Built date: 20250103112803  Common crc: 0xd730d461
+current sync CR = 0x7                                ← RDY!
+Could not send in band command due to disable
+  RTMP_ADAPTER_MCU_SEND_IN_BAND_CMD                  ← 就绪前态，随后消失
+```
+
+### 65.4 范式修正（推翻 §64 前的"ROM-only"猜想）
+- `/wlan/` 只是首选路径；**兜底 `/etc/wireless/mt7916/` 全部存在且成功**：
+  - mt7916_patch_e1_hdr.bin（ROM patch E1, 8672B, magic 0x11223344@0x20,
+    ILm 0x40210000, ALPS, date 20250103112625a）
+  - WIFI_RAM_CODE_MT7916.bin（WM 1,759,340B，裸代码+尾部 fw 头
+    `____0000_20250103112717`）
+  - 7916_WACPU_RAM_CODE_release.bin（WA 458,112B）
+  - MT7916_EEPROM.bin（4096B 校准）
+- **vendor 确实执行完整固件下载**；"Ram version 000000" 是 patch 头解析阶段
+  的正常输出，非 ROM-only 证据。sync 0x1→0x7 即下载完成迁移。
+- 版本块由 parse_fw_v3(0x1e0dd4) 打印（数据=真实固件头，非 MCU 应答）
+- **我板 sync 恒 1 = ROM 停在 DL 态等主机喂固件 —— 下载是我们必须做的事**
+
+### 65.5 下载协议（load_patch_v1 0x1e0188 / load_fw_v1 0x1dffc4 逐指令）
+1. `MtCmdPatchSemGet`(0x1d6524)：Andes 头构造，cmd 字节 0x10/0x17
+2. 每region：`MtCmdAddressLenReq`(0x1d62dc，cmd 0x17 + band 相关 0x05/0x01，
+   payload 12B) → **`MtCmdFwScatter`(0x1d643c) 按 4096-chip_cap[308] 分块**
+3. `MtCmdPatchFinishReq`(0x1d6604) → `MtCmdPatchSemGet` 释放
+4. WM/WA 同 region+scatter 模式（load_fw_v1 state 1/2/3 = fwdl_ctrl 状态机）
+5. `ctrl_fw_state_v2(0)`(0x1df704)：轮询 `TOP_MISC(0x180600f0)&7 == 7`
+   （caps bit1 时）超时 1501ms
+- `get_fw_sync_value`(0x19b3d4) = `hw_io_read32(0x180600f0) & 7` —— 与我们
+  zxnpu_fw_state_read 同寄存器同掩码
+- 固件文件已入库 `native/overlay/target/linux/sanechips/files/firmware/mt7916/`
+  md5: patch ae74c143… / WM 9a3fb936… / WA 967fa140… / EEPROM 632aa598…
+
+### 65.6 R-B 任务拆解
+B1 zxnpu-wlan.c：request_firmware 三个 vendor 文件（路径对齐 vendor）
+B2 补全 DL 命令序列（SEM→AddrLen→scatter→Finish→SEM，WM/WA 同）
+B3 实机验收：sync(TOP_MISC&7) 1→7；事件环出现首个 MCU 响应
+**验收标准**：fw-state=7 + 首个 Andes 事件；**验证方式**：debugfs dma_state
+快照 + rx-desc dump，全程不触碰 5.1
+
+## 66. R-B：patch dst 用错字段是 13 轮"scatter 被丢弃"的根因（2026-11-01）
+
+**实机 A/B 证据（3.45，fw_ring=0 vendor 路由首测）**：
+- qid17 消费 2 条（SEM + AddrLen）后停 —— ROM 正确处理了 DL 命令
+- qid16 取 2 个 scatter 块（1024B）后停 —— ROM 收到目标地址后拒绝继续
+- fw-state 恒 1（DL 态），无事件 —— ROM 卡在等待合法数据流
+- 3.45 首包是陈货（apply 没跑，payload 还是 10-13 的 3.44）→ 已修复流程
+
+**根因（mt76 源码 + vendor parse_patch_v2 双重验证）**：
+- mcu-dl auto 模式把 `LE32(fw+0x24)` 当 DL 目标 = **patch desc 的 subsys 字段
+  0x04000000**，根本不是地址
+- 真布局（struct mt76_connac2_patch_hdr 0x60B + patch_sec 64B，全 BE）：
+  - desc.n_region = BE32(+0x2c) = 1
+  - section@0x60: {type=0x00030002(&0xffff==2), offs=0xa0, size=0x2140,
+    **addr=0x900000**, len=0x2140}
+- **patch DL 目标 = 0x900000** → init_download 对 0x900000 应发 cmd 0x05
+  (PATCH_START_REQ)，0x01 只用于普通 TARGET_ADDRESS_LEN_REQ
+- WM/WA 的 zxnpu_fw_parse（9 region、LE addr@16/len@20、36B trailer）
+  经 mt76 结构体逐字段核对**本来就对**；MT7916 WM RAM 窗口在 0x0220_0000
+
+**修复（3.46）**：mcu-dl patch 路径改 section 驱动 —— SEM(0x10) → 逐 section
+[AddrLen(dst,size,0x80000000，dst==0x900000 用 cmd 0x05) → scatter(fw+offs,size)]
+→ Finish(0x07) → SEM release(0x10,op2)；删掉 ZXNPU_PATCH_HDR=30 的旧猜测。
+
+**R-B 验收（下一轮实测）**：fw-state 1→7；qid16 didx 走满 patch 全量；
+首个 MCU 事件落 RX 环。
+
+## 67. R-B 实机迭代 3.47–3.53：事件环打通 + 三根因链（2026-11-02）
+
+**里程碑**：chip→host 事件 DMA 首次打通（13 轮未解）。
+- **根因 A（3.47）**：RX 环 CPU_IDX = 宿主投递公告数（mt76_dma_rx_fill 写
+  q->head=ndesc），写 0 = 零可用槽 → 引擎永不投递。修复后 4 个 MCU 事件
+  首次落环。
+- **根因 B（3.48）**：scatter 块必须 vendor 的 4032B（4096-chip_cap[0x134]）。
+  512B 帧只被消费 3 个；4032B 后 patch 3 帧全消费。
+- **根因 C（3.49）**：MCU 收到新 AddrLen 即放弃上一数据段 —— 必须 mt76 式
+  逐命令等响应。mcu_wait_event(seq) 实现，DL 命令全部接线。
+- **计数模型（3.50）**：tail（消费位置，自由递增）+ CPU_IDX 寄存器 =
+  tail+DEPTH（恒满环在途）。didx-cidx 回绕 bug 修复。
+- **wfsys-reset 重试（3.52）**：二次复位可能被 MCU 无视（state 不动 + 引擎
+  死），改为验证 fw-state 变化、最多重试 5 次。
+
+**3.53 全量捕获（当前状态）**：
+- patch：4/4 命令 + 4/4 响应 ✓；8512B 数据 3 帧全消费 ✓
+- WM：r0(0x0220a800,126976) ✓、r1(0x0231dc00,205824) ✓ 响应+数据
+  （qid16 cidx=didx=87 = 3+32+52 帧全消费）
+- **WM r2(0x00414800) 起 MCU 硬挂**：qid17 didx=9（cmds 7-9 已取）、
+  RX didx 恒 6（再无事件）、fw-state 恒 1。15s 超时也无效。
+- WA r0=0x10200000（CR4 ILM，mode 0x80000010 = WORKING_PDA_CR4）
+
+**下一步假设**：Finish 后 patch 未真正激活（TLV 状态码未验）；或 r1 数据
+DMA 尾帧触发 MCU 总线错误。行动：wait_event 打印命中事件的 48B TLV +
+每 region 后读 qid16 计数器，一轮定位。
+
+## 68. COM7 串口日志完整复读——此前忽略的关键点（2026-11-02）
+
+**两个版本块（交织还原后）**：
+- WM 块：Chip ID 0x13 / Region number 0x09 / Built date 20250103112717 /
+  Common crc 0xf9b7d222 / Release info total len 92, tag1 pad 3 len 85
+  → 与我们 WM 文件逐字节吻合（trailer t[0]=0x13、n_region=9、尾部 CRC、
+  128B release-info TLV 0x5c=92/0x55=85 全部对上）
+- WA 块：Region number 0x03 / Built date 20250103112803 / crc 0xd730d461
+  → 与 WA 文件（3 region、尾 CRC）吻合
+- **vendor 的固件解析与我们的逐字节一致——解析层排除嫌疑**
+
+**vendor 下载路径完整还原**：
+1. /wlan/*.bin 三个 ENOENT（仅首选路径）
+2. fallback /etc/wireless/mt7916/ 打开成功 → 版本块打印真实数据
+3. 下载静默执行（DebugLevel 无打印）
+4. `current sync CR = 0x1 → 0x7`（RDY）——**vendor 确实下载固件**
+   （"ROM-only boot" 论点彻底作废；与我们的实测行为同构）
+
+**其他**：
+- "Patch version: NE2631-EFA8" 是 dhcp4c 产品串 ZTE-ZXHN E2631-EFA8 的
+  交织假象，固件/驱动中均无此字符串
+- WM 文件 layout 定案：[data][9×40B desc][36B trailer]，data 与 desc 之间
+  有 128B release-info（16×'#'+{u32 len=92}+tag 串），vendor 与我们都跳过
+- PCI 基线：vendor dump 7906 rev 字节=0x22、790a=0x23；我们的 box
+  sysfs rev=0x00（class 0x028000 一致）——字段含义待定，但 patch 应用
+  成功（re-get=1）说明 E1 patch 与我们硅片兼容
+- 两个 "current sync CR" 分别在 WM/WA 解析块前（=1，DL 态）；0x7 出现在
+  文件打开+解析之后（RDY）——是下载完成的标志
+
+**下一步**（不变）：r1 status-5 疑点指向命令线格式（3.62 已把 AddrLen
+换成 32B Andes 格式但未测）。解析层已排除，测试 3.62 是下一个动作。
+
+## 69. 第二份 COM7 日志（18:34–19:13）复读——"双原厂"事件全程还原（2026-11-02）
+
+此前只读了第一份（17:10 vendor 启动）。第二份记录了 8b8 包刷机失败全程：
+
+1. 18:34 Boot A：bootloader 提示输入 bootmode password（用户进了 bootmenu），
+   `upgrade version` TFTP 尝试 → 192.168.1.100 超时 Abort
+2. vendor 系统启动：slot0 header@**0x1800000**（原 0x1c60000）+ header crc
+   0xfca2a9af/0x35d5650 = **vendor 自家头**——slot0 已被写回 vendor 固件
+   （web 刷 8b8 包 integrity 失败后，用户刷了官方包或 web 页回写了 vendor）
+3. Boot B：再次 TFTP → 'File not found'
+4. Boot C：两次黑屏重启循环（3590-3617 行丢失输出）后，slot0 = 我们的
+   内核 crc 0x61083db9/0x9ef7c246，fs 0x1220000（我们的 jffs2）——用户用
+   e2631-fwslot/TTL 恢复了 OpenWrt，R-A ready ×3 次正常
+
+**结论**：8b8 头通过 bootloader cspboot 校验没问题（我们 pack 的 CRC 自洽），
+但 web 页 integrity 校验走的是另一套（含版本门）。双原厂事件=web 刷写把
+slot0 写成了 vendor 官方固件，后经用户手工恢复。无新协议信息，但明确了：
+**刷机路径必须在 OpenWrt 侧用 e2631-fwslot，web 页只用于官方包**。
+
+## 70. 3.61–3.65 迭代定性——r1 拒绝机制与 vendor 单入口模型（2026-11-02）
+
+**实验矩阵结论**（全部实测定案）：
+- 64B TXD AddrLen：r0 (0x0220a800,126976) → status 0 + 数据 32 帧全消费 ✓；
+  r1 (0x0231dc00,205824) → status 5（秒回，qid17）
+- Andes 32B AddrLen：r0 数据不被取走（txdrain 超时）→ 64B TXD 是对的
+- fire-and-forget（无等待）：MCU 会话错乱后**硬挂**，连 wfsys-reset 都失效
+  （SUBSYS_RST 0x300 位卡死，只能整箱重启）→ 等待是协议的一部分
+- AddrLen 超时重发（幂等）：r1 的应答会**迟到**（MCU 处理 r0 数据期间不收
+  新 AddrLen），重试后收到 status 5 —— 不是丢失，是明确拒绝
+- bit30 于 TX 描述符 = fetch-enable，清掉后数据完全不动（3.60）
+
+**vendor 单入口模型**（parse_fw_v1 + load_fw_v1 逆向结论）：
+- parse_fw_v1 每 stage 只建**一个 28B 条目**（os_alloc(28)）：{img_ptr,
+  0x100000, crc_ptr+4, 0x20}——0x100000 是常量，crc_ptr 是文件尾
+- vendor 版本块打的是每 stage 的（Chip ID/Eco/Region/Format/Ram version/
+  Built date/Common crc）——与文件尾部 TLV 逐字节吻合
+- load_fw_v1 的 AddrLen 参数：addr=[fp+4]=0x100000（常量！）、len=[fp+8]
+  ——**vendor 不是按 region 逐个 AddrLen**，整个 stage 一次地址窗口
+- 我们按 region 逐个发 AddrLen(0x0220a800/0x0231dc00/...) 的模型本身就与
+  vendor 不同；r1 的 status 5 是 patched DL handler 对"第二个窗口"的拒绝
+
+**下一步**：按 vendor 模型重写——每 stage 一次 AddrLen(addr=常量,
+len=img_size)，数据从 img 头部连续发到尾，无 region 循环。3.66。
+
+## 71. load_fw_v1 完整逆向——vendor DL 协议定案（2026-11-02）
+
+### 71.1 mt_load_fw 完整流程（129 行逐指令）
+```
+1. fw_own_ctrl(1)                      — chip_ops[0xc8]，进 DL 模式
+2. ctrl_fw_state_v2(action=1)          — hif_ctrl+0xf40 hook
+   → 如果 sync != 1: MtCmdRestartDLReq → 等待 sync == 1
+3. bit loop for caps=3 (bit0, bit1):
+   bit0: fwdl_ctrl[0]+0 != 1? → parse_patch_v2 (hook f3c) → 下载 patch
+   bit1: fwdl_ctrl[1]+0 != 1? → parse_fw_v1 (hook f38) → 解析 WM
+        → load_fw_v1 (hook f30) → 下载 WM
+   （没有 bit2/WA —— vendor 的 mt_load_fw 只下载 patch + WM！）
+4. ctrl_fw_state_v2(action=3)          — 最终 RDY 检查
+```
+
+### 71.2 load_fw_v1 逐指令（0x1dffc4–0x1e0188）
+```
+load_fw_v1(pdev, stage, img_struct):
+  if img_struct[4] == 0: → 跳过下载，直接 FwStartReq
+  r4 = 0 (byte offset); r5 = 0 (region index); sl = 1 (is_first)
+  loop:
+    fp = img_struct[0] + r4           ← 28B entry base
+    r4 += 28; r5 += 1
+    feature = fp[12]
+    if feature & 0x20: override = fp[4]     ← OVERRIDE_ADDR bit
+    AddrLen(addr=fp[4], len=fp[8], mode=feature&7|0x80000000
+            |(feature&1?8:0)|(feature&0x10?0x40:0)|(stage==1?0x10:0))
+    if error: → free, print, return error
+    send_image(pdev, fp[0], fp[8])          ← 从 fp[0] 发 fp[8] 字节
+    if region_count <= r5: → FwStartReq
+    else: → loop
+```
+
+### 71.3 parse_fw_v1 填充的 28B 条目
+```
+entry[0]  = img_ptr                    (宿主 VA，数据起始)
+entry[4]  = 0x100000                   ← 常量！不是从文件读的
+entry[8]  = crc_value + 4              ← CRC 地址 + 4 = 数据结束偏移
+entry[12] = 32 (byte)                  ← feature = 0x20 (OVERRIDE)
+```
+
+### 71.4 关键发现
+- **vendor 只下载 patch + WM，不下载 WA**（caps=3 没有 bit2）
+- **每 stage 只有一个 28B 条目**——不是按文件里的 9 个 region 逐个下载！
+- AddrLen(addr=0x100000, len=crc_value+4)——0x100000 是 WM 的 DL 窗口地址
+  （MT7916 WM 地址空间基址），len = 整个文件的大小（crc 标记尾部）
+- **我们错在**：按文件的 9 个 region 逐个 AddrLen——每个都是一个新的 DL
+  窗口请求，第一个被接受后 MCU 关闭会话，后续全部 status 5 拒绝
+- **正确做法**：一次 AddrLen(0x100000, whole_file_size) + 整个文件 scatter
+  + FwStart(addr=override)。MCU 自己解析 region 描述符决定内部布局。
+- WA 下载不在 mt_load_fw 里——在 MCU 启动后由其他路径处理
+
+### 71.5 3.66 实测验证
+AddrLen(0x100000, 1759340) → status 5：**0x100000 也被拒**。
+这意味着 status 5 不是"地址错误"而是**会话状态问题**——patch 激活后
+MCU 的 DL handler 需要某种我们还没做的会话重置。
+（RestartDL type=0xEF 候选）
+
+## 72. 3.67 RestartDL 实测 + vendor DL 地址来源追踪（2026-11-02）
+
+### 3.67 结果
+RestartDL(type=0xEF) 被接受（返回 0），但应答 status=0xfe（错误码）。
+WM AddrLen(0x100000, 1759340) → 仍然 status 5。之后 WA 全部超时。
+
+### 结论：RestartDL 不能解决 status-5。问题在 DL 地址本身。
+
+### vendor DL 地址来源追踪（纯静态）
+fwdl_ctrl[stage] = adapter + 0xf35f44 + stage*60，共 3 个 stage × 60B。
+fw_prepare 填充：
+- fwdl[0]+4 = [adapter+0x13e9e0]  ← patch 的 DL 地址
+- fwdl[0]+8 = [sp+4]（文件长度）
+- fwdl[1]+4 = [adapter+0x13c9e4]  ← WM 的 DL 地址
+- fwdl[1]+8 = [sp+8]（文件长度）
+- [adapter+0x13e9e0] 和 [adapter+0x13c9e4] 只被 fwbin_mem_free 清零，
+  没有其他 .ko 代码写入 → **DL 地址来自 userspace ioctl**！
+- 这意味着 vendor 的 DL 地址由 wlan_config daemon 通过 RTMP_COM_IoctlHandle
+  传入，驱动从不用文件里的 region 地址
+
+### 对我们的含义
+我们不该从 .bin 文件的 region table 取地址——地址应该来自 MCU 固件
+"期望"的下载窗口。vendor 的 userspace 传的是什么值？
+→ 需要逆向 ZTE 的 wlan_config binary 或固件解析 ioctl 的 handler
+→ 或者：试 MT7916 标准地址 0x200000（ILM）/ 0x900000（DLM）
+
+## 73. load_fw_v1 完整逆向定案——vendor DL 流程模型修正（2026-11-02）
+
+### 调用链（100% 确认）
+```
+WfMcuInit:
+  NICLoadRomPatch (= mt_load_patch) → parse_patch_v2 → 下载 patch
+  NICLoadFirmware (= mt_load_fw)    → parse_fw_v1 + load_fw_v1 → 下载 WM
+MCUSysInit:
+  NICLoadFirmware (= mt_load_fw)    → 同上
+```
+WA 文件不在 init 流程中下载——**vendor 初始化只下载 patch + WM**。
+
+### mt_load_fw 完整逻辑（逐指令确认）
+```
+1. fw_own_ctrl(1)                          — chip_ops[0xc8]
+2. ctrl_fw_state_v2(action=1)              — hif_ctrl+0xf40
+   → if sync != 1: MtCmdRestartDLReq       — 恢复 DL 态
+3. bit loop (caps=3, bits 0,1):
+   bit0: fwdl_ctrl[0]+0 != 1 → parse_patch_v2(pdev, 0, sp) → 下载 patch
+   bit1: fwdl_ctrl[1]+0 != 1 → parse_fw_v1(pdev, 1, sp)    → 解析 WM
+        → load_fw_v1(pdev, 1, sp)                          → 下载 WM
+4. ctrl_fw_state_v2(action=3)              — 最终 sync==7 检查
+```
+
+### load_fw_v1 核心循环（逐指令）
+```
+for region_idx = 0..region_count-1:
+  entry = array_base + region_idx * 28
+  feature = entry[12]
+  if feature & 0x20: override = entry[4]
+  mode = (entry[12]&7) | 0x80000000 | (entry[12]&1?8:0)
+       | (entry[12]&0x10?0x40:0) | (stage==1 ? 0x10 : 0)
+  MtCmdAddressLenReq(pdev, addr=entry[4], len=entry[8], mode)
+  send_image(pdev, data=entry[0], total=entry[8])
+  → FwStartReq
+```
+
+### 28B 条目字段
+```
+[0]  = img_ptr   (宿主 VA,数据起始)
+[4]  = 0x100000  ← 硬编码常量,parse_fw_v1 的 DL 地址
+[8]  = crc_value + 4 ← 数据结束标记
+[12] = 32 (byte) ← feature = 0x20 (OVERRIDE_ADDR)
+```
+
+### 关键未定项
+- 0x100000 的语义：MCU DL 窗口地址？command 参数？需实机验证
+- entry[8] = crc+4 = 0xf9b7d226 作为 len 传给 AddrLen——MCU 可能
+  不按 len 计数而是按 FWDL 环空判断结束
+- parse_fw_v1 从 fwdl_ctrl[stage] 读 img_ptr/img_size，而 fwdl_ctrl
+  由 fw_prepare 填充；mt_load_fw 通过栈传递 fwdl_ctrl 指针给 hook
+  （编译器布局的隐式参数传递，静态追踪困难）
+
+### 当前状态
+- 3.66 测试了 AddrLen(0x100000, 1759340) → status 5
+- 3.67 加了 RestartDL → RestartDL 返回 0xfe，AddrLen 仍 status 5
+- 结论：0x100000 地址和 RestartDL 都没解决问题
+- 可能原因：patch 后的 DL handler 与 ROM 的不同，需要不同的参数格式；
+  或者 0x100000 不是 WM 的正确地址
+
+### 下一步方向
+按 vendor 模型：0x100000 + len=crc+4 的 AddrLen 被拒——
+尝试用 mcu-dl-regions 的自定义参数在设备上交互式测试多个
+addr/len 组合，找出 MCU 接受的窗口参数。
+
+## 74. 协议闭环——mt76 上游源码交叉验证 + 3.68 重写（2026-11-02）
+
+### 74.1 mt76_connac_mcu.c/.h（openwrt/mt76 master）权威常量
+
+`MCU_CMD_TARGET_ADDRESS_LEN_REQ=0x01 / FW_START_REQ=0x02 / PATCH_START_REQ=0x05 /
+PATCH_FINISH_REQ=0x07 / PATCH_SEM_CONTROL=0x10 / FW_SCATTER=0xee / RESTART_DL_REQ=0xef`
+——与 vendor MtCmd* 系列的 Andes CMD_MSG byte@2 逐一相等；wire TXD cid@36 = 这些值，
+wire cmd 字节恒 0x17（scatter 0x10）。此前记录的 "AddrLen(0x05/0x01)" 之谜解开：
+init_download 按 `addr==0x900000 → PATCH_START(0x05)，否则 TARGET_ADDRESS_LEN(0x01)`
+选 cid，vendor MtCmdAddressLenReq 的 `(addr==chip_cap[0x12c]) ? 5 : 1` 是同一规则
+（cap[0x12c]=patch 目标=0x900000）。
+
+DL_MODE 位（payload 第 3 dword）：BIT31=NEED_RSP（恒置，=vendor 0x80000000）、
+BIT4=WORKING_PDA_CR4（WA 专属 = vendor load_fw_v1 `r9==1 ? +0x10`）、bit0|bit3=加密、
+bit5-6=KEY_IDX、BIT6=ENCRY_MODE_SEL。region feature_set：BIT5=FW_FEATURE_OVERRIDE_ADDR
+（照下载，addr 进 FwStartReq 入口，option|=FW_START_OVERRIDE=1）、BIT6=FW_FEATURE_NON_DL
+（跳过）。**WM 文件 9 个 region 的 len 之和 = 0x1AD660 = 恰为 data 段大小**（自洽）。
+
+### 74.2 vendor 与 mt76 的 WM/WA 流程同构
+
+mt76_connac_mcu_send_ram_firmware：逐 region AddrLen(0x01)+scatter(4096B 块) →
+一次 FwStartReq(option=OVERRIDE|CR4, addr=override)。vendor load_fw_v1：逐 28B entry
+AddrLen+scatter（state 1↔2 切换）→ FwStartReq(option=(wa?4:0)|entry_bit5, addr=entry[4])。
+WM r0={0x0220a800, 0x1f000, feat 0x20} 即 override 段——实机 3.54 起 r0 被接受、数据
+被消费，与此模型吻合。vendor parse_fw_v1 的单窗口 len=BE32(file尾4)+4=CRC+4 是死胡同
+（file 尾 4B 是 trailer CRC），**放弃单窗口模型，以 mt76 region 流程为准**。
+
+vendor parse_fw_v1+load_fw_v1 的调用链：WfMcuInit→NICLoadRomPatch(→load_patch_v1)→
+NICLoadFirmware(→mt_load_fw→hook[0xfb0/0xfa8])；NICRestartFirmware→hook[0xfb8]→
+RestartDL(0xEF)。RestartDL 不在正常下载流程（3.65-3.67 的注入判错）。
+
+### 74.3 3.68 驱动重写（zxnpu-wlan.c）
+
+- zxnpu_fw_send：删 RestartDL + 单窗口；逐 region AddrLen(cid 0x01, mode=
+  0x80000000|wa?0x10|enc bits) → scatter(FWDL 环) → wait_txdrain；收尾
+  FwStartReq(cid 0x02, {option=(override?1:0)|(wa?4:0), addr=override})，cmd 环。
+- zxnpu_mcu_addrlen：删 on_fwidl 参数——路由铁律 state==2→FWDL 环仅限 scatter，
+  AddrLen 恒走 cmd 环（mt7916_kick_out_fwdl_msg 实读反证了 3.57 的注释）。
+- fw-boot.sh 删掉手动的 "fw-start 1 0220a800 / fw-start 5 0" 补充块（FwStartReq
+  已内嵌于 fw-dl，重发会重复）。
+- 版本 native-wired-3.68。
+
+### 74.4 工具坑
+
+Git Bash 无 objdump/readelf/wslpath，`2>/dev/null` 把 command-not-found 吞成空输出
+（本日由此得出过假阴性）。反汇编一律走 WSL cross objdump：
+`/home/builder/openwrt/staging_dir/toolchain-arm_cortex-a9_gcc-14.4.0_musl_eabi/bin/
+arm-openwrt-linux-muslgnueabi-objdump`（host objdump 无 arm target）。E2631 实机
+带符号 ko：_scratch/vendor-e2631-kmodule/mt7916-run.ko；E2633 全符号反汇编：
+_scratch/mt7916.dis（751K 行）。
+
+## 75. 3.68-3.70 实机探针——status 5 规则收敛（2026-11-02 深夜）
+
+### 75.1 实测事实链（3.69/3.70 驱动，status 感知后）
+1. patch 窗口全链绿：power-ctrl→SEM(2)→AddrLen(0x900000,0x2140)=0→scatter→Finish=0→SEM rel(3)→SEM re-get=01(applied)
+2. 首个 RAM AddrLen (0x0220a800, 0x1F000, mode 0x80000000) → status 0，126976B 数据被 FWDL 环消费
+3. **其后所有命令确定性 status 5，与等待时长无关**（15 次×2s 重试全秒拒）：第 2 个 AddrLen（任意地址/长度）、Finish(0x07)、0x100000 整文件窗口（事件迟到 ~1min）
+4. 窗口被拒时 scatter 帧完全不被消费（FWDL didx=0）→"窗口开=数据通路开"
+5. interlude 0x41143c 清 bit0-1 无效（ROM DL 态下寄存器本就 0x00000000，3.70 实测）
+
+### 75.2 长度校验假说（当前最强）
+全部数据点符合"AddrLen 窗口长度 ≤ ~128KB"：
+- 0x2140 (patch) ✓ / 0x1F000 (r0) ✓
+- 0x32400 (r1) ✗ / 0x1AD86C (整文件) ✗
+vendor load_fw_v2_compressimg 的流式分块（BE32 块长从数据流内读、逐块 AddrLen）正是绕过该限制的机制；parse_fw_v1 单窗口 len=CRC+4 之谜与此自洽——v1 是死代码，v2 才是真路径。**修复方向：region 按 ≤cap 分块逐窗 AddrLen+scatter**。边界探针（0x20000 vs 0x20001）因整机硬死未跑完。
+
+### 75.3 驱动演进
+- 3.68：zxnpu_fw_send 重写（逐 region + FwStartReq(override)，删 RestartDL/单窗口）
+- 3.69：wait_event_st 暴露事件 status（buf[32]）；AddrLen 对 status≠0 重试并中止（拒绝后照发 scatter 会毒化会话）；修 mcu-dl-regions manifest 解析（%s 遇空格截断 bug）；mcu-finish 探针
+- 3.70：`cr <addr>` 任意总线读（L1 remap）；interlude 实验代码（已证无效）
+- 教训：/etc/e2631-version 被 jffs2 overlay 遮蔽，in-place 升级后显示旧版本——验驱动特性而非版本文件；release.mjs 必须在 native/ 下运行（_scratch 下 MODULE_NOT_FOUND 后旧 factory 包会被误刷）
+- 整机硬死一次（SSH 超时+TTL 静默）：疑与前轮 437 个未消费 FWDL 帧 + rebind 后环状态有关，断电恢复
+
+### 75.4 下一步
+1. 断电恢复 → 重跑长度边界阶梯（0x20000/0x20001/0x1F800）定 cap 精确值
+2. 按 cap 分块实现（每块 AddrLen+scatter+事件确认）→ 跑通 9 region
+3. FwStartReq(1, 0x0220a800) → 观察 fw-state 1→3/7
+4. WA 同流程 → R-B 控制面（GET_FW_VERSION/信道）
+
+## 76. 事件字段纠错与 scatter 帧头定位（2026-11-02 上午，接续 d64c3564 会话）
+
+### 76.1 纠错：MCU 事件 +32 不是 status，是 ext_eid
+
+权威依据（mt76 上游，同款 connac2 MCU）：
+
+- `struct mt76_connac2_mcu_rxd`：`rxd[6]`(24B) → `len`@24、`pkt_type_id`@26、
+  `eid`@28、`seq`@29、`option`@30、`rsv`@31、**`ext_eid`@32**、`tlv`@36。
+  与实机帧完全吻合：`24 00 00 38 | 0c 00 07 00 | eid | seq | 00 00 | ext_eid`，帧长 0x24=36。
+- `mt7915_mcu_parse_response()`：**只比对 `rxd->seq`**，匹配即返回 0；只有
+  `PATCH_SEM_CONTROL` 才 `skb_pull(sizeof(*rxd)-4)` 后取 `*skb->data`（=偏移 36 的 tlv 首字节）。
+  即 AddrLen / Scatter / FwStart **不存在"status"字段**，上游从不判它们的状态。
+
+结论：3.69 起的"status 5 = 被拒/忙"判读是错读——那个 5 是 `ext_eid`。
+由此 3.69 的"status≠0 就重试 15 次并中止"是自伤逻辑，必须撤掉。
+
+### 76.2 实机日志重放（3.68 存档，rollout 里恢复）的真正断点
+
+```
+[0] addr=0220a800 len=126976 feat=20 → evt eid=01 seq=07 ext_eid=00   ← 有应答
+[1] addr=0231dc00 len=205824 feat=00 → evt eid=01 seq=08 ext_eid=05   ← 有应答
+[2] addr=00414800 len=14336          → wait_event seq=9 超时 ×15      ← 完全无应答
+[3] addr=e0049c00 len=474112         → 同上，全无应答
+```
+
+断点不在"r1 被拒"，而在 **r2 起 MCU 对命令环彻底沉默**：r0/r1 都有 seq 匹配的应答，
+之后 15 次×2s 一条都没有。这正是"窗口已开、数据没到齐"的签名——MCU 卡在收第 1/2 段
+数据上，不再处理新命令，而不是"拒绝并继续"。r1 的 ext_eid=5 与失败**无因果**。
+
+### 76.3 scatter 帧头：三处字段的权威来源
+
+`AndesInitCmdMsg`（mt7916.ko 0x1c31dc）逐指令解出 Andes 32B 头语义：
+
+| 偏移 | 含义 | 来源 |
+|---|---|---|
+| +0 | u16 帧长 | 调用方传入 |
+| +2 | type（scatter=0xEE、AddrLen=0x01/0x05） | 调用方 |
+| +3 | 保留 0 | — |
+| +4 | cmd（scatter=0x10、AddrLen=0x17） | 调用方；同时当 flags 用 |
+| +6 | seq | 调用方 |
+| +8 | cid | 调用方 |
+| +20 | **port = GetRealPortQueueID(dev, type@+2)** | type==0xEE → `chip_cap[0x162]`；否则 0x8000 |
+| +23 | **flags&2 ? 3 : 0** | scatter 的 +4=0x10 → `0x10&2=0` → **必写 0** |
+
+`GetRealPortQueueID`(0x1cb520)：hif_type!=2 → 2；type!=0xEE → 0x8000；type==0xEE → `cap[0x162]`(u16)。
+
+我们驱动 `zxnpu_mcu_scatter()` 现状两处错：`+20` 写死 0x8000（应为 cap[0x162]）、
+`+23` 写死 3（应为 0）。第 3 处待定：`+0` 我们写 chunk 长度，vendor 侧 AndesInit 的
+长度实参在 MtCmdFwScatter 里传的是 0（由 AndesAllocCmdMsg/Append 维护），需再核。
+
+### 76.4 结构差异：scatter 缺 64B TXD 包裹
+
+- `AndesAllocCmdMsgGeneric`(0x1c30bc)：分配时**预留 `chip_cap[0x134]`(=64) 字节**，
+  并把包数据指针/长度各前移 64 → vendor 线上帧 = `[64B connac2 TXD][32B Andes][payload]`。
+- mt76 的 `mt76_connac2_mcu_fill_message()`：`if (cmd == MCU_CMD(FW_SCATTER)) goto exit;`
+  —— scatter **完全不 push TXD，裸帧**（依赖 FWDL 专用环区分类型）。
+- 我们的 scatter = `[32B Andes][payload]`，既没有 64B TXD，也没有"裸帧+专用环"的前提，
+  两边都不成立。
+
+### 76.5 下一轮（3.71）改动清单
+
+1. 删掉 AddrLen 的 status 判读与 15 次重试；恢复"seq 匹配即成功"（对齐 mt7915_mcu_parse_response）。
+2. `zxnpu_mcu_scatter`：`+23` 改 0；`+20` 改为可配置（cap[0x162] 的值先从 vendor 静态表取，
+   取不到就给模块参数，默认保持 0x8000 以便 A/B）。
+3. scatter 改为两种可切形态（模块参数 `scatter_fmt`）：
+   - 0 = 现状 `[32B Andes][payload]`
+   - 1 = `[64B connac2 TXD(cid=0xEE,pkt_type=0xa0,seq)][payload]`
+   - 2 = 裸 payload（mt76 形）
+4. 每段 AddrLen 后**不要**用 status 判断，改为观察该段 scatter 是否被 FWDL 环 dma_idx 全部消费
+   （didx 前进量 == 帧数），超时才降级。
+5. 验收：r0..r8 九段全部有 seq 应答且 didx 前进到帧数 → FwStart(option=1,addr=0220a800)
+   → `fw-state` 1→3/7。
+
+### 76.6 教训
+
+- 判读任何 MCU 字段前先对上游结构体，不要凭"名字像 status 的偏移"下结论；一个错读会让整轮
+  实机试验全部作废（3.69/3.70 两版驱动、一次整机硬死）。
+- 恢复历史日志用 rollout jsonl（`~/.zcode/cli/rollout/model-io-session_*.jsonl`）比找 bash
+  临时日志可靠：tool 结果原文都在 model IO 里。
+
+## 77. 3.71：scatter 改用裸帧（patch 段已验证的形态）
+
+### 77.1 为什么改帧格式而不是改时序
+
+§76 把事件 +32 的误读纠正了，但那只是撤掉了一条错的重试逻辑，没有解释
+「r0/r1 有应答、r2 起永远沉默」。真正的证据在同一份驱动里：
+
+| 路径 | scatter 帧形态 | 结果 |
+|---|---|---|
+| `mcu-dl` / `patch-dl`（patch 段） | **裸 payload**，无任何头，qid16 | 全绿，patch 段每次都被 MCU 接受 |
+| `fw-dl wm`（WM/WA 段） | `[32B Andes 头][payload]` | r0/r1 过，r2 起命令环无应答 |
+
+同一条 FWDL 环、同一个 DL 消费者，patch 段用裸帧稳定成功，WM 段用 Andes 头
+就卡死 —— 帧格式是唯一变量。这与 mt76 一致：`mt76_connac2_mcu_fill_message()`
+对 `MCU_CMD(FW_SCATTER)` 直接 `goto exit`，不 push TXD，帧就是数据本身。
+
+Andes 头本身不是错的，但它只出现在 64B connac2 TXD **之后**
+（`AndesAllocCmdMsgGeneric` 预留 `chip_cap[0x134]`=64B）。我们把
+`[Andes][payload]` 直接甩到线上，等于让 loader 把每帧的 32B 头当成固件数据：
+r0（126976B，32 帧）凑够长度"提前完成"，r1（205824B，52 帧）差一帧半，
+于是 loader 一直等剩下的字节，不再服务命令环 —— 与 3.68 日志的形状逐条吻合。
+
+### 77.2 3.71 改动
+
+1. `zxnpu_mcu_scatter()` 默认 `scatter_fmt=0` = 裸帧（patch 段形态）。
+   `1` = 旧的 32B Andes 头（保留做 A/B），`2` = 64B TXD + 32B Andes。
+2. Andes 头两处修正（只在 fmt=1/2 生效）：`+23` 由 3 改 0（`flags&2` 对
+   cmd 0x10 恒为 0），`+20` 由写死 0x8000 改为 `scatter_port` 参数（默认仍
+   0x8000，可取 `chip_cap[0x162]` 做对照）。
+3. `zxnpu_mcu_addrlen()` 删掉 status 判读与 15 次重试，恢复"seq 匹配即成功"。
+4. `zxnpu_wlan_wait_txdrain()` 改读 `fw_ring` 对应的环（原来无条件读 ring 0）。
+5. 新增观测：`scatter_log=1` 打印每段首帧/每 128 帧、以及该段前后 didx；
+   `fw_regions=N` 只下前 N 段就停（不下发 FwStart），让坏局面停在 2 秒内。
+
+### 77.3 预期（分层验收）
+
+| 阶段 | 判据 |
+|---|---|
+| A：`fw_regions=3` | r2 的 AddrLen **有** seq 应答（3.68/3.69 在此静默）；每段 didx 前进量 == 帧数 |
+| B：全 9 段 | r0..r8 全部有应答，最后 didx==cidx |
+| C：FwStart | `fw-state` 离开 1，向 3/7 走 |
+
+r2 一条应答就能判定"帧格式假说"成立，不必等到整机硬死。
+
+## 78. 实机结果：裸帧成立，随后暴露出两个环索引 bug（3.71→3.73）
+
+### 78.1 3.71：r2 不再沉默（帧格式假说验证）
+
+```
+[0] len=126976  evt seq=07  scatter 32 frames  didx 3->35
+[1] len=205824  evt seq=08  scatter 52 frames  didx 35->87
+[2] len=14336   evt seq=09  scatter  4 frames  didx 87->91   ← 3.68/3.69 在此彻底静默
+```
+
+裸帧（fmt=0）下 r0..r2 全部被接受且被消费完毕。同一个 boot 里紧接着重跑
+全量下载，r0 的 AddrLen 依然被应答 —— 说明 **AddrLen 确实幂等**，中途停下
+不会污染会话，`fw_regions` 这个停止闸是安全的。
+
+### 78.2 3.72：didx 是模 128 的，cidx 是自由计数
+
+3.71 stage B 在 r1 之后报 `txdrain timeout (cidx=175 didx=47)`，但 47+128=175
+—— 环其实是空的，是**比较**错了。引擎的 didx 按环深度取模，我们的 cidx 一路
+自增。3.72 把所有环索引距离改成 `(cidx - didx) & (depth-1)`。
+
+### 78.3 3.73：写回的 cidx 也必须取模
+
+3.72 因此推进到 r4，然后停在 `didx 81->0, outstanding 87`：
+
+| 段 | 帧数 | didx 变化 |
+|---|---|---|
+| r0 | 32 | 3→35 |
+| r1 | 52 | 35→87 |
+| r2 | 4 | 87→91 |
+| r3 | 118 | 91→81（跨圈，正常） |
+| r4 | 134 | 81→0 后不再前进，87 帧滞留 |
+
+原因不是引擎坏了，而是我们**写进 cidx 寄存器的值也自由增长**：跨过 128 帧后，
+引擎自己算的 `cidx - didx` 恒多出整整一圈（128），于是把环判成"满"，停止取帧。
+3.73 把 `*cidx` 也在 `[0, depth)` 内回绕后再写寄存器。
+
+结果：**WM 9 段全部应答、全部消费**（didx 3→35→87→91→81→87→116→120→38→60），
+`fw-start option=00000001 entry=0220a800` 被接受（evt seq=00）。
+
+### 78.4 3.73 暴露的第三个问题：stall 安全阀误杀
+
+WA 段 r0（189456B/47 帧）顺利落盘，r1（264672B）只发了 3 帧就 `failed at -5`
+（-EIO）。那是 `zxnpu_mcu_submit_ring_last()` 的 `ring_stall > 512` 分支，而
+紧随其后的 `ring-sync` 明确报 `cidx==didx drained healthy` —— 环是好的。
+这个计数器统计的是"发出后这一瞬间 didx 没动"的次数，跟真实停滞无关，且被
+环 16/17 共用。3.74 让它只记日志、不再 `-EIO`，真正的停滞判定交给每段
+`wait_txdrain()`（30 s + 滞留帧数）。
+
+### 78.5 判读教训
+
+`didx` 停止前进 ≠ MCU 坏了。3.72 的 `outstanding 87` 一度像是"MCU 卡住"，
+实际是我们把环索引空间搞错，让引擎自己判满。凡是"引擎侧索引 + 软件侧索引"
+同时存在的地方，**两侧必须同一个模**，写寄存器和做比较都要。
+
+## 79. 3.74：无线 MCU 固件下载闭环，fw-state = 7
+
+```
+WM  9 regions  → scatter 441 帧 / 1758816 B，didx 3→35→87→91→81→87→116→120→38→60
+              → fw-start option=00000001 entry=0220a800  (evt seq=00)
+WA  3 regions  → scatter 114 帧 / 457920 B，didx 60→107→45→46
+              → fw-start option=00000004 entry=00000000  (evt seq=04)
+              → fw-state 7 (ready (WM+WA))，连续 8 次轮询（16 s）稳定
+```
+
+这是该分支上第一次把 WM+WA 完整下发并让 MCU 进入 RDY。至此 §76/§77 的
+"窗口开了、数据没到齐" 判断被完全证实，三个 bug 依次是：
+
+| 版本 | bug | 现象签名 | 修法 |
+|---|---|---|---|
+| 3.71 | scatter 用 `[Andes 头][payload]`，loader 把头当固件数据 | r2 起命令环永久静默 | 改裸帧（patch 段形态） |
+| 3.72 | 比较 `cidx == didx` 时未取模 | `cidx=175 didx=47` 假超时 | 距离取 `& (depth-1)` |
+| 3.73 | 写进寄存器的 cidx 未取模 | 跨 128 帧后引擎判环满，`outstanding 87` | `cidx` 在 `[0,depth)` 回绕 |
+| 3.74 | `ring_stall > 512` 误杀（环 16/17 共用计数） | WA r1 发 3 帧即 `-EIO`，而环 healthy | 只记日志，停滞交给 `wait_txdrain` |
+
+### 79.1 当前可用的旋钮（/sys/module/zxnpu_wlan/parameters）
+
+| 参数 | 默认 | 用途 |
+|---|---|---|
+| `scatter_fmt` | 0 | 0 裸帧 / 1 仅 Andes 头 / 2 TXD+Andes，A/B 用 |
+| `scatter_port` | 0x8000 | Andes 头 +20（GetRealPortQueueID 口径） |
+| `scatter_log` | 0 | 打印每段首帧、每 128 帧、段前后 didx |
+| `fw_regions` | 0 | 只下前 N 段就停（不发 FwStart），坏局面止损 |
+| `fw_ring` | 0 | 0=qid16 FWDL / 1=qid17 MCU_WM |
+| `dl_wait_ms` | 2000 | 每条 AddrLen 等待应答的时长 |
+
+### 79.2 下一步
+
+MCU 已在 RDY，但 host 侧还没有 MAC/PHY 初始化，也没有 netdev：
+下一步是照 mt7915_init_hardware 的顺序做 WF 复位后的 DMA 环（band0 RX/TX）、
+MCU 基础命令（query/NIC_CAPABILITY）、再把 wiphy 注册出来。固件下载这条路
+不再需要碰 framing 了。
