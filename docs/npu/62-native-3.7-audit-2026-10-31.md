@@ -3378,3 +3378,50 @@ data-init → txfree-init → tx-bcast×3 → tx-probe×3）。
 
 教训入册：**rings 的 base/cnt 必须在读任何 didx 语义之前核对**；"引擎不动"
 先查武装，再查游标，最后才轮到协议。
+
+## 91. R92/R93：数据面干净 boot 复测、beacon 上传、以及一个让 WA 核死掉的 +4 字节（3.99/3.100，2026-11-03）
+
+### 91.1 干净 boot 下引擎取帧 6/6——"TX-free 只回一次"悬案结案
+
+run-r92.sh（bring-up → **data-init → txfree-init 在任何提交之前** → tx-bcast×3 →
+tx-probe×3）：qid18 `cidx=3 didx=3`、随后 `cidx=6 didx=6`，6/6 全部被引擎取走。
+3.98 boot 上"第二帧之后引擎不取"（§90.4）是 base=0 垃圾相位楔死了游标——
+**取证顺序错了就全错：rings 的 base/cnt 必须在读 didx 语义之前核对**。
+qid2 的 TX-free 在干净 boot 上一条都没来（引擎取帧 ≠ 帧上了空口；真正的
+完成事件要等 WA 核认为帧已发出）。
+
+### 91.2 beacon 上传（bcn-set/bcn-off，3.99）
+
+`BSS_INFO_UPDATE(0x26)` + `BSS_INFO_OFFLOAD(tag 15)` TLV，嵌套
+`BSS_INFO_BCN_CONTENT(tag 3)`：`[tim_ofs][csa_ofs][bcc_ofs][pkt_len] +
+32B TXD + beacon 帧`（帧 = mgmt/beacon + SSID/RATES/DS/TIM，TIM 偏移从帧首算）。
+固件接受（ret=0），bss-show 显示 ssid。LPON 块实证 TBTT 定时器已被固件武装：
+`0x820eb0b8 = 0x80010064`（bit31 使能 + 0x64 = 100 TU，正是 BASIC TLV 的
+bcn_interval），`0xd0/0xd4` 两个自由计数器在走。PLE 页池健康
+（mt7916 的 FREEPG 在 **0x380**，不是 mt7915 的 0x100——0x100 读到的 0 是错偏移；
+实测 0xffe = 4094 空闲页）。LPON TCR0 的 SW_WRITE 手动触发也无空口效果。
+
+### 91.3 决定性线索：beacon 上传之后 WA 核死了
+
+r93 的 C4 liveness（`mcu-ext ed 13`）**-110**——而此前每轮 boot 同一条都是
+ret=0。qid20 `cidx=didx=16`（命令被 DMA 取走）但事件环零应答，与 §84.1 的
+"rx_path 楔死 WA 核"同签名。**只差 beacon 这一步 → 元凶在 beacon TLV 里。**
+
+根因：嵌套 TLV 的 len 字段按 mt76 的 add_tlv 约定**含自身的 4 字节 tag+len 头**，
+`sizeof(bss_info_bcn_cont)=12` 已经含头，CONTENT 总长 = `12+32+帧`；我写成了
+`4+12+32+帧`，长 4 字节。固件先 ack 后按 len 多读 4 字节 → 解析越界 → WA 核
+停止服务一切命令（beacon 不发、命令环哑、qid4 RX 停摆）。3.100 修正。
+
+### 91.4 空口见证工具链
+
+- PC 的 `netsh wlan show networks` 在连接状态下不主动刷新；用 wlanapi 的
+  `WlanScan`（`_scratch/npu-probe/wlan-scan.ps1`）强制即时扫描后 netsh 才给新数据。
+- 强制扫描确认环境：2.4G 有 CMCC-Hx4U、琰-没有密码等多个 HE AP 活跃。
+- MIB 全块两次独立采样差分为零——但 MIB 的读锁存语义未弄清（SDR9 跨分钟会变、
+  3 秒内不变），不能当"无帧"的硬证据；空口验收以 PC 强扫 + 手机扫表为准。
+
+### 91.5 下一步
+
+3.100 刷机 → run-r93 重放：验收 = bcn-set 后 liveness 仍 ret=0（WA 活着）
++ PC 强扫看到 `e2631-test`（beacon 真上了空口）。此后按 §89.5 顺序：
+关联路径（probe req 响应/STA_REC wcid≠0）→ 数据面收发 → wiphy。
