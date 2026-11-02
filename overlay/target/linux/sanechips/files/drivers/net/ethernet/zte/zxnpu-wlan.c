@@ -2206,11 +2206,22 @@ static void zxnpu_wlan_data_init(struct zxnpu_wlan *w, bool commit)
 	}
 	glo = zxnpu_cr_read(w, ZXNPU_WFDMA_GLO_CFG);
 	zxnpu_cr_write(w, ZXNPU_WFDMA_GLO_CFG, glo | 0x7);
+	/* Vendor order and vendor values, mt_asic_init_txrx_ring() in
+	 * mt7916.ko. Its SECOND loop is the RX rings and it does:
+	 *     r8 = [r4+0x14]                         ; depth
+	 *     hif_io_write32(hc, [r4+0x4c], buf_dma) ; base      first
+	 *     hif_io_write32(hc, [r4+0x3c], [r4+0x34]); base+8 <- depth-1
+	 *     hif_io_write32(hc, [r4+0x50], r8)      ; base+4 <- depth
+	 * so an RX ring is armed with CPU_IDX = depth-1, i.e. "all but one
+	 * slot are free", and the counter is written last. The FIRST loop in
+	 * that function is the TX/MCU side, where CPU_IDX is 0 - 3.93 read
+	 * that one and armed RX with 0, which the engine took as "no free
+	 * slot" and delivered nothing at all. */
 	zxnpu_cr_write(w, ZXNPU_DATA_RX_REG, (u32)w->drx_ring_dma);
+	zxnpu_cr_write(w, ZXNPU_DATA_RX_REG + 8,
+		       ZXNPU_DATA_DEPTH - 1);
 	zxnpu_cr_write(w, ZXNPU_DATA_RX_REG + 4, ZXNPU_DATA_DEPTH);
-	/* same RX announce semantics as the MCU event ring: post every slot */
-	zxnpu_cr_write(w, ZXNPU_DATA_RX_REG + 8, ZXNPU_DATA_DEPTH);
-	w->drx_cidx = ZXNPU_DATA_DEPTH;
+	w->drx_cidx = ZXNPU_DATA_DEPTH - 1;
 	zxnpu_cr_write(w, ZXNPU_DATA_TX_REG, (u32)w->dtx_ring_dma);
 	zxnpu_cr_write(w, ZXNPU_DATA_TX_REG + 4, ZXNPU_DATA_DEPTH);
 	zxnpu_cr_write(w, ZXNPU_DATA_TX_REG + 8, 0);
@@ -2218,7 +2229,6 @@ static void zxnpu_wlan_data_init(struct zxnpu_wlan *w, bool commit)
 	zxnpu_cr_write(w, ZXNPU_DATA_TX_REG + 0x10, (u32)w->dband_ring_dma);
 	zxnpu_cr_write(w, ZXNPU_DATA_TX_REG + 0x14, ZXNPU_DATA_DEPTH);
 	zxnpu_cr_write(w, ZXNPU_DATA_TX_REG + 0x18, 0);
-	w->drx_cidx = ZXNPU_DATA_DEPTH;
 	w->dtx_cidx = 0;
 	/* Read back what was written: printing the pre-write snapshot made
 	 * 3.89's data-init look like it had programmed nothing. */
@@ -2238,17 +2248,26 @@ static void zxnpu_wlan_data_init(struct zxnpu_wlan *w, bool commit)
 
 static void zxnpu_wlan_data_recv(struct zxnpu_wlan *w)
 {
-	u32 didx, cidx, n, i;
+	u32 didx, cidx, done, n, i;
 
 	if (!w->drx_ring || !w->drx_buf) {
 		zxnpu_wlan_append(w, "data-recv: no rx memory\n");
 		return;
 	}
-	didx = zxnpu_cr_read(w, ZXNPU_DATA_RX_REG + 12) % ZXNPU_DATA_DEPTH;
-	cidx = w->drx_cidx % ZXNPU_DATA_DEPTH;
-	n = (didx + ZXNPU_DATA_DEPTH - cidx) % ZXNPU_DATA_DEPTH;
-	zxnpu_wlan_append(w, "data-recv: cidx=%u didx=%u pending=%u\n",
-			  cidx, didx, n);
+	/* RX rings are armed with CPU_IDX = depth-1 (see data-init), so the
+	 * published head is always "consumed - 1" mod depth. didx counts what
+	 * the device has delivered, hence pending = didx - (head + 1). */
+	done = (w->drx_cidx + 1) % ZXNPU_DATA_DEPTH;
+	didx = zxnpu_cr_read(w, ZXNPU_DATA_RX_REG + 12);
+	n = didx >= done ? didx - done : 0;
+	if (n > ZXNPU_DATA_DEPTH) {
+		zxnpu_wlan_append(w, "data-recv: desync head=%u done=%u didx=%u\n",
+				  w->drx_cidx, done, didx);
+		n = 0;
+	}
+	cidx = done;
+	zxnpu_wlan_append(w, "data-recv: head=%u done=%u didx=%u pending=%u\n",
+			  w->drx_cidx, done, didx, n);
 	for (i = 0; i < n && i < 8; i++) {
 		u32 slot = (cidx + i) % ZXNPU_DATA_DEPTH;
 		u8 *buf = (u8 *)w->drx_buf + slot * ZXNPU_DATA_BUF_SIZE;
@@ -2289,18 +2308,15 @@ static void zxnpu_wlan_data_recv(struct zxnpu_wlan *w)
 	if (n > 8)
 		zxnpu_wlan_append(w, "  ... %u more\n", n - 8);
 	if (n) {
-		/* same post encoding the MCU rings need: (didx - 1) % depth
-		 * when rx_repost = 2, i.e. "one slot free", never didx + depth
-		 * - that looks like a full ring and stops delivery (3.80). */
-		w->drx_cidx = didx;
-		if (zxnpu_wlan_commit && zxnpu_wlan_rx_repost) {
-			u32 post = zxnpu_wlan_rx_repost == 2 ?
-				   (didx + ZXNPU_DATA_DEPTH - 1) %
-				   ZXNPU_DATA_DEPTH :
-				   didx + ZXNPU_DATA_DEPTH;
-
+		/* Advance the published head by exactly the number of slots we
+		 * just handed back: head = consumed - 1, so after consuming n
+		 * more it is (didx + depth - 1) % depth. Writing didx instead
+		 * would look like one extra free slot and, at the arm value of
+		 * depth-1, makes the window drift by one each round. */
+		w->drx_cidx = (didx + ZXNPU_DATA_DEPTH - 1) % ZXNPU_DATA_DEPTH;
+		if (zxnpu_wlan_commit) {
 			dma_wmb();
-			zxnpu_cr_write(w, ZXNPU_DATA_RX_REG + 8, post);
+			zxnpu_cr_write(w, ZXNPU_DATA_RX_REG + 8, w->drx_cidx);
 		}
 	}
 }
