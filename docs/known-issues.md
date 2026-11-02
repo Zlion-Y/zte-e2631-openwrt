@@ -115,7 +115,7 @@ points at something in the repository or at a measurement.
   status: fixed
   surface: wi-fi
   symptom: the first-boot SSID was a hard-coded "E2631" instead of this unit's own factory name
-  verified: "the tag pipeline was validated against the real dump (build/board/backup/mtd2-tag.bin: pair \"ChinaNet-ygckk9\"/\"ChinaNet-ygckk9-5G\", plus what looks like the factory key pair \"dthe3524\" twice); on-device run pending"
+  verified: "the tag pipeline was validated against the real dump (build/board/backup/mtd2-tag.bin: pair \"Example-SSID\"/\"Example-SSID-5G\", plus what looks like the factory key pair \"ExamplePass\" twice); on-device run pending"
   workaround: none needed - e2631-wifi-boot scans the tag's first page for a printable run S whose S+"-5G" sibling also exists (self-validating, no byte offsets pinned), falling back to "E2631"
   note: the tag also carries SN, carrier code (1630@CTCC on this unit) and model "ZXHN E2631"; the factory-key pair was deliberately NOT auto-used - confirm it against the label sticker first
 - id: LED-DAEMON-NOOP

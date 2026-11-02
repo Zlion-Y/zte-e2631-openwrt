@@ -195,7 +195,7 @@ StrictHostKeyChecking=no）。
 - **有线**：基线出像（CONFIG_ZX279128S_ETH=n，021 patch 保留供
   zx279128s-eth.h）；zxnative-eth 经 probe 级 defer（MAC 源 nvmem
   就绪前）→ deferred 重试绑定，厂 MAC 逐字节恢复
-  （lan1/2/3=f8:73:1a:d3:ef:a8，wan=...a9）；device-verify ALL-PASS。
+  （lan1/2/3=AA:BB:CC:DD:EE:FF，wan=...a9）；device-verify ALL-PASS。
 - 全轮产物：out/native-wired-3.12/e2631-openwrt-native-wired-3.12.bin
   sha256 7a0751bb…（双门禁过，槽头=3.12，serial 102）。
 - 待办移交下轮：B1（7906 主功能绑定点亮芯片——FWDL 前置）、A5（native
@@ -2639,20 +2639,20 @@ RX 或许能收，但每次发射都会被固件拒掉，所以一旦 `flash_mod
 |---|---|---|---|
 | 1 | 6 | `f8 73 1a d3 ef a8` | LAN MAC |
 | 1 | 6 | `f8 73 1a d3 ef a9` | WAN MAC |
-| 4 | 15 | `ChinaNet-ygckk9` | 2.4G SSID |
-| 4 | 18 | `ChinaNet-ygckk9-5G` | 5G SSID |
-| 5 | 8 | `dthe3524` | 2.4G 口令（出现两次） |
-| 5 | 8 | `dthe3524` | 5G 口令 |
+| 4 | 15 | `Example-SSID` | 2.4G SSID |
+| 4 | 18 | `Example-SSID-5G` | 5G SSID |
+| 5 | 8 | `ExamplePass` | 2.4G 口令（出现两次） |
+| 5 | 8 | `ExamplePass` | 5G 口令 |
 | 7 | 9 | `1630@CTCC` | 管理账号 |
-| 3 | 6 | `F8731A` | OUI 前缀（ASCII） |
-| 0x82 | 15 | `180122801586397` | **SN** |
+| 3 | 6 | `AABBCC` | OUI 前缀（ASCII） |
+| 0x82 | 15 | `000000000000000` | **SN** |
 | 0x82 | 34 | `16C2RNEtye3vN1742627722795FFM4bvRz` | 设备密钥 |
 | 2 | 15 | `214221173286740` | 运营商参数 |
 | 2 | 15 | `54892T9T585A450` | 运营商参数 |
 | 2 | 21 | `21422154892T9T585A450` | 两者拼接 |
 | 2 | 14 | `12-6467-214221` | 运营商参数 |
 | 0x81 | 10 | `ZXHN E2631` | **型号** |
-| 2 | 15 | `HN5D800R9GA8909` | 授权/注册码 |
+| 2 | 15 | `XXXXXXXXXXXXXXXXX` | 授权/注册码 |
 
 `mtd2 "wifi"`（1 MB）**不是空的**。前 `0xC0000` 全是 `0xFF`，从 `0xC0000`
 起有一段 **55 281 字节**的连续数据，整体 3456 个 16 字节块里只有 1514 个互不

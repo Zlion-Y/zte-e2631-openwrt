@@ -176,7 +176,7 @@
  * random locally-administered address.
  *
  * The cell is the same one the vendor uses: tag + 0x1e read out of a dump of
- * that partition is f8:73:1a:d3:ef:a8, and on the running vendor system that one
+ * that partition is AA:BB:CC:DD:EE:FF, and on the running vendor system that one
  * address is what br0, eth0 and eth1..eth3 all report. The vendor therefore uses
  * a single MAC for every port; the upstream H3600 board file hands base+0 to the
  * LAN ports and base+1 to the WAN, and that is what is done here, because two
