@@ -3322,3 +3322,59 @@ RX（S）:
   阶段 7（MAC 初始化）和阶段 8 的收尾（beacon/TBTT/IRQ）是空白。
 - 因此下一轮工作的正确顺序是：**先补 WF 空间读回能力**（只读，不刷机也能做）→
   照 `mt7915_mac_init_band` 补寄存器 → 再谈 beacon/TBTT → 最后才有资格验证 TXS/RX。
+
+## 90. R91：L2 窗口修复 + WF 空间读回——固件已自配 MAC 层，"补 mac_init_band"路线作废（3.98，2026-11-03）
+
+### 90.1 WF 空间读不回来不是"全 0"，是走错了窗口
+
+3.97 的 `cr 820e4114`（TMAC_CTCR0）返回 0，§89.5 把它列为最大盲区。仲裁实验
+（三方交叉，全部一致）：
+
+| 来源 | 证据 |
+|---|---|
+| vendor `pci_io_remap_read32`(0x194658) 反汇编 | 地址 ≤0x7ffffffe 或 ≥0xf0000000 → **L1**（fe260，窗 0xe0000）；**0x7fffffff..0xefffffff → L2**（寄存器 bar0+**0x1b8**，窗 bar0+**0x40000**，[31:16]=addr>>16） |
+| mt76 regs.h 804-809 | `MT_HIF_REMAP_L2_MT7916=0x1b8`、`OFFSET=GENMASK(15,0)`、`BASE_L2_MT7916=0x40000` |
+| mt76 mmio.c `__mt7915_reg_addr` | WF LMAC 块全在**固定表**（性能优化），从不走 L1 |
+
+即 0x820exxxx 整个 WF LMAC 空间属于 L2，而驱动此前把一切非直连地址都塞进了
+L1——读回全 0 是**死窗**，不是芯片状态。同批 MDP 块（0x820cd000，固定表内）
+一直能读到非零值，也旁证了这一点。
+
+### 90.2 修复（3.98，sha256 111e1239…）
+
+- `zxnpu_l2_select()`：镜像 l1_select（保留 [15:0]、[31:16]=base、写后回读推
+  动），`zxnpu_cr_read/write` 增加 `0x80000000..0xefffffff → L2` 路由；
+- `crn <addr> <n>`（1..64 连读）批量读命令，块扫一次 SSH 搞定；
+- 版本文件 → `OpenWrt native-wired-3.98`。刷机 serial 211，device-verify
+  ALL-PASS；bring-up 全链（fw-state 7 / eeprom 4 页 / radio-up 五条 ret=0 /
+  band0 active ch=1）在 3.98 上完整复现。
+
+### 90.3 读回结果（band0 已调谐、fw-state=7 状态下）：MAC 层固件自己配好了
+
+| 寄存器 | 实测值 | 对照 mt76 mac_init(_band) 语义 |
+|---|---|---|
+| DMA_DCR0 (820e7000) | 0x02773400 | MAX_RX_LEN=**0x680**（与 mt76 编程值一致）、RXD_G5_EN 置位 |
+| TMAC_CTCR0 (820e4114) | 0x00060000 | INS_DDLMT_EN\|VHT_SMPDU_EN 已置（同 mt76）；REFTIME=0（mt76 设 0x3f） |
+| MDP_DCR0 (820cd000) | 0x0003c200 | DAMSDU_EN(bit15) 已置（同 mt76） |
+| MDP_BNRCFR0/1 | 0x00400010/0x00400000 | mgmt→FW 路由（bit4=1），非 mt76 的全 HIF |
+| AGG/ARB（AWSCR0/PCR0/ACR0/MRCR/SCR/DRNGR0） | 全非零 | 调度器/竞争窗口已配置 |
+| TMAC TRCR0/ICR0/ATCR、WTBLOFF | 全非零 | 定时器已配置 |
+
+与 mt76 不同的只有 airtime 统计口径（ACR bit29、RSCR RCPI_PARAM=0、
+AIRTIME0 ED_OFFSET=0xa、AIRTIME4 非零）——是遥测口径不是帧流门控。
+**§89.5 第 2 项（照 mac_init_band 补寄存器）撤销**：阶段 7 的"空白"其实是
+固件职责，且固件已履行。缺失收尾仍然只有 §89.5 第 3 项起：beacon/TBTT →
+TXS/RX 验证。
+
+### 90.4 数据面第一次有效武装，以及一个无效实验的教训
+
+3.98 boot 上先跑了 `txfree-init`+`tx-probe`（**漏了 data-init**）：
+qid18 base=0/cnt=512（ROM 默认），7 帧提交进了空环，引擎对垃圾地址做了一次
+假取帧（didx 0→1）并吐了一条垃圾 TX-free（`00 80 ff 3f…`）——把它误读成
+"TX-free 只回一次"（§86.1 的悬案其实是这个）。当场补 `data-init` 后环已武装
+（rx qid4 cidx=63、tx qid18 base=4e047000），但 qid18 的引擎游标停在垃圾相位
+留下的 didx=1，8 连发不再取帧——**干净 boot 复测**（run-r92.sh：bring-up →
+data-init → txfree-init → tx-bcast×3 → tx-probe×3）。
+
+教训入册：**rings 的 base/cnt 必须在读任何 didx 语义之前核对**；"引擎不动"
+先查武装，再查游标，最后才轮到协议。

@@ -280,6 +280,14 @@ static void zxnpu_bar0_write(struct zxnpu_wlan *w, u32 off, u32 val)
 
 #define ZXNPU_HIF_REMAP_L1_MT7916	0x000fe260
 #define ZXNPU_HIF_REMAP_BASE_L1		0x000e0000
+/* mt76 MT_HIF_REMAP_L2_MT7916: second window for 0x80000000..0xefffffff,
+ * i.e. the whole WF LMAC space (TMAC/RMAC/DMA/WTBLOFF/MIB 0x820e_xxxx and
+ * the band1 0x820f_xxxx mirror). Register keeps [15:0], [31:16] = base;
+ * window at bar0+0x40000. Decoded from vendor pci_io_remap_read32
+ * (0x194658: <=0x7ffffffe or >=0xf0000000 -> L1, else -> L2) and
+ * cross-checked against mt76 regs.h 804-809. */
+#define ZXNPU_HIF_REMAP_L2_MT7916	0x000001b8
+#define ZXNPU_HIF_REMAP_BASE_L2		0x00040000
 
 /* Point the L1 window at a 64 KiB segment. mt76 keeps the high half of the
  * register intact (it holds a second field), writes only [15:0] and reads
@@ -293,6 +301,20 @@ static void zxnpu_l1_select(struct zxnpu_wlan *w, u16 base)
 	zxnpu_bar0_write(w, ZXNPU_HIF_REMAP_L1_MT7916,
 			 (v & 0xffff0000) | base);
 	zxnpu_bar0_read(w, ZXNPU_HIF_REMAP_L1_MT7916);
+}
+
+/* L2 window select: mirror image of L1 - low half preserved, [31:16] = the
+ * 64 KiB segment. Sticky like l1_select (mt76 leaves the window pointing at
+ * the last segment; only host-side decoders live here). */
+static void zxnpu_l2_select(struct zxnpu_wlan *w, u16 base)
+{
+	u32 v = zxnpu_bar0_read(w, ZXNPU_HIF_REMAP_L2_MT7916);
+
+	if ((v >> 16) == base)
+		return;
+	zxnpu_bar0_write(w, ZXNPU_HIF_REMAP_L2_MT7916,
+			 (v & 0x0000ffff) | ((u32)base << 16));
+	zxnpu_bar0_read(w, ZXNPU_HIF_REMAP_L2_MT7916);
 }
 
 /* Directly decoded bar0 block (no remap register involved). */
@@ -376,8 +398,13 @@ static u32 zxnpu_cr_read(struct zxnpu_wlan *w, u32 cr)
 	if (!zxnpu_cr_direct(cr)) {
 		off = zxnpu_cr_mapped_off(cr);
 		if (off == (u32)-1) {
-			zxnpu_l1_select(w, cr >> 16);
-			off = ZXNPU_HIF_REMAP_BASE_L1 + (cr & 0xffff);
+			if (cr >= 0x80000000 && cr < 0xf0000000) {
+				zxnpu_l2_select(w, cr >> 16);
+				off = ZXNPU_HIF_REMAP_BASE_L2 + (cr & 0xffff);
+			} else {
+				zxnpu_l1_select(w, cr >> 16);
+				off = ZXNPU_HIF_REMAP_BASE_L1 + (cr & 0xffff);
+			}
 		}
 	} else {
 		off = 0xd0000 + (cr & 0xffff);
@@ -396,8 +423,13 @@ static void zxnpu_cr_write(struct zxnpu_wlan *w, u32 cr, u32 val)
 	if (!zxnpu_cr_direct(cr)) {
 		off = zxnpu_cr_mapped_off(cr);
 		if (off == (u32)-1) {
-			zxnpu_l1_select(w, cr >> 16);
-			off = ZXNPU_HIF_REMAP_BASE_L1 + (cr & 0xffff);
+			if (cr >= 0x80000000 && cr < 0xf0000000) {
+				zxnpu_l2_select(w, cr >> 16);
+				off = ZXNPU_HIF_REMAP_BASE_L2 + (cr & 0xffff);
+			} else {
+				zxnpu_l1_select(w, cr >> 16);
+				off = ZXNPU_HIF_REMAP_BASE_L1 + (cr & 0xffff);
+			}
 		}
 	} else {
 		off = 0xd0000 + (cr & 0xffff);
@@ -4650,6 +4682,167 @@ out:
 }
 
 /*
+ * bcn-set <band> <ssid> [dump] / bcn-off <band>: the beacon content upload.
+ *
+ * mt7915_mcu_add_beacon() rides BSS_INFO_UPDATE (0x26) with one
+ * BSS_INFO_OFFLOAD (tag 15) TLV whose body nests sub-TLVs; the only
+ * mandatory one for a plain beacon is BSS_INFO_BCN_CONTENT (tag 3,
+ * mt7915/mcu.h enum):
+ *
+ *   [ver][enable][sub_ntlv] [tag 3][len] [tim_ofs][csa_ofs][bcc_ofs]
+ *   [pkt_len] [32-byte TXD][beacon frame]
+ *
+ * The firmware then repeats the template every bcn_interval (100 TU - the
+ * BASIC TLV radio-up already sent), overwriting the timestamp/seq itself,
+ * which is why the frame carries zeros there. This is the vendor
+ * APStartUpByBss tail (UpdateBeaconHandler) that stage 8 still lacked -
+ * without it the BSS is up but nothing ever appears on air.
+ */
+#define ZXN_BSS_OFFLOAD_TAG	15	/* BSS_INFO_OFFLOAD */
+#define ZXN_BCN_CONTENT_TAG	3	/* BSS_INFO_BCN_CONTENT */
+#define ZXN_BCN_MAX_SSID	32
+
+static int zxnpu_wlan_bcn_set(struct zxnpu_wlan *w, const char *args, bool dump)
+{
+	struct zxnpu_bss *bss;
+	u8 req[256];
+	u8 tlv[160];
+	u8 frm[128];
+	u32 txd[8];
+	char ssid[ZXN_BCN_MAX_SSID + 1];
+	unsigned int band = 0;
+	int off, flen, tim_ofs, i, ret, ssid_len;
+	int sub_len, plen;
+
+	if (sscanf(args, "%u %32s", &band, ssid) != 2 || band > 1) {
+		zxnpu_wlan_append(w, "usage: bcn-set <band 0|1> <ssid> [dump]\n");
+		return -EINVAL;
+	}
+	bss = &zxna_bss[band];
+	if (!bss->channel) {
+		zxnpu_wlan_append(w, "bcn-set: band %u down (run radio-up first)\n",
+				  band);
+		return -EINVAL;
+	}
+	ssid_len = strlen(ssid);
+
+	/* 802.11 beacon: mgmt/subtype 8, bcast RA, BSSID in both addr2/3.
+	 * Timestamp stays zero (firmware overwrites it per TBTT) and the
+	 * sequence is firmware-owned too. */
+	memset(frm, 0, sizeof(frm));
+	put_unaligned_le16(0x0080, frm + 0);	/* mgmt, beacon */
+	put_unaligned_le16(0x0000, frm + 2);	/* duration */
+	memset(frm + 4, 0xff, 6);		/* addr1 = DA broadcast */
+	memcpy(frm + 10, w->mac, 6);		/* addr2 = BSSID */
+	memcpy(frm + 16, w->mac, 6);		/* addr3 = BSSID */
+	put_unaligned_le16(0x0000, frm + 22);	/* seq/frag */
+	flen = 24;
+	i = flen;
+	flen += 12;				/* timestamp(8) + interval(2) + cap(2) */
+	put_unaligned_le16(100, frm + i + 8);	/* beacon interval */
+	put_unaligned_le16(0x0001, frm + i + 10);	/* capability: ESS */
+	i = flen;
+	frm[i++] = 0;				/* SSID IE */
+	frm[i++] = ssid_len;
+	memcpy(frm + i, ssid, ssid_len);
+	i += ssid_len;
+	frm[i++] = 1;				/* supported rates */
+	frm[i++] = 4;
+	frm[i++] = 0x82; frm[i++] = 0x84;	/* 1M, 2M basic */
+	frm[i++] = 0x8b; frm[i++] = 0x96;	/* 5.5M, 11M */
+	frm[i++] = 3;				/* DS parameter set */
+	frm[i++] = 1;
+	frm[i++] = bss->channel;
+	tim_ofs = i;
+	frm[i++] = 5;				/* TIM */
+	frm[i++] = 4;
+	frm[i++] = 0;				/* dtim count (firmware) */
+	frm[i++] = 1;				/* dtim period */
+	frm[i++] = 0;				/* bitmap control */
+	frm[i++] = 0;				/* partial virtual bitmap */
+	flen = i;
+
+	ret = zxnpu_txwi_80211(txd, frm, flen, 24,
+			       0 /* wcid: the BSS itself */, 0 /* omac */,
+			       24 /* spe_idx, 2-chain band */, 0 /* no TXS */);
+	if (ret) {
+		zxnpu_wlan_append(w, "  txwi build failed: %d\n", ret);
+		return ret;
+	}
+
+	/* OFFLOAD TLV body: [ver][enable][sub_ntlv] + nested CONTENT. TLV
+	 * length counts the 4-byte header (zxnpu_tlv_put adds it), matching
+	 * mt76's add_tlv(skb, tag, sizeof(struct ...)) convention. */
+	sub_len = 4 + 12 + 32 + flen;		/* subhdr + cont + txd + frame */
+	plen = 4 + sub_len;			/* ver/en/subntlv + sub-TLV */
+	memset(tlv, 0, sizeof(tlv));
+	tlv[0] = 0;				/* ver */
+	tlv[1] = 1;				/* enable */
+	put_unaligned_le16(1, tlv + 2);		/* sub_ntlv */
+	put_unaligned_le16(ZXN_BCN_CONTENT_TAG, tlv + 4);
+	put_unaligned_le16(sub_len, tlv + 6);
+	put_unaligned_le16(tim_ofs, tlv + 8);	/* cont.tim_ofs */
+	put_unaligned_le16(0, tlv + 10);	/* cont.csa_ofs */
+	put_unaligned_le16(0, tlv + 12);	/* cont.bcc_ofs */
+	put_unaligned_le16(32 + flen, tlv + 14);	/* cont.pkt_len */
+	memcpy(tlv + 16, txd, 32);
+	memcpy(tlv + 48, frm, flen);
+
+	memset(req, 0, sizeof(req));
+	req[0] = band;		/* bss_idx */
+	req[1] = 0;		/* wlan_idx_lo: bmc wcid 0 */
+	put_unaligned_le16(1, req + 2);		/* tlv_num */
+	req[4] = 1;		/* is_tlv_append */
+	off = zxnpu_tlv_put(req, 8, sizeof(req), ZXN_BSS_OFFLOAD_TAG,
+			    tlv, plen);
+	if (off < 0)
+		return off;
+
+	zxnpu_wlan_append(w, "bcn-set band %u ssid '%s' ch %u: %d B frame, tim_ofs %d (%s)\n",
+			  band, ssid, bss->channel, flen, tim_ofs,
+			  dump ? "dump" : "COMMIT");
+	if (dump) {
+		for (i = 0; i < 8; i++)
+			zxnpu_wlan_append(w, "  txd w%d=%08x\n", i, txd[i]);
+		zxnpu_wlan_append(w, "  frm:");
+		for (i = 0; i < flen; i++)
+			zxnpu_wlan_append(w, " %02x", frm[i]);
+		zxnpu_wlan_append(w, "\n");
+		return 0;
+	}
+	ret = zxnpu_wlan_ext_set(w, ZXNPU_MCU_EXT_BSS_INFO, req, off);
+	zxnpu_wlan_append(w, "  bss-info-update(beacon): ret=%d\n", ret);
+	if (!ret) {
+		memset(bss->ssid, 0, sizeof(bss->ssid));
+		memcpy(bss->ssid, ssid, ssid_len);
+	}
+	return ret;
+}
+
+static int zxnpu_wlan_bcn_off(struct zxnpu_wlan *w, const char *args)
+{
+	u8 req[32];
+	unsigned int band = 0;
+	int off, ret;
+
+	if (sscanf(args, "%u", &band) != 1 || band > 1) {
+		zxnpu_wlan_append(w, "usage: bcn-off <band 0|1>\n");
+		return -EINVAL;
+	}
+	memset(req, 0, sizeof(req));
+	req[0] = band;
+	req[1] = 0;
+	put_unaligned_le16(1, req + 2);
+	req[4] = 1;
+	/* enable = 0, no content: the OFFLOAD TLV alone turns the beacon off */
+	off = zxnpu_tlv_put(req, 8, sizeof(req), ZXN_BSS_OFFLOAD_TAG,
+			    (const u8 *)"\0\0\0\0", 4);
+	ret = zxnpu_wlan_ext_set(w, ZXNPU_MCU_EXT_BSS_INFO, req, off);
+	zxnpu_wlan_append(w, "bcn-off band %u: ret=%d\n", band, ret);
+	return ret;
+}
+
+/*
  * STA_REC_UPDATE (0x25) for the BSS itself, plus the DRR group that follows
  * it - the last two things mt7915_start_ap() sends:
  *
@@ -4851,9 +5044,10 @@ static ssize_t zxnpu_wlan_ctl_write(struct file *file, const char __user *ubuf,
 			zxnpu_wlan_append(w, "usage: crw <addr-hex> <val-hex>\n");
 		}
 	} else if (!strncmp(cmd, "cr ", 3)) {
-		/* commit-gated single CR read: "cr <addr-hex>" - the L1 window
-		 * (HIF_REMAP_L1 = addr >> 16, value at 0xE0000 + low16) reaches
-		 * any connac bus segment, incl. conn_infra 0x41143c. */
+		/* read-only CR read: "cr <addr-hex>". Routing follows the
+		 * vendor io layer: 0x1802xxxx direct, 0x820xxxxx WF LMAC via
+		 * the L2 window (HIF_REMAP_L2 0x1b8, base 0x40000), the rest
+		 * via the L1 window (HIF_REMAP_L1 0xfe260, base 0xe0000). */
 		u32 a;
 
 		if (sscanf(cmd + 3, "%x", &a) == 1)
@@ -4861,6 +5055,19 @@ static ssize_t zxnpu_wlan_ctl_write(struct file *file, const char __user *ubuf,
 					  zxnpu_cr_read(w, a));
 		else
 			zxnpu_wlan_append(w, "usage: cr <addr-hex>\n");
+	} else if (!strncmp(cmd, "crn ", 4)) {
+		/* bulk read: "crn <addr-hex> <n>" dumps n consecutive CR
+		 * words - one round-trip for a block sweep instead of n. */
+		u32 a;
+		int n, i;
+
+		if (sscanf(cmd + 4, "%x %d", &a, &n) == 2 && n > 0 && n <= 64) {
+			for (i = 0; i < n; i++, a += 4)
+				zxnpu_wlan_append(w, "cr [%08x] = %08x\n",
+						  a, zxnpu_cr_read(w, a));
+		} else {
+			zxnpu_wlan_append(w, "usage: crn <addr-hex> <1..64>\n");
+		}
 	} else if (!strncmp(cmd, "scan", 4) &&
 		   (cmd[4] == '\0' || cmd[4] == '\n')) {
 		zxnpu_wlan_bus_scan(w);
@@ -5141,6 +5348,10 @@ done_fwbss:
 				  zxnpu_wlan_fw_sta(w, band));
 done_sta:
 		zxnpu_wlan_append(w, "\n");
+	} else if (!strncmp(cmd, "bcn-set ", 8)) {
+		zxnpu_wlan_bcn_set(w, cmd + 8, strstr(cmd + 8, "dump") != NULL);
+	} else if (!strncmp(cmd, "bcn-off ", 8)) {
+		zxnpu_wlan_bcn_off(w, cmd + 8);
 	} else if (!strncmp(cmd, "tx-bcast", 8) ||
 		   !strncmp(cmd, "tx-probe", 8)) {
 		/* tx-bcast|tx-probe [dump]: TXD + one frame into qid18 */
@@ -5166,7 +5377,7 @@ done_sta:
 			zxnpu_wlan_append(w, "commit refused: set zxnpu_wlan.commit=1\n");
 		zxnpu_wlan_wfdma(w, commit);
 	} else {
-		zxnpu_wlan_append(w, "commands: l1profile | ack-expect | data-init | data-recv | dataplane | probe | scan | win <bar> <off> [n] | crw <a> <v> | fw | plan | mcu | rings | mcuwin | mcu-send | mcu-cmd | mcu-dl | mcu-dl-regions | fw-start | fw-info | fw-audit | fw-state | fw-plan wm|wa | fw-dl wm|wa | rx-init | mcu-recv | mac-set | radio-mac | radio-chan | radio-bss | radio-up | radio-sta | tx-bcast | tx-probe [dump] | txfree-init | txfree-recv | driver-own | wfsys-reset | dma-init | commit\n");
+		zxnpu_wlan_append(w, "commands: l1profile | ack-expect | data-init | data-recv | dataplane | probe | scan | win <bar> <off> [n] | crw <a> <v> | cr <a> | crn <a> <n> | fw | plan | mcu | rings | mcuwin | mcu-send | mcu-cmd | mcu-dl | mcu-dl-regions | fw-start | fw-info | fw-audit | fw-state | fw-plan wm|wa | fw-dl wm|wa | rx-init | mcu-recv | mac-set | radio-mac | radio-chan | radio-bss | radio-up | radio-sta | bcn-set <band> <ssid> [dump] | bcn-off <band> | tx-bcast | tx-probe [dump] | txfree-init | txfree-recv | driver-own | wfsys-reset | dma-init | commit\n");
 	}
 	mutex_unlock(&w->lock);
 	return count;
