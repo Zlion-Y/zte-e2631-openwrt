@@ -3444,3 +3444,29 @@ ret=0。qid20 `cidx=didx=16`（命令被 DMA 取走）但事件环零应答，�
   之间的某个握手没有完成——与 qid18 帧"取走即消失"、TXS/free-notify 从未出现、
   per-BSS TX 计数恒零全部吻合），命令处理器排在它后面一起停。
 - 待决判据：手机扫描 e2631-test（PC 强扫 3 次阴性但 Windows 扫描不可靠）。
+
+## 93. R99-R101：eid=00 事件=完整收到的邻居帧（RX 全链通）+ prefetch 表排除 + TX 挂起收敛（3.104/3.105，2026-11-03）
+
+- **`evt-dump <ring> <slot> <len> [count]` 新命令**（3.104/3.105）。注意：**每次
+  ctl 写入会重置 16KiB status 缓冲**——一写一 dump，count 参数合并多槽转储。
+- **决定性解码（R99 H0/H1）**：eid=00 "心跳"其实是**完整收到的邻居帧**——
+  H0=BSSID 04:88:5f:49:9e:64（琰-没有密码，DS=ch1）、H1=fa:28:c9:4c:0f:00
+  （CMCC-Hx4U，DS=ch2），beacon interval 100、SSID UTF-8、IE 全部可读。
+  帧体在事件缓冲 **+56** 起（Andes RX 事件头 56B）。⇒ **射频已调谐 ch1、
+  RMAC→固件→事件环→主机 的 RX 链完全工作**；探针响应若有也会走同一通道。
+- **R100**：排空→3×tx-probe（qid18 cidx=didx=3）→1s→排空→12 槽全量转储：
+  全部是邻居 beacon（fc 80 00），**零探针响应**（fc 50 00 未出现）。TX 从未
+  到达空口。
+- **R101**：§89.2 vendor prefetch 分区表（TX 0x1c0..0x2c0 / RX 0x004..0x180，
+  与我们用的 mt76 布局 TX 0x000..0x100 / RX 0x140..0x280 完全不同）整表替换
+  实验：RX 事件推送也坏掉（事件槽变成主机 DRAM 指针序列 0x4e06xxxx 递增）。
+  ⇒ **mt76 布局的 RX 分区是对的（RX 一直能用），prefetch 表不是 TX 挂因，
+  vendor 表反而有害。已弃。**
+- **中断实验**：mt7916 INT_MASK_CSR=0x18024204，原值 0x20000000（仅 bit29），
+  源寄存器挂起 bit29|bit25；武装全掩码 0x6e400003 后探针见 bit30
+  （TX_DONE_BAND0）=与 dma_done 同层的 DMA 完成事件，无新信息。
+- **战略事实重申**：v1.x 线（main 分支 v1.3-v1.8.0）的 mt76 栈在同一块硬件、
+  同一份 WIFI_RAM_CODE 上 TX/RX 全部工作过（真实用户 200M/HE80 实测）——
+  芯片 TX 没有硬件级故障，native 驱动与 mt76 之间存在尚未定位的初始化缺口。
+  下一步两条路：(a) 逐项 diff mt76 初始化（中断/环尺寸/arm 时序/mac_init），
+  (b) mt7915e 对照上机直接暴露缺口。
