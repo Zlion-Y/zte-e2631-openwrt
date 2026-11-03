@@ -1,5 +1,5 @@
---- a/mt76_connac_mcu.c
-+++ b/mt76_connac_mcu.c
+--- a/mcu.c
++++ b/mcu.c
 @@ -155,8 +155,12 @@
  		len -= cur_len;
  
