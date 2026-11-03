@@ -3522,3 +3522,21 @@ ret=0。qid20 `cidx=didx=16`（命令被 DMA 取走）但事件环零应答，�
   v1.x 恢复/998-zx-tx-paths.patch 机械重生成/kmod 依赖链 core+connac+
   mt7615-common+hwmon+thermal/stale apk 清理）——commit 记录在案。
 - pack.sh verify_img 的 native 无线门禁对 MT76 线误报（已记录，镜像可刷）。
+
+## 97. R106：mt7915e 下载失败破案到环满 -ENOMEM；WM 环回收补丁落地（3.110-mt76，2026-11-03）
+
+- **ENOMEM 源头定位**：`mt76_dma_tx_queue_skb_raw` 的
+  `if (q->queued + 1 >= q->ndesc - 1) → -ENOMEM`——**WM 环（256 深）满**。
+  scatter 全量 ~444 帧（1.76MB/4KB），提交循环里的
+  `tx_cleanup(dev, q_mcu[FWDL], false)` 回收的是 **FWDL 环**——v1.x 的
+  998 补丁把数据改到 WM 却没改回收环，WM 环必然在 ~255 帧处灌满。
+- 修正补丁 `999-zx-cleanup-wm.patch`（mcu.c 根文件，cleanup FWDL→WM）+
+  `998-zx-tx-paths.patch` 重新机械生成。**构建坑**：mt76 源码树根的
+  mcu.c（165 行，__mt76_mcu_send_firmware 所在）≠ mt76_connac_mcu.c
+  （3563 行）——999 的 label 一度写错文件；patch 失败的中间态 build_dir
+  必须先 `make package/kernel/mt76/clean`。补丁已固化 `native/mt76-patches/`。
+- **3.110-mt76 上机**：不再重启（3.109 的 Retry→重启消失），但**仍
+  -ENOMEM/-12**——回收修正不足，需在 mt76 内加失败点打印
+  （queued/ndesc/固件消费位置）定位真因。下一轮任务。
+- 深层含义未变：固件消费 scatter 的速度/DMA_DONE 置位是关键——
+  与 native 线"TX 无完成事件"同根，TTL/内核打印任一现场即可裁决。
