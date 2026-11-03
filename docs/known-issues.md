@@ -357,3 +357,38 @@ one, `ECCREQ(8,512)` with 128-byte OOB on the sibling, and getting that wrong is
 silently uncorrectable page. The decision on 2026-10-15 was to stop there. The method to
 resume it - carve the vendor kernel's flash table out of the package and diff it against
 upstream - is scripted in `wsl/vendor-flash-table.sh`.
+
+## USERDATA-DEFAULT-ADOPT (v1.9 behaviour change)
+
+The 47 MiB userdata partition is now adopted by default: at boot the
+activation gate (`/etc/init.d/e2631-userdata`) formats an unformatted volume
+automatically, copies the live internal-overlay configuration onto it, and
+enables the extroot fstab entry - `/overlay` moves to the ~35 MiB volume on
+the boot after that.  Verified: yes (design + the v1.8 on-box format test;
+the migration path reuses the same tar copy).  The safety rules that made
+v1.8 refuse to boot-format are kept as the checks the gate passes to
+`e2631-userdata-init --apply`: partition found by NAME, window >= 0x3f00000
+behind both slots, a formatted volume is never re-formatted.
+
+Opt-out: `uci set e2631.storage.autoadopt='0'; uci commit e2631` restores the
+v1.8 manual flow (`/sbin/e2631-userdata-init --apply` by hand, internal
+jffs2 overlay stays in charge).  Recorded as a behaviour change, not a bug:
+v1.8 deliberately disabled this ("booting can never format anything"), and
+the opt-out is the escape hatch for anyone who relied on it.
+
+## CALDATA-HOOK-MOUNT-RETRY
+
+The caldata hotplug hook (`11-mt76-caldata`) mounts the wifi partition's
+JFFS2 to extract `caldata`; a retry after a first pass that failed mid-way
+hit `mount: Resource busy` on the mount left behind (observed on the mt76
+comparison line, 2026-11-03).  status: fixed - the hook reuses an existing
+mount at its own directory instead of dying.
+
+## WAN6-RELAY-NOTE
+
+When the upstream router does not delegate a prefix (observed behind a
+vendor E2631 upstream, 2026-10-29 on the ffe line), IPv6 on the LAN needs
+odhcpd relay mode: `dhcp.wan6` master=1 + the three `dhcp.lan` relays +
+`network.wan6.sourcefilter='0'`, then a runtime default route without the
+`from` constraint.  Not shipped enabled: it depends on the ISP/upstream
+behaviour.  Record of the ffe-full line's fix, kept for reference.

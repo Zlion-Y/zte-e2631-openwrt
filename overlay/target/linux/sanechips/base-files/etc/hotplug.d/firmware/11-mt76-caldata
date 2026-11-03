@@ -21,7 +21,14 @@ zte_caldata_from_jffs2() {
 	# /dev/mtdblock3 on /wlan type jffs2 (rw,relatime)); we only read a file
 	# out of it and unmount.
 	mkdir -p $dir
-	mount -t jffs2 $part $dir || caldata_die "failed to mount $part"
+	# The hook can fire twice for the same firmware file (kmodloader retry,
+	# or a manual FIRMWARE= re-run after a first pass failed mid-way); a
+	# failed first pass leaves the mount behind and a bare mount then fails
+	# with "Resource busy" (seen on the mt76 comparison line).  Reuse an
+	# existing mount at $dir when it is ours instead of dying.
+	if ! grep -qs " $dir " /proc/mounts; then
+		mount -t jffs2 $part $dir || caldata_die "failed to mount $part"
+	fi
 	id=$(hexdump -v -n 2 -e '2/1 "%02x"' $dir/caldata 2>/dev/null)
 	case "$board:$id" in
 	zte,zxhn-h3600:1579)
