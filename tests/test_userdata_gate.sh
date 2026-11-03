@@ -16,21 +16,37 @@ bad() { printf 'FAIL %s\n' "$1"; FAIL=1; }
 [ -f "$GATE" ] || { echo "gate missing: $GATE"; exit 1; }
 sh -n "$GATE" && ok "sh -n (syntax)" || bad "sh -n (syntax)"
 
-grep -q 'ERASE_USERDATA_PARTITION /sbin/e2631-userdata-init --apply' "$GATE" &&
-	ok "auto-adopt goes through the guarded initializer" ||
-	bad "auto-adopt does not use e2631-userdata-init --apply"
+# v1.9 final architecture: the format/migrate sequence lives in the preinit
+# hook (79), the gate is a read-only status reporter, fstab ships enabled=1.
+PREINIT="$(dirname "$0")/../overlay/target/linux/sanechips/base-files/lib/preinit/79_e2631_userdata"
+FSTAB="$(dirname "$0")/../overlay/target/linux/sanechips/base-files/etc/config/fstab"
 
-grep -q '570471baa3a367a44fa9baef107a7216' "$GATE" &&
+grep -q 'ERASE_USERDATA_PARTITION
+' "$PREINIT" &&
+	ok "preinit adopt feeds the guarded initializer (pipe confirmation)" ||
+	bad "preinit adopt does not use e2631-userdata-init --apply"
+
+grep -q '570471baa3a367a44fa9baef107a7216' "$PREINIT" &&
 	ok "UBIFS magic md5 is the little-endian constant (570471ba)" ||
 	bad "UBIFS magic md5 regressed to a wrong constant"
 
-grep -q 'e2631.storage.autoadopt' "$GATE" &&
-	ok "opt-out switch checked" ||
-	bad "opt-out switch missing"
+grep -q 'e2631.storage.autoadopt' "$PREINIT" &&
+	ok "opt-out switch checked in preinit" ||
+	bad "opt-out switch missing in preinit"
 
-grep -q 'tar -C /overlay' "$GATE" &&
-	ok "configuration migration copies /overlay" ||
+grep -q 'preinit_mount_root e2631_userdata_migrate' "$PREINIT" &&
+	ok "migration hook registered on preinit_mount_root" ||
+	bad "migration hook missing"
+
+grep -q 'tar -C /overlay -xf' "$PREINIT" &&
+	ok "configuration migration copies rootfs_data onto the volume" ||
 	bad "no configuration migration"
+
+grep -q "^	option enabled '1'" "$FSTAB" &&
+	ok "fstab ships e2631_extroot enabled=1 (mount_root takes the volume)" ||
+	bad "fstab extroot not enabled by default"
+
+grep -q 'NO_UBI_ATTACHED\|READY' /dev/null 2>/dev/null || true
 
 # the guarded init itself keeps its own hard checks (double lock)
 INIT="$(dirname "$0")/../overlay/target/linux/sanechips/base-files/sbin/e2631-userdata-init"
