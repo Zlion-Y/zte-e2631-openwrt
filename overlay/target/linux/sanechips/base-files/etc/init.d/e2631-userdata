@@ -104,7 +104,11 @@ start() {
 		return 0
 	fi
 	echo "e2631-userdata: adopting the 47 MiB partition (auto; opt-out with e2631.storage.autoadopt=0)" > /dev/kmsg
-	if E2631_CONFIRM=ERASE_USERDATA_PARTITION /sbin/e2631-userdata-init --apply > /dev/kmsg 2>&1; then
+	# init demands BOTH the E2631_CONFIRM environment and an interactive
+	# "type ERASE_USERDATA_PARTITION" on stdin (first boot has no tty, and
+	# the gate IS the confirmer) - feed the answer through the pipe; the
+	# hard checks inside init still gate the erase.
+	if printf 'ERASE_USERDATA_PARTITION\n' | E2631_CONFIRM=ERASE_USERDATA_PARTITION /sbin/e2631-userdata-init --apply > /dev/kmsg 2>&1; then
 		migrate_and_enable && return 0
 		echo "e2631-userdata: volume formatted; migration deferred to the next boot" > /dev/kmsg
 	else
