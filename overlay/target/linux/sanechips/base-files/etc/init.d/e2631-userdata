@@ -84,35 +84,21 @@ migrate_and_enable() {
 }
 
 start() {
-	if active; then
+	# v1.9: the format/migrate/enable sequence runs in PREINIT
+	# (lib/preinit/79_e2631_userdata: attach, format-if-blank, then
+	# fstools' mount_extroot reads this ROM fstab with enabled='1' and
+	# mounts /dev/ubi0_0 as /overlay, falling back to the internal jffs2
+	# on failure).  This gate is now a read-only status reporter, plus the
+	# opt-out hint for anyone who wants the v1.8 manual flow back.
+	st=$(/sbin/e2631-userdata-status 2>/dev/null | head -1)
+	if grep -qs ' /overlay .*ubifs' /proc/mounts; then
 		echo "e2631-userdata: extroot is the live /overlay" > /dev/kmsg
-		return 0
-	fi
-	if ubifs_formatted; then
-		cur=$(uci -q get fstab.e2631_extroot.enabled)
-		if [ "$cur" = "1" ]; then
-			echo "e2631-userdata: volume ready and enabled; extroot engages on this boot" > /dev/kmsg
-			return 0
-		fi
-		migrate_and_enable && return 0
-		echo "e2631-userdata: formatted volume present, enable/migrate failed - staying on the internal overlay" > /dev/kmsg
-		return 0
-	fi
-	# unformatted volume: default-adopt unless the user opted out
-	if ! autoadopt; then
-		echo "e2631-userdata: no formatted volume, staying on the internal overlay (to adopt the 47 MiB partition run /sbin/e2631-userdata-init)" > /dev/kmsg
-		return 0
-	fi
-	echo "e2631-userdata: adopting the 47 MiB partition (auto; opt-out with e2631.storage.autoadopt=0)" > /dev/kmsg
-	# init demands BOTH the E2631_CONFIRM environment and an interactive
-	# "type ERASE_USERDATA_PARTITION" on stdin (first boot has no tty, and
-	# the gate IS the confirmer) - feed the answer through the pipe; the
-	# hard checks inside init still gate the erase.
-	if printf 'ERASE_USERDATA_PARTITION\n' | E2631_CONFIRM=ERASE_USERDATA_PARTITION /sbin/e2631-userdata-init --apply > /dev/kmsg 2>&1; then
-		migrate_and_enable && return 0
-		echo "e2631-userdata: volume formatted; migration deferred to the next boot" > /dev/kmsg
+	elif echo "$st" | grep -q 'READY'; then
+		echo "e2631-userdata: volume READY, extroot enabled in fstab" > /dev/kmsg
+	elif [ "$(uci -q get e2631.storage.autoadopt)" = "0" ]; then
+		echo "e2631-userdata: no formatted volume (auto-adopt is off; run /sbin/e2631-userdata-init)" > /dev/kmsg
 	else
-		echo "e2631-userdata: auto-adopt failed - the internal overlay stays in charge; see 'logread | grep e2631-userdata'" > /dev/kmsg
+		echo "e2631-userdata: volume not ready - preinit adopt failed, see earlier kmsg" > /dev/kmsg
 	fi
 	return 0
 }
