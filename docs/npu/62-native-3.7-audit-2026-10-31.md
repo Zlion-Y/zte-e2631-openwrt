@@ -3416,7 +3416,7 @@ ret=0。qid20 `cidx=didx=16`（命令被 DMA 取走）但事件环零应答，�
 
 - PC 的 `netsh wlan show networks` 在连接状态下不主动刷新；用 wlanapi 的
   `WlanScan`（`_scratch/npu-probe/wlan-scan.ps1`）强制即时扫描后 netsh 才给新数据。
-- 强制扫描确认环境：2.4G 有 CMCC-Hx4U、琰-没有密码等多个 HE AP 活跃。
+- 强制扫描确认环境：2.4G 有 SSID-B(邻区)、SSID-A(邻区)等多个 HE AP 活跃。
 - MIB 全块两次独立采样差分为零——但 MIB 的读锁存语义未弄清（SDR9 跨分钟会变、
   3 秒内不变），不能当"无帧"的硬证据；空口验收以 PC 强扫 + 手机扫表为准。
 
@@ -3450,8 +3450,8 @@ ret=0。qid20 `cidx=didx=16`（命令被 DMA 取走）但事件环零应答，�
 - **`evt-dump <ring> <slot> <len> [count]` 新命令**（3.104/3.105）。注意：**每次
   ctl 写入会重置 16KiB status 缓冲**——一写一 dump，count 参数合并多槽转储。
 - **决定性解码（R99 H0/H1）**：eid=00 "心跳"其实是**完整收到的邻居帧**——
-  H0=BSSID 04:88:5f:49:9e:64（琰-没有密码，DS=ch1）、H1=fa:28:c9:4c:0f:00
-  （CMCC-Hx4U，DS=ch2），beacon interval 100、SSID UTF-8、IE 全部可读。
+  H0=BSSID aa:aa:5f:49:9e:64（SSID-A(邻区)，DS=ch1）、H1=fa:aa:c9:4c:0f:00
+  （SSID-B(邻区)，DS=ch2），beacon interval 100、SSID UTF-8、IE 全部可读。
   帧体在事件缓冲 **+56** 起（Andes RX 事件头 56B）。⇒ **射频已调谐 ch1、
   RMAC→固件→事件环→主机 的 RX 链完全工作**；探针响应若有也会走同一通道。
 - **R100**：排空→3×tx-probe（qid18 cidx=didx=3）→1s→排空→12 槽全量转储：
