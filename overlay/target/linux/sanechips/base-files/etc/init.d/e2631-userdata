@@ -104,6 +104,12 @@ start() {
 		return 0
 	fi
 	echo "e2631-userdata: adopting the 47 MiB partition (auto; opt-out with e2631.storage.autoadopt=0)" > /dev/kmsg
+	# the preinit attach hook (79_e2631_userdata) attaches the blank volume
+	# before this gate runs - and userdata-init refuses to ubiformat a volume
+	# that is already attached (measured 2026-11-07: "REFUSE: UBI ubi0 is
+	# already attached").  The volume is blank here (ubifs_formatted said
+	# so), nothing is mounted from it, so detaching is safe.
+	ubidetach -d 0 2>/dev/null
 	# init demands BOTH the E2631_CONFIRM environment and an interactive
 	# "type ERASE_USERDATA_PARTITION" on stdin (first boot has no tty, and
 	# the gate IS the confirmer) - feed the answer through the pipe; the
