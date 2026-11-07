@@ -82,6 +82,22 @@ say "installing feed packages"
 say "seeding .config from seed/e2631.config"
 cp "$E2631_KIT/seed/e2631.config" "$E2631_TREE/.config"
 ( cd "$E2631_TREE" && make defconfig >/dev/null 2>&1 )
+# The first expansion can demote seed =y lines to =m: kconfig resolves the
+# bare fragment's dependency edges against defaults on that pass (measured
+# with the v1.9.1 plugin set: every baked =y came back =m, while the same =y
+# re-asserted on the expanded config survived).  Re-assert the seed's own
+# CONFIG lines over the expanded result and expand once more.
+awk -F= '
+	FILENAME ~ /seed/ { if ($0 ~ /^CONFIG_/) want[$1] = $0; next }
+	{
+		line = $0
+		split(line, a, "=")
+		if (a[1] in want) line = want[a[1]]
+		print line
+	}
+' "$E2631_KIT/seed/e2631.config" "$E2631_TREE/.config" > "$E2631_TREE/.config.reseed"
+mv "$E2631_TREE/.config.reseed" "$E2631_TREE/.config"
+( cd "$E2631_TREE" && make defconfig >/dev/null 2>&1 )
 for want in CONFIG_TARGET_DEVICE_sanechips_generic_DEVICE_zte_zxhn-e2631= \
 	CONFIG_SOFT_FLOAT= CONFIG_PACKAGE_luci= CONFIG_PACKAGE_e2631-fwslot=; do
 	grep -q "^$want" "$E2631_TREE/.config" || die "seed check: $want missing after defconfig"
