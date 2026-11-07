@@ -59,7 +59,7 @@ static void run(const char *what, int have0, uint8_t *h0, int have1, uint8_t *h1
 	in.base[0] = 0x00700000;
 	in.base[1] = 0x02300000;
 	in.fs_delta = 0x00400000;
-	in.hdr_delta = 0x01100000;
+	in.hdr_delta = 0x01500000;
 	in.have_hdr[0] = have0;
 	in.have_hdr[1] = have1;
 	if (h0)
@@ -111,7 +111,7 @@ int main(void)
 		in.base[0] = 0x00700000;
 		in.base[1] = 0x02300000;
 		in.fs_delta = 0x00340000;	/* vendor-style delta */
-		in.hdr_delta = 0x01100000;
+		in.hdr_delta = 0x01500000;
 		in.have_hdr[0] = 1;
 		memcpy(in.hdr[0], mk_hdr(0x40, 0, 0), ZX_SP_HDR_SIZE);
 		zx_slotpart_decide(&in, &out);
