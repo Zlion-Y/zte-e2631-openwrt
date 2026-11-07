@@ -2,17 +2,20 @@
 # E2631: attach the userdata UBI before mount_root, so an already-formatted
 # extroot can be picked up.  Never formats, erases or creates volumes here.
 #
-# Measured on the box (2026-11-07, v1.9.0 first boot), two reasons this hook
-# silently did nothing on its first real run:
-#   - preinit runs with PATH=/sbin:/bin - there is no /usr/sbin in it, so a
-#     bare `ubiattach` (it lives in /usr/sbin) failed with rc=127 before the
-#     || return 0 hid it.  Resolve the tool the way fwslot is resolved.
+# Measured on the box (2026-11-07, v1.9.0 first boots), two things this hook
+# has to do that its first version did not:
 #   - the "inside the chip" containment check compared the window against
 #     mtd0's size - but on this board mtd0 is a 1 MiB partition, not the
-#     master flash, so the check could never pass.  The kernel cannot
-#     register a partition beyond the chip in the first place, and the
-#     twice-device-proven /sbin/e2631-userdata-init validates only the name
-#     and the offset behind both slots - this hook now does the same.
+#     128 MiB master, so the check could never pass and the hook silently
+#     bailed.  Dropped: the kernel cannot register a partition beyond the
+#     chip in the first place, and the twice-device-proven
+#     /sbin/e2631-userdata-init validates only the name and the offset
+#     behind both slots - this hook now does the same.
+#   - /dev in preinit is a plain tmpfs with no uevent consumer: after
+#     ubiattach the kernel has the device but /dev/ubi0_0 (the node the
+#     fstools probe globs for) does not exist yet - "cannot find device
+#     ubi0_0" three times, then the boot falls back to jffs2.  mknod both
+#     nodes from sysfs ourselves; major:minor is dynamic.
 # If no UBI is attachable the hook still exits silently - boot continues on
 # the internal overlay.
 
@@ -41,6 +44,15 @@ e2631_userdata_preinit() {
 		ubiattach=$(command -v ubiattach || echo /usr/sbin/ubiattach)
 		"$ubiattach" -d 0 /dev/ubi_ctrl -m "$idx" >/dev/null 2>&1 || return 0
 	fi
+
+	# /dev is a bare tmpfs up here: make the nodes the probe globs for, the
+	# kernel device alone is not visible to it
+	for n in ubi0 ubi0_0; do
+		[ -e "/sys/class/ubi/$n/dev" ] || continue
+		[ -e "/dev/$n" ] && continue
+		mm=$(cat "/sys/class/ubi/$n/dev")
+		mknod "/dev/$n" c "${mm%%:*}" "${mm##*:}" 2>/dev/null
+	done
 
 	[ "$(cat /sys/class/ubi/ubi0/mtd_num 2>/dev/null)" = "$idx" ] || return 0
 	[ "$(cat /sys/class/ubi/ubi0_0/name 2>/dev/null)" = "userdata" ] || return 0
