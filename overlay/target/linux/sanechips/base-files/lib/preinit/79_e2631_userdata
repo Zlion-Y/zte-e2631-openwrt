@@ -1,34 +1,15 @@
 #!/bin/sh
-# E2631: userdata adoption in preinit, in two hooks around fstools:
+# E2631: attach the userdata UBI before mount_root, so an already-formatted
+# extroot can be picked up.  Never formats, erases or creates volumes here.
 #
-#   preinit_main      (79a, runs BEFORE mount_root):
-#     attach the userdata UBI, and - when the volume is blank or foreign and
-#     the user has not opted out - format it via the guarded initializer.
-#     mount_root (fstools) then reads /etc/config/fstab (ROM view: the
-#     e2631_extroot mount ships enabled='1') and mounts /dev/ubi0_0 as
-#     /overlay, falling back to the internal jffs2 if anything fails.
-#
-#   preinit_mount_root (79b, runs AFTER mount_root, i.e. after the extroot
-#     switch):
-#     migrate the internal-overlay configuration: rootfs_data's jffs2 is
-#     mounted read-write at a temp point and its tree is copied onto the
-#     volume - only when the volume has no upper/ yet (first adopt) and the
-#     jffs2 carries one (upgrade, not firstboot).
-#
-# Safety rules kept from the original:
+# Robustness rules this version adds over the PR#1 original:
 #   - the partition is found by NAME, not by a hardcoded mtd number (the
-#     rootfs_data split shifts numbering);
+#     rootfs_data split shifts numbering; mtd10 today is not a promise);
 #   - offset/size are validated against the physical flash (the window must
-#     sit behind both image slots and inside the chip);
-#   - a volume that already carries a UBIFS superblock is NEVER re-formatted;
-#   - if anything is off, the hooks exit silently - boot continues on the
-#     internal jffs2 overlay (fstools' own fallback does the same).
-#
-# v1.9 rewrite rationale, measured on the box (2026-11-04): the old split
-# (attach here, format+migrate in the START=11 gate) never engaged - the gate
-# runs after mount_root decided /overlay, its formatted test ran while the
-# UBI was not yet attached, and every boot re-formatted the volume while the
-# config migration was thrown away with the next boot.
+#     sit behind both image slots and inside the chip) instead of comparing
+#     against one build's constant;
+#   - if no UBI is attachable the hook exits silently - boot continues on
+#     the internal overlay.
 
 e2631_userdata_mtd() {
 	# prints the mtd index of the userdata partition, nothing if absent
@@ -41,77 +22,27 @@ e2631_userdata_mtd() {
 	return 1
 }
 
-e2631_userdata_autoadopt() {
-	# explicit opt-out, re-checked at runtime
-	[ "$(uci -q get e2631.storage.autoadopt)" = "0" ] && return 1
-	return 0
-}
-
-e2631_userdata_ubifs_magic() {
-	# UBIFS superblock magic, little-endian: first 4 bytes are 31 18 10 06
-	[ "$(dd if="$1" bs=4 count=1 2>/dev/null | md5sum | cut -c1-32)" = "570471baa3a367a44fa9baef107a7216" ]
-}
-
-e2631_userdata_attach() {
-	idx=$(e2631_userdata_mtd) || return 1
+e2631_userdata_preinit() {
+	idx=$(e2631_userdata_mtd) || return 0
 	base=/sys/class/mtd/mtd$idx
-	off=$(cat "$base/offset" 2>/dev/null) || return 1
-	size=$(cat "$base/size" 2>/dev/null) || return 1
+	off=$(cat "$base/offset" 2>/dev/null) || return 0
+	size=$(cat "$base/size" 2>/dev/null) || return 0
 	total=$(cat /sys/class/mtd/mtd0/size 2>/dev/null || echo 0)
 
 	# the declared window must be behind both 28 MiB image slots and fit
 	# inside the chip - anything else is a partition-table change we did
 	# not sanction, and the safest answer is to not touch it
-	[ "$off" -ge 0 ] || return 1
-	[ "$((off + size))" -le "$total" ] || return 1
-	[ "$off" -ge $((0x3f00000)) ] || return 1   # 0x3f00000: end of slot B
+	[ "$off" -ge 0 ] || return 0
+	[ "$((off + size))" -le "$total" ] || return 0
+	[ "$off" -ge $((0x3f00000)) ] || return 0   # 0x3f00000: end of slot B
 
 	if ! grep -qs "^$idx\$" /sys/class/ubi/ubi[0-9]*/mtd_num 2>/dev/null; then
-		ubiattach -d 0 /dev/ubi_ctrl -m "$idx" >/dev/null 2>&1 || return 1
+		ubiattach -d 0 /dev/ubi_ctrl -m "$idx" >/dev/null 2>&1 || return 0
 	fi
 
-	[ "$(cat /sys/class/ubi/ubi0/mtd_num 2>/dev/null)" = "$idx" ] || return 1
-	[ -e /dev/ubi0_0 ] || return 1
-	return 0
-}
-
-e2631_userdata_preinit() {
-	e2631_userdata_attach || return 0
-	[ -e /dev/ubi0_0 ] || return 0
-
-	# already formatted: nothing to do, fstools mounts it as /overlay
-	e2631_userdata_ubifs_magic /dev/ubi0_0 && return 0
-
-	# blank/foreign volume: adopt it unless the user opted out
-	e2631_userdata_autoadopt || return 0
-
-	echo "e2631-userdata: preinit adopting the 47 MiB partition (auto)" > /dev/kmsg
-	printf 'ERASE_USERDATA_PARTITION\n' | E2631_CONFIRM=ERASE_USERDATA_PARTITION /sbin/e2631-userdata-init --apply >/dev/kmsg 2>&1 \
-		|| echo "e2631-userdata: preinit adopt failed - staying on the internal overlay" > /dev/kmsg
-	return 0
-}
-
-e2631_userdata_migrate() {
-	# after the extroot switch: /overlay IS the volume now; copy the
-	# internal-overlay configuration from rootfs_data when the volume is
-	# empty and the jffs2 carries data (upgrade - not firstboot).
-	[ "$(uci -q get e2631.storage.autoadopt)" = "0" ] && return 0
-	[ -d /overlay/upper ] && return 0          # volume already carries config
-
-	mkd=$(find_mtd_part rootfs_data 2>/dev/null) || return 0
-	[ -n "$mkd" ] || return 0
-
-	mkdir -p /tmp/e2631-mig-src
-	mount -t jffs2 "$mkd" /tmp/e2631-mig-src 2>/dev/null || return 0
-
-	if [ -d /tmp/e2631-mig-src/upper ]; then
-		tar -C /tmp/e2631-mig-src -cf - . 2>/dev/null | tar -C /overlay -xf - \
-			&& echo "e2631-userdata: configuration migrated to the userdata volume" > /dev/kmsg
-	fi
-	umount /tmp/e2631-mig-src
-	rmdir /tmp/e2631-mig-src 2>/dev/null
+	[ "$(cat /sys/class/ubi/ubi0/mtd_num 2>/dev/null)" = "$idx" ] || return 0
+	[ "$(cat /sys/class/ubi/ubi0_0/name 2>/dev/null)" = "userdata" ] || return 0
 	return 0
 }
 
 boot_hook_add preinit_main e2631_userdata_preinit
-boot_hook_add preinit_mount_root e2631_userdata_migrate

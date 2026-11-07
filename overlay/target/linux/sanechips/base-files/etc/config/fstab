@@ -6,18 +6,15 @@ config global
 	option delay_root '5'
 	option check_fs '0'
 
-# The 47 MiB userdata extroot.  Shipped ENABLED since v1.9: the adoption
-# sequence runs in preinit (lib/preinit/79_e2631_userdata) - a blank volume
-# is formatted there (opt-out: uci set e2631.storage.autoadopt='0') and the
-# internal-overlay configuration is migrated before fstools' mount_extroot
-# reads this file, so the first boot already lands on the ~35 MiB volume.
-# A volume that fails to mount falls back to the internal jffs2 overlay
-# (fstools' own fallback), and an unformatted volume can never be silently
-# auto-formatted by a read-write mount: the format goes through
-# /sbin/e2631-userdata-init's six hard checks.
+# The 47 MiB userdata extroot.  ROM default is DISABLED on purpose: mounting
+# an unformatted UBI volume read-write would silently auto-format it
+# (UBIFS create_default_filesystem on first mount), so the activation gate in
+# /etc/init.d/e2631-userdata flips this to 1 only after the volume was seen
+# to carry a real UBIFS superblock.  Until then the router runs on the
+# internal jffs2 overlay, and booting never formats anything.
 config mount 'e2631_extroot'
 	option device '/dev/ubi0_0'
 	option target '/overlay'
 	option fstype 'ubifs'
 	option options 'rw'
-	option enabled '1'
+	option enabled '0'
