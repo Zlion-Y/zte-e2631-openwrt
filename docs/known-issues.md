@@ -392,3 +392,54 @@ odhcpd relay mode: `dhcp.wan6` master=1 + the three `dhcp.lan` relays +
 `network.wan6.sourcefilter='0'`, then a runtime default route without the
 `from` constraint.  Not shipped enabled: it depends on the ISP/upstream
 behaviour.  Record of the ffe-full line's fix, kept for reference.
+
+## NPU-KERNEL-CONTAMINATION (the 646a35ab brick, corrected attribution)
+
+The v1.9.0 preinit-architecture build (646a35ab, 2026-11-04) soft-reset in a
+loop: cspboot verified kernel+fs, printed "Starting kernel ..." and died with
+zero output - earlycon never printed, so no userspace (and no preinit script)
+ever ran.  The first attribution ("the preinit environment wedges", native
+revert 436ed59) was wrong.
+
+Verified cause: the build/ kit clone sat on the npu research branch, whose
+overlay carries the never-device-validated zxnpu driver family (patches
+037-041, five sources).  The kernel configs of the two v1.9.0 builds differ by
+exactly five lines - CONFIG_ZX_NPU/ZX_NPU_AUDIT/ZX_NPU_IDM/ZX_NPU_PPE/
+ZX_CSP_WLAN=y (+8.8 KB kernel) - all present in the hanging build (646a35ab),
+absent in the booting one (d96a7cc2, whose kernel only escaped because it was
+a stale pre-v1.9 artifact from the missed-apply cycle).
+
+Fixed 2026-11-07: build/ switched to the v1.9-wip checkout, the WSL tree
+decontaminated (five driver sources, five patches, the five config lines,
+README.vendor-fw, kernel+rootfs build dirs), and the npu branch archived as
+tag archive/npu before deletion.  Rule: a v1.9 build may only run from a
+checkout whose overlay/seed contain no zxnpu content - verify by diffing
+config-6.18 against out/build-20261104-001833/config-6.18 (the last good one).
+
+## USERDATA-EXTROOT-TAKEOVER (mechanism, closed at source level)
+
+Why the adoption boot cannot switch /overlay: the rcS gate (START=11) runs
+after fstools' mount_root already pivoted the jffs2 - and the jffs2 upper of a
+live overlayfs cannot be swapped out under it.  The takeover therefore belongs
+to the NEXT boot, and the code path for it exists and is safe:
+
+  preinit_main:  79_e2631_userdata attaches the UBI (79 < 80, so /dev/ubi0_0
+                 exists before mount_root);
+  80_mount_root: mount_root start -> mount_extroot("") (libfstools/extroot.c)
+                 forks /sbin/block extroot (block.c main_extroot), which mounts
+                 rootfs_data (jffs2) at /tmp/jffs_cfg and reads THAT copy of
+                 /etc/config/fstab - the one the gate flipped to enabled=1;
+  block.c:       the e2631_extroot mount (target=/overlay -> m->overlay=1) is
+                 matched in the probe cache by basename ("ubi0_0"; cache_load
+                 globs /dev/ubi[0-9]*), mounted at /tmp/extroot/overlay, moved
+                 to /overlay and fopivot'ed - the UBIFS becomes the overlay
+                 upper.  A volume without a UBIFS superblock fails blkid probe
+                 and falls back to the internal jffs2, so the boot can still
+                 never auto-format anything.
+
+The earlier "fstools never picked the volume" conclusion (native 436ed59) was
+drawn from the adoption boot only; no boot with a formatted volume + enabled=1
+ever completed before the brick.  Still open until measured: one flash cycle
+must confirm boot 1 = adoption (format/migrate/enable) and boot 2 = takeover
+(/overlay is ubifs).  Until then the volume stays reachable via
+e2631-userdata-status / manual mount.
