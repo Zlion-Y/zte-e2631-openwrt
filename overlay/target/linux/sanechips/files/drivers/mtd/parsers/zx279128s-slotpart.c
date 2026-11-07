@@ -185,7 +185,7 @@ static int zx_slotpart_parse(struct mtd_info *master,
 
 		if (!in->base[i])
 			continue;
-		ret = mtd_read(master, in->base[i], ZX_SP_HDR_SIZE, &retlen,
+		ret = mtd_read(master, in->base[i] + in->hdr_delta, ZX_SP_HDR_SIZE, &retlen,
 			       in->hdr[i]);
 		in->have_hdr[i] = ret == 0 && retlen == ZX_SP_HDR_SIZE;
 		if (!in->have_hdr[i])
