@@ -50,13 +50,22 @@ const run = arg('--run');
 const TEMPLATE = abs(arg('--template', envv('E2631_TEMPLATE')) || path.join(REPO, 'seed/vendor-verhdr-8b8.bin'));
 const ROOTFS_AT = arg('--rootfs-at', '0x400000');
 const HEADER_AT = arg('--header-at', '0x1400000');
-// Stamp the OpenWrt version into the 32-byte version field of the vendor header
-// (the template carries the vendor's own "V1.0.0.8B8.8000", which is what made
-// both slots read identically in the LuCI slot table). --version / E2631_VERSION
-// override; without one the template string is kept as before. The 16-byte build
-// field always gets a stamp: --build / E2631_BUILD, else today's date, so two
-// packs of the same version can be told apart on the slot page.
+// Stamp the version into the 32-byte version field of the vendor header (the
+// string the STOCK web upgrade gate parses - it must stay vendor-formatted and
+// order at/above the running firmware, so the default is to keep the template's
+// own "V1.0.0.8B8.8000" and stay stock-web-flashable; the OpenWrt version lives
+// in /etc/e2631-version and is what LuCI shows). --version / E2631_VERSION
+// override for local fwslot-only builds. The 16-byte build field always gets a
+// stamp: --build / E2631_BUILD, else today's date, so two packs of the same
+// version can be told apart on the slot page.
 const VERSION = arg('--version', envv('E2631_VERSION'));
+if (VERSION && !/^V[0-9.]+\.[0-9A-Z]{3}\.[0-9]+$/.test(VERSION)) {
+  console.error(`\nWARNING: version "${VERSION}" is not vendor-formatted (like V1.0.0.8B8.8000).`);
+  console.error('       The stock web upgrade gate will refuse this package; it only');
+  console.error('       installs via the OpenWrt-side fwslot. Unset E2631_VERSION to');
+  console.error('       keep the template\'s vendor string, or pass --version in the');
+  console.error('       vendor format.\n');
+}
 const _now = new Date();
 const BUILD = arg('--build', envv('E2631_BUILD')) ||
   `${_now.getFullYear()}${String(_now.getMonth() + 1).padStart(2, '0')}${String(_now.getDate()).padStart(2, '0')}`;
