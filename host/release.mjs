@@ -49,7 +49,7 @@ const run = arg('--run');
 // you check this slice against the vendor bytes.
 const TEMPLATE = abs(arg('--template', envv('E2631_TEMPLATE')) || path.join(REPO, 'seed/vendor-verhdr-8b8.bin'));
 const ROOTFS_AT = arg('--rootfs-at', '0x400000');
-const HEADER_AT = arg('--header-at', '0x1800000');
+const HEADER_AT = arg('--header-at', '0x1100000');
 // Stamp the version into the 32-byte version field of the vendor header (the
 // string the STOCK web upgrade gate parses - it must stay vendor-formatted and
 // order at/above the running firmware, so the default is to keep the template's

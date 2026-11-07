@@ -357,7 +357,7 @@
 			zte,slot0 = <0x00700000 0x01c00000>;
 			zte,slot1 = <0x02300000 0x01c00000>;
 			zte,fs-delta = <0x00400000>;
-			zte,hdr-delta = <0x01800000>;
+			zte,hdr-delta = <0x01100000>;
 
 			partition@0 {
 				label = "bootloader";
@@ -424,8 +424,8 @@
 			 *   +0x000000  32-byte slot marker
 			 *   +0x000020  kernel (plaintext legacy uImage, load 0x40008000),
 			 *                padded to fill the region up to +0x400000
-			 *   +0x400000  squashfs, then free space up to +0x1800000
-			 *   +0x1800000 the 512-byte version header block
+			 *   +0x400000  squashfs, then free space up to +0x1100000
+			 *   +0x1100000 the 512-byte version header block
 			 *
 			 * +0x400000 is not a free choice. cspboot locates the rootfs as
 			 * "slot + ceil(declared kernel size / 128k)" and ignores the header's
@@ -436,7 +436,7 @@
 			 * why KERNEL_SIZE is capped at 4096k: a kernel that outgrows this
 			 * region must fail the build, not move the rootfs under the table.
 			 *
-			 * The 20 MiB rootfs window (extended from 16 MiB in v1.9.1 so the
+			 * The 17 MiB rootfs window (extended from 16 MiB in v1.9.1 so the
 			 * built-in plugin set - smartdns, nlbwmon, UPnP, WOL, adblock-fast
 			 * and their kernel modules - fits with room to grow) is what the
 			 * web UI costs: with LuCI in the
@@ -452,8 +452,8 @@
 			 * must never be in it - with the first image it was, and the very
 			 * first config save made the slot unreadable to the bootloader.
 			 *
-			 * The space behind the header block (+0x1820000 to the end of the
-			 * slot, ~3.8 MiB) is left unpartitioned on purpose: it is reachable
+			 * The space behind the header block (+0x1120000 to the end of the
+			 * slot, ~11.6 MiB) is left unpartitioned on purpose: it is reachable
 			 * through "slot1", and the packer pads it, so nothing can write it by
 			 * accident. Making "rootfs" reach it instead would put the version
 			 * header inside the overlay.
@@ -481,12 +481,12 @@
 			partition@2700000 {
 				/* squashfs at its start, overlay after it: see above */
 				label = "rootfs";
-				reg = <0x02700000 0x01400000>;
+				reg = <0x02700000 0x01100000>;
 			};
 
-			partition@3b00000 {
+			partition@3800000 {
 				label = "slot1-header";
-				reg = <0x03b00000 0x00020000>;
+				reg = <0x03800000 0x00020000>;
 				read-only;
 			};
 

@@ -42,6 +42,7 @@
 | NTP / 时区 / 中文 | ✅ | Asia/Shanghai，国内 NTP 源 |
 | 内置插件 | ✅ | SmartDNS / nlbwmon / UPnP / WOL / adblock-fast 随镜像内置（中文界面） |
 | 代理栈 homeproxy | ⚠️ | sing-box 1.14.0 + LuCI，经 apk 装入 userdata 卷（Release 附件），订阅导入/中文 |
+| 槽位布局 | ✅ | rootfs 窗口 17M（为内置插件扩容，上限按原厂头位置反推），升级包 21.2 MiB |
 | USB | ❌ | 保持禁用（未贴片，探测挂死） |
 | PPPoE 硬件转发 | ❌ | 未验证（同族 ZX279133 实测不走硬件路径） |
 | Wi-Fi 关联死机 / 冷启挂死 | ❌ | 未根治；有 pending 标记自愈兜底（损失一次断电） |
