@@ -10,7 +10,7 @@
 | 芯片 / 部件 | 规格 | 驱动 | 状态 |
 |---|---|---|---|
 | SoC | ZTE ZX279128S，双核 Cortex-A9 @1 GHz，256 MiB DDR2 | — | ✅ |
-| 千兆交换 | SBRG 五口交换 + 4×内部 GbE PHY（ZX5201，eth0-3 独立 netdev） | `zx279128s-eth`（内建） | ✅ |
+| 千兆交换 | 4×内部 GbE PHY（ZX5201，eth0-3 独立 netdev） | `zx279128s-eth`（内建） | ✅ |
 | 硬件转发 | PPE 分类器/修改器（0x92000000）+ NPP/IDM/TM 引擎 | `zx279128s-ppe` + nft flowtable | ✅ IPv4 |
 | 无线 | MT7916AN + MT7976DN（Filogic 630，DBDC 2×2） | mt7915e（mt76）+ 原厂 caldata | ✅ |
 | Flash | SPI-NAND 128 MiB（HYF1GQ4UTACAE，2 KiB 页 / 128 KiB 块） | mtk-spi + spi-nand | ✅ |
@@ -42,7 +42,6 @@
 | NTP / 时区 / 中文 | ✅ | Asia/Shanghai，国内 NTP 源 |
 | USB | ❌ | 保持禁用（未贴片，探测挂死） |
 | PPPoE 硬件转发 | ❌ | 未验证（同族 ZX279133 实测不走硬件路径） |
-| Wi-Fi 关联死机 / 冷启挂死 | ❌ | 未根治；有 pending 标记自愈兜底（损失一次断电） |
 
 ## 原厂驱动重写线（`native` 分支，实验）
 
