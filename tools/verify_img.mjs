@@ -287,7 +287,7 @@ const idxOf = (label) => table.findIndex((t) => t.label === label);
 // 2026-10-13). Our packer therefore declares the whole 4 MiB kernel region as
 // the kernel extent, so the derived position is exactly KERNEL_AT.
 const BLOCK = 0x20000, SLOT1 = 0x2300000, SPAN = 0x1c00000;
-const KERNEL_AT = 0x400000, ROOTFS_SPAN = 0x1000000, HEADER_AT = KERNEL_AT + ROOTFS_SPAN;
+const KERNEL_AT = 0x400000, ROOTFS_SPAN = 0x1400000, HEADER_AT = KERNEL_AT + ROOTFS_SPAN;
 const iRoot = idxOf('rootfs'), iData = idxOf('rootfs_data'), iSlot1 = idxOf('slot1');
 const iHdr = idxOf('slot1-header');
 ok('there is a partition labelled rootfs', iRoot >= 0, `mtd${iRoot}`);
