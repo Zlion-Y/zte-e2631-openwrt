@@ -439,7 +439,8 @@ to the NEXT boot, and the code path for it exists and is safe:
 
 The earlier "fstools never picked the volume" conclusion (native 436ed59) was
 drawn from the adoption boot only; no boot with a formatted volume + enabled=1
-ever completed before the brick.  Still open until measured: one flash cycle
-must confirm boot 1 = adoption (format/migrate/enable) and boot 2 = takeover
-(/overlay is ubifs).  Until then the volume stays reachable via
-e2631-userdata-status / manual mount.
+ever completed before the brick.  Measured fixed (2026-11-07, on-device):
+after the preinit mknod fix the probe hits ubi0_0 at t=11s, "mount_root:
+switched to extroot" at t=11.3, and /overlay = /dev/ubi0_0 ubifs with the
+migrated configuration - config loss zero, across repeated flash cycles.
+status: fixed.

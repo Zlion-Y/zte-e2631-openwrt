@@ -34,12 +34,14 @@
 | 硬件流卸载（IPv6） | ❌ | 走 CPU 软件路径（PPE 激活时 IPv6 trap 恒开保证正确性） |
 | Wi-Fi 双频 AP | ✅ | 2.4G = HE40（ch1）/ 5G = HE80（ch36）；RF 校准为原厂 caldata 全量透传 |
 | Wi-Fi 硬件加速 | ❌ | 原厂 IDM/NPP 私有栈未移植（~200 Mbit/s CPU 路径）；FFE 实验分支 opt-in |
-| 47 MiB userdata 扩展存储 | ⚠️ | UBI/UBIFS 格式化+挂载实测通过；默认关闭，需手动初始化后启用 |
+| 47 MiB userdata 扩展存储 | ✅ | 首启自动采纳（格式化+迁移+启用），重启后接管 ~35 MiB UBIFS；配置零丢失 |
 | LuCI 中文后台（Argon） | ✅ | 板卡页：槽位表 / 在线升级 / WAN 口选择 / 备份 |
 | WAN 侧调试访问 | ✅ | WAN 区放行私网段 22/80/443（**首启无密码，先设密码**） |
 | 在线更新 | ✅ | GitHub Release 检查 + 下载，SHA256 强制校验，按数字比较版本 |
 | LED 状态灯 | ✅ | 启动红慢闪 → 联网绿常亮 / 离线红常亮 |
 | NTP / 时区 / 中文 | ✅ | Asia/Shanghai，国内 NTP 源 |
+| 内置插件 | ✅ | SmartDNS / nlbwmon / UPnP / WOL / adblock-fast 随镜像内置（中文界面） |
+| 代理栈 homeproxy | ⚠️ | sing-box 1.14.0 + LuCI，经 apk 装入 userdata 卷（Release 附件），订阅导入/中文 |
 | USB | ❌ | 保持禁用（未贴片，探测挂死） |
 | PPPoE 硬件转发 | ❌ | 未验证（同族 ZX279133 实测不走硬件路径） |
 | Wi-Fi 关联死机 / 冷启挂死 | ❌ | 未根治；有 pending 标记自愈兜底（损失一次断电） |
