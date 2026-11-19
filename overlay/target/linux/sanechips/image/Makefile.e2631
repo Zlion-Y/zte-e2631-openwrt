@@ -76,3 +76,37 @@ define Build/e2631-factory
 		--kernel $(IMAGE_KERNEL) --rootfs $(IMAGE_ROOTFS) \
 		--rootfs-at 0x400000 --header-at 0x1400000 --out $@
 endef
+
+define Device/zte_zxhn-e2615
+  DEVICE_VENDOR := ZTE
+  DEVICE_MODEL := ZXHN E2615
+  DEVICE_DTS := zx279128s-zte-zxhn-e2615
+  DEVICE_DTS_DIR := $(TOPDIR)/target/linux/sanechips/dts
+  KERNEL_SIZE := 4096k
+  KERNEL := kernel-bin | append-dtb | uImage none | zte-slot-marker | \
+	check-size $$(KERNEL_SIZE)
+  KERNEL_INITRAMFS := kernel-bin | append-dtb | uImage-ramboot
+  # MediaTek MT7915D PCIe DBDC Wi-Fi 6 (14c3:7915 + 14c3:7916)
+  # Global configuration: standard English LuCI, no Chinese language packs or vendor bloat
+  DEVICE_PACKAGES := kmod-mt7915e kmod-mt7915-firmware e2631-fwslot \
+	kmod-nft-offload ubi-utils block-mount \
+	libustream-mbedtls \
+	luci luci-proto-ppp luci-app-ttyd ttyd \
+	luci-theme-bootstrap
+  IMAGES := $(if $(E2631_VENDOR_TEMPLATE),factory.bin )sysupgrade.bin
+  IMAGE/factory.bin := e2615-factory
+  IMAGE/sysupgrade.bin := sysupgrade-tar | append-metadata
+endef
+TARGET_DEVICES += zte_zxhn-e2615
+
+define Build/e2615-factory
+	[ -n "$(E2631_VENDOR_TEMPLATE)" ] || { \
+		echo "CONFIG_E2631_VENDOR_TEMPLATE must name an official E2615/E2603 package" >&2; exit 1; }
+	[ -f "$(E2631_VENDOR_TEMPLATE)" ] || { \
+		echo "no such vendor template: $(E2631_VENDOR_TEMPLATE)" >&2; exit 1; }
+	node $(TOPDIR)/tools/e2631-mkfactory.mjs pack \
+		--template $(E2631_VENDOR_TEMPLATE) \
+		--product "ZXHN E2603 V1.0.0" \
+		--kernel $(IMAGE_KERNEL) --rootfs $(IMAGE_ROOTFS) \
+		--rootfs-at 0x400000 --header-at 0x1500000 --out $@
+endef

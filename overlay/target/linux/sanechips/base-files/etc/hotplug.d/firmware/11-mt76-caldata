@@ -34,6 +34,9 @@ zte_caldata_from_jffs2() {
 	zte,zxhn-h3600:1579)
 		caldata_from_file $dir/caldata 0x0 0xe00
 		;;
+	zte,zxhn-e2615:1579)
+		caldata_from_file $dir/caldata 0x0 0x20000
+		;;
 	zte,zxhn-e2631:1679)
 		# The whole card file: the driver memcpy()s only the first
 		# MT7916_EEPROM_SIZE (4096) bytes of it, and the rest of the region is
@@ -61,7 +64,7 @@ case "$FIRMWARE" in
 # no band information: the main function (14c3:7906) and the ext-HIF function
 # (14c3:790a) ask for the same file.
 	case "$board" in
-	zte,zxhn-h3600|zte,zxhn-e2631)
+	zte,zxhn-h3600|zte,zxhn-e2615|zte,zxhn-e2631)
 		zte_caldata_from_jffs2
 		;;
 	esac
