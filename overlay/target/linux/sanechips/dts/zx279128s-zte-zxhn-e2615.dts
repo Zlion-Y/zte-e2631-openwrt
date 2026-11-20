@@ -1,0 +1,266 @@
+// SPDX-License-Identifier: GPL-2.0-only OR BSD-2-Clause
+/*
+ * ZTE ZXHN E2615 (AX1800 Wi-Fi 6 Mesh Router):
+ * Dual-band Wi-Fi 6 router on the Sanechips ZX279128S SoC (ARM Cortex-A9 dual-core),
+ * 256 MiB DDR3 RAM, 128 MiB SPI NAND (Denali controller), one WAN port and three LAN ports,
+ * MediaTek MT7915D PCIe AX1800 DBDC Wi-Fi 6 subsystem.
+ *
+ * Board Identification:
+ *   Model: ZTE ZXHN E2615 / China Mobile CMCC
+ *   Board ID: ZXHN E2603 V1.0.0
+ *   Compatible: "zte,zxhn-e2615", "zte,zx279128s"
+ *
+ * Extracted, reverse-engineered, and validated on live physical hardware (2026-11-19).
+ */
+
+/dts-v1/;
+
+#include "zte/zx279128s.dtsi"
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/input/input.h>
+#include <dt-bindings/leds/common.h>
+
+/ {
+	model = "ZTE ZXHN E2615";
+	compatible = "zte,zxhn-e2615", "zte,zx279128s";
+
+	aliases {
+		ethernet0 = &gmac;
+		serial0 = &serial0;
+		serial1 = &serial1;
+		led-boot = &led_red;
+		led-failsafe = &led_red;
+		led-running = &led_green;
+	};
+
+	chosen {
+		stdout-path = "serial0:115200n8";
+	};
+
+	memory@40000000 {
+		device_type = "memory";
+		/* 256 MiB DDR3 RAM */
+		reg = <0x40000000 0x10000000>;
+	};
+
+	leds {
+		compatible = "gpio-leds";
+
+		led_green: led-green {
+			color = <LED_COLOR_ID_GREEN>;
+			function = LED_FUNCTION_STATUS;
+			gpios = <&gpio2 8 GPIO_ACTIVE_LOW>; /* Flat GPIO 40 */
+			default-state = "off";
+		};
+
+		led_red: led-red {
+			color = <LED_COLOR_ID_RED>;
+			function = LED_FUNCTION_FAULT;
+			gpios = <&gpio3 12 GPIO_ACTIVE_LOW>; /* Flat GPIO 60 */
+			default-state = "off";
+		};
+
+		led_blue: led-blue {
+			color = <LED_COLOR_ID_BLUE>;
+			function = LED_FUNCTION_WLAN;
+			gpios = <&gpio0 8 GPIO_ACTIVE_LOW>; /* Flat GPIO 8 */
+			default-state = "off";
+		};
+	};
+
+	keys {
+		compatible = "gpio-keys-polled";
+		poll-interval = <50>;
+
+		key-reset {
+			label = "reset";
+			gpios = <&gpio1 2 GPIO_ACTIVE_LOW>; /* Flat GPIO 18 */
+			linux,code = <KEY_RESTART>;
+		};
+
+		key-wps {
+			label = "wps";
+			gpios = <&gpio1 4 GPIO_ACTIVE_LOW>; /* Flat GPIO 20 */
+			linux,code = <KEY_WPS_BUTTON>;
+		};
+	};
+};
+
+&serial0 {
+	status = "okay";
+};
+
+&serial1 {
+	status = "okay";
+};
+
+&gmac {
+	status = "okay";
+};
+
+&gmac_port0 {
+	label = "lan3";
+	phy-handle = <&phy10>;
+	phy-mode = "internal";
+	nvmem-cells = <&macaddr_tag_1e 0>;
+	nvmem-cell-names = "mac-address";
+	status = "okay";
+};
+
+&gmac_port1 {
+	label = "lan2";
+	phy-handle = <&phy11>;
+	phy-mode = "internal";
+	nvmem-cells = <&macaddr_tag_1e 0>;
+	nvmem-cell-names = "mac-address";
+	status = "okay";
+};
+
+&gmac_port2 {
+	label = "lan1";
+	phy-handle = <&phy12>;
+	phy-mode = "internal";
+	nvmem-cells = <&macaddr_tag_1e 0>;
+	nvmem-cell-names = "mac-address";
+	status = "okay";
+};
+
+&gmac_port3 {
+	label = "wan";
+	phy-handle = <&phy13>;
+	phy-mode = "internal";
+	nvmem-cells = <&macaddr_tag_1e 1>;
+	nvmem-cell-names = "mac-address";
+	status = "okay";
+};
+
+&gmac_port4 {
+	status = "disabled";
+};
+
+&mdio {
+	status = "okay";
+
+	phy10: ethernet-phy@a {
+		reg = <10>;
+	};
+
+	phy11: ethernet-phy@b {
+		reg = <11>;
+	};
+
+	phy12: ethernet-phy@c {
+		reg = <12>;
+	};
+
+	phy13: ethernet-phy@d {
+		reg = <13>;
+	};
+};
+
+&pcie {
+	status = "okay";
+
+	bridge@0,0 {
+		reg = <0x00000000 0 0 0 0>;
+		#address-cells = <3>;
+		#size-cells = <2>;
+		ranges;
+
+		/* Primary MT7915D function (14c3:7915) hosting DBDC radios (2.4G & 5G) */
+		wifi@0,0 {
+			compatible = "mediatek,mt7915e";
+			reg = <0x00000000 0 0 0 0>;
+		};
+	};
+};
+
+&nand {
+	status = "okay";
+
+	partitions {
+		compatible = "zte,zx279128s-slotpart";
+		#address-cells = <1>;
+		#size-cells = <1>;
+
+		/* Slot geometry for the dynamic slot parser:
+		 * bases are the two whole-system 28 MiB windows.
+		 * On E2615, rootfs is at +0x400000, version header is at +0x1500000.
+		 */
+		zte,slot0 = <0x00700000 0x01c00000>;
+		zte,slot1 = <0x02300000 0x01c00000>;
+		zte,fs-delta = <0x00400000>;
+		zte,hdr-delta = <0x01500000>;
+
+		partition@0 {
+			label = "bootloader";
+			reg = <0x00000000 0x00100000>;
+			read-only;
+		};
+
+		partition@100000 {
+			label = "tag";
+			reg = <0x00100000 0x00100000>;
+			read-only;
+
+			nvmem-layout {
+				compatible = "fixed-layout";
+				#address-cells = <1>;
+				#size-cells = <1>;
+
+				macaddr_tag_1e: macaddr@1e {
+					compatible = "mac-base";
+					reg = <0x1e 0x6>;
+					#nvmem-cell-cells = <1>;
+				};
+			};
+		};
+
+		partition@200000 {
+			label = "wifi";
+			reg = <0x00200000 0x00100000>;
+			read-only;
+		};
+
+		partition@300000 {
+			label = "usercfg";
+			reg = <0x00300000 0x00200000>;
+		};
+
+		partition@500000 {
+			label = "defcfg";
+			reg = <0x00500000 0x00200000>;
+			read-only;
+		};
+
+		partition@700000 {
+			label = "slot0";
+			reg = <0x00700000 0x01c00000>;
+		};
+
+		partition@2300000 {
+			label = "slot1";
+			reg = <0x02300000 0x01c00000>;
+		};
+
+		partition@2700000 {
+			label = "rootfs";
+			reg = <0x02700000 0x01100000>;
+		};
+
+		partition@3800000 {
+			label = "slot1-header";
+			reg = <0x03800000 0x00020000>;
+			read-only;
+		};
+
+		partition@3f00000 {
+			label = "userdata";
+			reg = <0x03f00000 0x02f00000>;
+		};
+	};
+};
+
+&l2cc {
+	zte,l2c-io-read-lock;
+};

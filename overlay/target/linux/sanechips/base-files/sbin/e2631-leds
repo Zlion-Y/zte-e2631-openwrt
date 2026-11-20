@@ -68,17 +68,34 @@ upgrading() {
 
 # A default route is the cheapest honest signal that the WAN side works; netifd
 # only installs one once the wan interface has a lease and has been probed.
-online() { ip route show default 2>/dev/null | grep -q 'via' ; }
+# Check both IPv4 and IPv6 default gateways.
+online() {
+	ip route show default 2>/dev/null | grep -q 'via' || \
+	ip -6 route show default 2>/dev/null | grep -q 'via'
+}
+
+cur_target=""
+set_lamp() {
+	local target=$1
+	[ "$target" = "$cur_target" ] && return 0
+	cur_target="$target"
+	case "$target" in
+	upgrading) state "$red" off; state "$green" off; state "$blue" blink ;;
+	online)    state "$red" off; state "$green" on;  state "$blue" off ;;
+	booting)   state "$red" blink; state "$green" off; state "$blue" off ;;
+	offline)   state "$red" on;  state "$green" off; state "$blue" off ;;
+	esac
+}
 
 while :; do
 	if upgrading; then
-		state "$red" off; state "$green" off; state "$blue" blink
+		set_lamp upgrading
 	elif online; then
-		state "$red" off; state "$green" on; state "$blue" off
-	elif [ "$(cut -d' ' -f1 /proc/uptime | cut -d. -f1)" -lt 45 ]; then
-		state "$red" blink; state "$green" off; state "$blue" off
+		set_lamp online
+	elif [ "$(cut -d' ' -f1 /proc/uptime 2>/dev/null | cut -d. -f1)" -lt 45 ]; then
+		set_lamp booting
 	else
-		state "$red" on; state "$green" off; state "$blue" off
+		set_lamp offline
 	fi
 	sleep 2
 done
