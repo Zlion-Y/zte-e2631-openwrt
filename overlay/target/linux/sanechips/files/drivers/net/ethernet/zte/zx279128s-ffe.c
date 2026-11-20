@@ -66,8 +66,8 @@ struct zx_ffe_flow {
 
 static const struct rhashtable_params zx_ffe_ht_params = {
 	.head_offset		= offsetof(struct zx_ffe_flow, node),
-	.key_offset		= offsetof(struct zx_ffe_flow, key),
-	.key_len		= sizeof(struct zx_ffe_key),
+	.key_offset		= offsetof(struct zx_ffe_flow, cookie),
+	.key_len		= sizeof(unsigned long),
 	.automatic_shrinking	= true,
 };
 

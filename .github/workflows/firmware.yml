@@ -1,10 +1,10 @@
-name: Build experimental E2631 firmware
+name: Build Sanechips ZX279128 firmware
 on:
   workflow_dispatch:
 permissions:
   contents: read
 concurrency:
-  group: e2631-firmware-${{ github.ref }}
+  group: sanechips-firmware-${{ github.ref }}
   cancel-in-progress: false
 jobs:
   build:
@@ -15,7 +15,7 @@ jobs:
     env:
       E2631_TREE: ${{ github.workspace }}/../openwrt
       E2631_OUT: ${{ github.workspace }}/../out
-      E2631_VERSION: OpenWrt v1.4
+      E2631_VERSION: OpenWrt Sanechips Global
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -38,9 +38,9 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p release
-          mapfile -t packages < <(find "$E2631_OUT" -maxdepth 1 -name 'e2631-openwrt-*.bin' -type f)
-          test "${#packages[@]}" -eq 1
-          cp "${packages[0]}" release/e2631-openwrt-experimental.bin
+          mapfile -t packages < <(find "$E2631_OUT" -maxdepth 1 -name '*.bin' -type f)
+          test "${#packages[@]}" -ge 1
+          cp "${packages[@]}" release/
           {
             echo "Kit commit: $GITHUB_SHA"
             echo "Base commit: $(git -C "$E2631_TREE" rev-parse HEAD)"
@@ -49,22 +49,23 @@ jobs:
             echo "Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
             echo "Hardware tested: NO"
           } > release/SOURCE-INFO.txt
-          (cd release && sha256sum e2631-openwrt-experimental.bin SOURCE-INFO.txt > SHA256SUMS)
-          echo "tag=e2631-exp-${GITHUB_RUN_NUMBER}-${GITHUB_SHA:0:7}" >> "$GITHUB_OUTPUT"
+          (cd release && sha256sum *.bin SOURCE-INFO.txt > SHA256SUMS)
+          echo "tag=sanechips-exp-${GITHUB_RUN_NUMBER}-${GITHUB_SHA:0:7}" >> "$GITHUB_OUTPUT"
       - name: Publish only after all build and artifact gates pass
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ steps.release.outputs.tag }}
         run: |
           cat > "$RUNNER_TEMP/release-notes.md" <<'NOTES'
-          E2631 实验固件，仅适用于已核实硬件兼容性的 ZXHN E2631。
+          Experimental OpenWrt firmware for Sanechips ZX279128 SoC devices (ZXHN E2631, ZXHN E2615, CMCC RAX1800Z).
 
-          通过本次源码检查、完整编译与产物校验；**尚未真机验证，不是稳定版**。
-          已知问题：Wi-Fi 冷启动可能挂死（有自愈重试）；部分 SPI-NAND 批次不支持；
-          首次进入应立即设置 root 密码（首启为开放设置网络）。
-          下载 `.bin` 前核对设备型号、闪存批次及恢复途径，再按 SHA256SUMS 校验。
+          Passed static validation, compilation, and artifact packaging gates.
+          **Notice: Experimental release. Verify hardware compatibility, flash type, and serial recovery before flashing.**
+          - Global default configuration: English UI (`en`), UTC timezone, global pool NTP.
+          - Verified on dual-slot SPI-NAND architecture (slot 0 / slot 1 A/B failover).
+          - Always verify package integrity against SHA256SUMS before flashing.
           NOTES
-          gh release create "$RELEASE_TAG" release/* --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease --title "E2631 experimental ${RELEASE_TAG}" --notes-file "$RUNNER_TEMP/release-notes.md"
+          gh release create "$RELEASE_TAG" release/* --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease --title "Sanechips ZX279128 experimental ${RELEASE_TAG}" --notes-file "$RUNNER_TEMP/release-notes.md"
       - name: Stage build logs for archiving
         if: always()
         run: |

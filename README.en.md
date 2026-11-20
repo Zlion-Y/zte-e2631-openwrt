@@ -1,6 +1,6 @@
-# OpenWrt for the ZTE ZXHN E2631 (Sanechips ZX279128S)
+# OpenWrt for Sanechips ZX279128 Devices (E2631 / E2615 / RAX1800Z)
 
-[中文](README.md) · **English**
+**English** · [简体中文](README.zh-CN.md) · [Master README](README.md)
 
 **To build this: [BUILD.md](BUILD.md).** It is the single supported path from a clone to
 a package that flashes, and it lists the two inputs this repository cannot hand you (the

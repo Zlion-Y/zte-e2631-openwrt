@@ -129,6 +129,22 @@ pack step, so they need a build first.
 the checkout is at another commit *and* has changes that might be yours, if a feed
 index is missing, or if the seed's device selection does not survive `defconfig`.
 
+### Multi-Device Target Selection
+
+The build system defaults to the ZTE ZXHN E2631 (`seed/e2631.config`). To build for another Sanechips ZX279128 device after bootstrapping:
+
+```sh
+cd "$E2631_TREE"
+# For ZTE ZXHN E2615:
+sed -i 's/CONFIG_TARGET_DEVICE_sanechips_generic_DEVICE_zte_zxhn-e2631=y/CONFIG_TARGET_DEVICE_sanechips_generic_DEVICE_zte_zxhn-e2615=y/' .config
+
+# For CMCC RAX1800Z:
+sed -i 's/CONFIG_TARGET_DEVICE_sanechips_generic_DEVICE_zte_zxhn-e2631=y/CONFIG_TARGET_DEVICE_sanechips_generic_DEVICE_cmcc_rax1800z=y/' .config
+
+make defconfig
+cd -
+```
+
 `build` refuses to start a forty-minute job on inputs it can see are missing, so the
 errors you get are the useful ones: no base tree, no `.config`, overlay not applied,
 device not selected, no `node`, `node` too old for `zlib.crc32`, a template path that

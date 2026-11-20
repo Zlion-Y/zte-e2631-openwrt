@@ -103,7 +103,15 @@ latest() { # prints "tag asset-url"
 	mkdir -p "$DLDIR"
 	fetch "$API" "$DLDIR/rel.json" || return 1
 	tag=$(sed -n 's/.*"tag_name":[[:space:]]*"\([^"]*\)".*/\1/p' "$DLDIR/rel.json" | head -1)
-	url=$(sed -n 's/.*"browser_download_url":[[:space:]]*"\([^"]*\.bin\)".*/\1/p' "$DLDIR/rel.json" | head -1)
+	local board pattern
+	board=$(cat /tmp/sysinfo/board_name 2>/dev/null || echo "e2631")
+	case "$board" in
+	*e2615*) pattern="e2615" ;;
+	*rax1800z*) pattern="rax1800z" ;;
+	*) pattern="e2631" ;;
+	esac
+	url=$(sed -n "s/.*\"browser_download_url\":[[:space:]]*\"\\([^\"]*${pattern}[^\"]*\\.bin\\)\".*/\\1/p" "$DLDIR/rel.json" | head -1)
+	[ -n "$url" ] || url=$(sed -n 's/.*"browser_download_url":[[:space:]]*"\([^"]*\.bin\)".*/\1/p' "$DLDIR/rel.json" | head -1)
 	[ -n "$tag" ] && [ -n "$url" ] || return 1
 	echo "$tag $url"
 }

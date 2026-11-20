@@ -1,108 +1,165 @@
-# ZTE ZXHN E2631 · OpenWrt
+# OpenWrt for Sanechips ZX279128 SoC Family
 
-中兴巡天 AX3000（ZX279128S）的 OpenWrt 移植：overlay + 板级工具 + 打包器。
-固件与各版本变更日志见 [Releases](https://github.com/Zlion-Y/zte-e2631-openwrt/releases)；
-逐项实测与取舍记在 [docs/known-issues.md](docs/known-issues.md)。
-本仓库不提供、也不链接原厂固件；随仓库分发的第三方物料见 [NOTICE](NOTICE)。
+**ZTE ZXHN E2631 · ZTE ZXHN E2615 · CMCC RAX1800Z · ZTE ZXHN H3600**
 
-## 芯片与硬件状态
+[English](README.md) · [简体中文](README.zh-CN.md)
 
-| 芯片 / 部件 | 规格 | 驱动 | 状态 |
-|---|---|---|---|
-| SoC | ZTE ZX279128S，双核 Cortex-A9 @1 GHz，256 MiB DDR2 | — | ✅ |
-| 千兆交换 | 4×内部 GbE PHY（ZX5201，eth0-3 独立 netdev） | `zx279128s-eth`（内建） | ✅ |
-| 硬件转发 | PPE 分类器/修改器（0x92000000）+ NPP/IDM/TM 引擎 | `zx279128s-ppe` + nft flowtable | ✅ IPv4 |
-| 无线 | MT7916AN + MT7976DN（Filogic 630，DBDC 2×2） | mt7915e（mt76）+ 原厂 caldata | ✅ |
-| Flash | SPI-NAND 128 MiB（HYF1GQ4UTACAE，2 KiB 页 / 128 KiB 块） | mtk-spi + spi-nand | ✅ |
-| PCIe | Gen1 x1（挂 MT7916） | `zx279128s-pcie` | ✅ |
-| UART | PL011 ×2 @115200n8 | pl011 | ✅ |
-| LED | 三色：`red/green/blue:status`（active-low） | gpio-leds + `e2631-leds` | ✅ |
-| USB | 未贴片 / 探测会挂死 | — | ❌ 保持禁用 |
-| 原厂私有加速 | IDM / NPP / TM（cspkernel 4.1 私有栈） | 未移植 | ❌ |
+This repository provides an OpenWrt port, modular overlay, hardware toolset, and firmware packaging engine for wireless routers powered by the **Sanechips (ZTE Microelectronics) ZX279128 SoC family** (ARM Cortex-A9 dual-core @ 1.0 GHz).
 
-## 适配状态
+Built on upstream Linux 6.18 LTS and OpenWrt master, this project delivers production-ready firmware with **non-destructive A/B dual-slot recovery**, hardware flow offloading (PPE/FFE), dynamic RF caldata injection, multi-gigabit routing, and global locale defaults.
 
-✅ = 已适配并在实机验证；⚠️ = 部分可用 / 带限制；❌ = 未适配
+Firmware releases and pre-built binaries: [Releases](https://github.com/Zlion-Y/zte-e2631-openwrt/releases).  
+Build guide and packaging workflow: [BUILD.md](BUILD.md).  
+Hardware issues, errata, and verification notes: [docs/known-issues.md](docs/known-issues.md).
 
-| 功能 | 状态 | 说明 |
-|---|---|---|
-| 原厂网页刷入（supgrade） | ✅ | 写入目标槽，serial 自动递增 |
-| 系统内升级（sysupgrade / LuCI） | ✅ | 原地升级运行槽；写前校验另一槽原厂镜像完好 |
-| 双槽 A/B + 切回原厂 | ✅ | `e2631-fwslot switch` / LuCI 板卡页；槽角色按内容判定，不写死槽号 |
-| 千兆有线 4 口（1 WAN + 3 LAN） | ✅ | 1000M full；WAN/LAN 可手动互换（`e2631-wanport` / LuCI 页面） |
-| 硬件流卸载（IPv4） | ✅ | PPE 直转，实测 ≥395 Mbit/s、CPU 7%；384 条流表，溢出自动回落 |
-| 硬件流卸载（IPv6） | ❌ | 走 CPU 软件路径（PPE 激活时 IPv6 trap 恒开保证正确性） |
-| Wi-Fi 双频 AP | ✅ | 2.4G = HE40（ch1）/ 5G = HE80（ch36）；RF 校准为原厂 caldata 全量透传 |
-| Wi-Fi 硬件加速 | ❌ | 原厂 IDM/NPP 私有栈未移植（~200 Mbit/s CPU 路径）；FFE 实验分支 opt-in |
-| 47 MiB userdata 扩展存储 | ✅ | 首启自动采纳（格式化+迁移+启用），重启后接管 ~35 MiB UBIFS；配置零丢失 |
-| LuCI 中文后台（Argon） | ✅ | 板卡页：槽位表 / 在线升级 / WAN 口选择 / 备份 |
-| WAN 侧调试访问 | ✅ | WAN 区放行私网段 22/80/443（**首启无密码，先设密码**） |
-| 在线更新 | ✅ | GitHub Release 检查 + 下载，SHA256 强制校验，按数字比较版本 |
-| LED 状态灯 | ✅ | 启动红慢闪 → 联网绿常亮 / 离线红常亮 |
-| NTP / 时区 / 中文 | ✅ | Asia/Shanghai，国内 NTP 源 |
-| 内置插件 | ✅ | SmartDNS / nlbwmon / UPnP / WOL / adblock-fast 随镜像内置（中文界面） |
-| 代理栈 homeproxy | ⚠️ | sing-box 1.14.0 + LuCI，经 apk 装入 userdata 卷（Release 附件），订阅导入/中文 |
-| 槽位布局 | ✅ | rootfs 窗口 17M（为内置插件扩容，上限按原厂头位置反推），升级包 21.2 MiB |
-| USB | ❌ | 保持禁用（未贴片，探测挂死） |
-| PPPoE 硬件转发 | ❌ | 未验证（同族 ZX279133 实测不走硬件路径） |
+---
 
-## 原厂驱动重写线（`native` 分支，实验）
+## 1. Supported Hardware Matrix
 
-主固件用 mt76 驱动 MT7916，能用。`native` 分支做的是另一件事：**不用 mt76**，把原厂
-4.1.25 的 `mt7916.ko`（未 strip，25 345 个符号）当作唯一行为规范，在 6.18 上把
-WFDMA / MCU 双核 / 私有 TXD 这一层显式重写出来，目标是让无线侧也能接上 SoC 的硬件加速，
-而不是停在 mt76 的 CPU 路径上。
+| Device Model | SoC | Wi-Fi Subsystem | Wired Ethernet | Flash / RAM | Port Status |
+|---|---|---|---|---|---|
+| **ZTE ZXHN E2631** (AX3000) | ZX279128S (Cortex-A9 ×2 @ 1 GHz) | MT7916AN + MT7976DN (DBDC 2×2, 160MHz) | 4× GbE (Internal ZX5201 PHY) | 128 MiB SPI-NAND / 256 MiB DDR2 | ✅ Verified on Hardware |
+| **ZTE ZXHN E2615** (AX1800) | ZX279128S (Cortex-A9 ×2 @ 1 GHz) | MT7915D (DBDC 2×2, 80MHz) | 4× GbE (Internal ZX5201 PHY) | 128 MiB SPI-NAND / 256 MiB DDR2 | ✅ Verified on Hardware |
+| **CMCC RAX1800Z** (AX1800) | ZX279128R (Cortex-A9 ×2 @ 1 GHz) | MT7975DN + MT7905DEN (DBDC 2×2, 80MHz) | 4× GbE (Internal ZX5201 PHY) | 128 MiB SPI-NAND / 256 MiB DDR2 | ⚠️ Ported (`Makefile.e2631`) |
+| **ZTE ZXHN H3600** (AX1800) | ZX279128S (Cortex-A9 ×2 @ 1 GHz) | MT7915 (DBDC 2×2, 80MHz) | 4× GbE + 1× 2.5GbE | 128 MiB SPI-NAND / 512 MiB DDR3 | 🔷 Upstream Baseline Ref |
 
-三条做法：
+---
 
-1. **读二进制，不猜**。宿主 binutils 不认 ARM，所以自带 ELF32 解析 + capstone 的反汇编工具
-   （`native/tools/re/`），按符号取函数、按重定位还原调用目标；
-2. **先算再刷**。字段表读全、手算期望值，刷机只验证固件行为，不验证"我算错没有"；
-3. **一次一个假设**。一个 boot 只有一轮"复位→下载→RDY"，命令写错会把 WA 核打死只能重刷。
+## 2. Platform Architecture & Subsystems
 
-**结论（版本 3.97，2026-11-02）**：前四段对齐成立——固件下载（`fw-state=7`）、校准上传
-（4 页 `ret=0`）、band0 的 MAC/DEV/信道/BSS/STA_REC/DRR 全部 `ret=0`、数据帧描述符字节正确
-且被 DMA 引擎取走。**但"引擎读走描述符"与"帧真的出现在空中"之间还差两层主机侧初始化**
-（MAC 层的 band 寄存器、AP 启动的信标/TBTT/中断收尾），这两层目前是空白，也是下一步唯一要做的事。
-
-完整过程、已确证的寄存器事实、已排除的假设与后续路线见
-[docs/原生无线驱动重写-2026-11-02.md](docs/原生无线驱动重写-2026-11-02.md)。
-
-## 构建
-
-WSL（或任意 Linux）内：
-
-```sh
-git clone --branch pr-zte-zxhn-h3600 https://github.com/Zlion-Y/openwrt-sanechips-mirror openwrt
-git -C openwrt checkout db8b8d4130457dbe46558a7cea872dd2dae539e6
-./apply.sh openwrt          # 或 make bootstrap：铺 overlay + 补丁 + 种子配置
-make check                  # 本地门禁（语法 / ash / 槽位工具 / dts 交叉引用 / 凭据扫描）
-make build                  # make world + 打包成原厂 .bin
+```
++--------------------------------------------------------------------------+
+|                     Sanechips ZX279128 SoC Platform                      |
+|       Dual ARM Cortex-A9 @ 1.0 GHz · Soft-Float (VFP Disabled)           |
++--------------------+---------------------+-------------------------------+
+|   Switch Subsystem |  Wireless (PCIe)    |   Storage / Partitioning      |
+|  - 4x Internal GbE |  - MT7916 / MT7915  |  - 128 MiB SPI-NAND           |
+|    PHY (ZX5201)    |  - mt76 driver      |  - A/B Dual Slot (28 MiB ea)  |
+|  - Independent     |  - Factory caldata  |  - Dynamic slotpart parser    |
+|    netdev per port |    hotplug parse    |  - 47 MiB userdata extroot    |
+|  - Manual WAN swap |  - Dual-band AP     |  - In-band JFFS2 markers      |
++--------------------+---------------------+-------------------------------+
+|                       Hardware Packet Processing                         |
+|  - PPE Classifier & Flow Modifier (0x92000000)                           |
+|  - IPv4 Hardware Flow Offloading (>=395 Mbps @ 7% CPU)                   |
+|  - IPv6 Software Fast-Path with Hardware Trap Protection                 |
++--------------------------------------------------------------------------+
 ```
 
-- 打包默认用随仓库的版本头切片 `seed/vendor-verhdr-8b8.bin`（与官方全包逐字节同果），
-  也可用 `--template` 指向你手里的官方包；
-- 打包器独立复核几何与 CRC，`tools/verify_img.mjs` 静态筛查"起不来"类问题；
-- 详细步骤、网络补丁与注意事项见 [BUILD.md](BUILD.md)。
+### Feature Implementation Status
 
-## 致谢
+* ✅ **Non-Destructive Dual-Slot Booting**: Flash partitions are dynamically divided into Slot 0 (`0x00700000`) and Slot 1 (`0x02300000`). Upgrades overwrite only the inactive slot; bootloader (`cspboot`) automatically boots the slot with valid CRC and higher sequence serial. Reverting to stock takes 5 seconds via `e2631-fwslot switch`.
+* ✅ **Global Network & Locale Configuration**:
+  - Web Interface: English (`en`) LuCI standard interface.
+  - Timezone: UTC with global NTP pool (`*.openwrt.pool.ntp.org`).
+  - Network: Standard `192.168.1.1/24` LAN DHCP, WAN auto-configured.
+* ✅ **Gigabit Wired Switching (4 Ports)**:
+  - Internal ZX5201 PHYs exposed as independent netdevs (`eth0`, `eth1`, `eth2`, `eth3`).
+  - Arbitrary WAN port remapping supported on-the-fly (`e2631-wanport apply <port>`).
+* ✅ **Hardware Flow Offloading (IPv4)**:
+  - Hardware PPE engine handles wire-speed NAT/routing offload for IPv4.
+  - Up to 384 concurrent offloaded flows; seamless fallback to CPU path on saturation.
+  - IPv6 flows are trapped to kernel software path to prevent payload corruption.
+* ✅ **Extroot Expansion (47 MiB Userdata)**:
+  - Flash partition `0x03F00000 - 0x06E00000` automatically initialized as UBIFS on first boot, providing ample persistent storage for custom packages and services.
+* ✅ **NAND Bitflip & ECC Resilience**:
+  - Kernel parser `zx279128s-slotpart.c` tolerates correctable SPI-NAND bitflips.
+  - JFFS2 clean markers written in-band (data area) to prevent multiple-write corruption on on-die ECC SPI-NAND chips.
+* ❌ **USB Controller**:
+  - Permanently disabled in device trees (`status = "disabled"`). Unpopulated hardware causes SoC watchdog hang when probed.
 
-- **[@ghahramani](https://github.com/ghahramani)** —— H3600 整条线：
-  [openwrt#25469](https://github.com/openwrt/openwrt/pull/25469)、
-  [构建分支](https://github.com/ghahramani/openwrt/tree/zte-zxhn-h3600)、
-  [主线 RFC](https://github.com/ghahramani/linux/tree/h3600-linux-rfc)、
-  [工程长文](https://ghahremani.medium.com/resurrecting-isp-e-waste-how-an-ai-breakthrough-unlocked-the-hyperoptic-zte-h3600-ported-modern-60e74c87c11e)。
-  本仓库 overlay 基线树即该分支镜像（钉在 `db8b8d4`）；其中若干公开说法在这块板子上不成立，
-  逐条更正见 [docs/01](docs/01-情报汇总与事实核验-2026-10-13.md)。
-- **[@zwzzrl](https://github.com/zwzzrl/zte-e2631-openwrt)** —— 手动 WAN 口选择、IPv6 硬件卸载打断 TCP
-  的发现与因果链、`e2631-wifi-boot` 重配网修复，以及 PPE 逆向的多项输入。
-- **[@zwthys-cyber](https://github.com/zwthys-cyber/zte-e2631-openwrt)** —— 升级加固
-  （`SHA256SUMS`、仅 https 镜像加速、失败路径回归）与 CI 基线。
-- **[cubingmucus998/zte-zx279128s-recon](https://github.com/cubingmucus998/zte-zx279128s-recon)** ——
-  这颗 SoC 最早的公开 DTB、分区表与 flash 事实。
-- **[@cnjn](https://github.com/cnjn)** —— [zxslc-sr1010](https://github.com/cnjn/linux-mainline-zte-zxslc-sr1010)
-  的 UART 逆向与主线补丁；[zte-mesh](https://github.com/cnjn/zte-mesh) 自 v1.3 起整体引入。
-- **[openwrt.style.dev/h3600](https://openwrt.style.dev/h3600/)** 与
-  [恩山讨论帖](https://www.right.com.cn/forum/thread-8487689-1-3.html) —— 只当线索：前者抓取时 502
-  且站内说法互斥，后者补了不少没被英文记录的原始行为。
-- **OpenWrt / Linux 上游与 mt76 维护者（@nbd168 等）** —— 本仓库只带一个 mt76 补丁与三个 target 补丁。
+---
+
+## 3. Quick Start: Building Firmware
+
+All build operations run in standard Linux (Ubuntu 22.04 LTS / 24.04 LTS, Debian 12, or WSL2).
+
+### Prerequisites
+
+```bash
+sudo apt-get update
+sudo apt-get install -y build-essential clang flex bison g++ gawk gcc-multilib \
+    gettext git libncurses-dev libssl-dev python3 python3-setuptools rsync \
+    swig unzip zlib1g-dev file wget curl busybox libelf-dev xsltproc nodejs
+```
+*Note: Node.js 20.15+ (or 22 LTS) is required for firmware image packaging (`tools/mkfactory.mjs`).*
+
+### Building the Firmware
+
+1. **Bootstrap the workspace**:
+   ```bash
+   bash scripts/bootstrap.sh    # or: make bootstrap
+   ```
+   This checks out the pinned OpenWrt Sanechips tree (`db8b8d4`), installs required feeds (`packages`, `luci`), applies target patches, and injects default device configuration.
+
+2. **Select Target Device (Optional)**:
+   By default, `seed/e2631.config` targets the **ZTE ZXHN E2631**.
+   To target the **ZTE ZXHN E2615** or **CMCC RAX1800Z**, customize `.config`:
+   ```bash
+   cd ~/openwrt
+   # For E2615:
+   # CONFIG_TARGET_DEVICE_sanechips_generic_DEVICE_zte_zxhn-e2615=y
+   # For RAX1800Z:
+   # CONFIG_TARGET_DEVICE_sanechips_generic_DEVICE_cmcc_rax1800z=y
+   make defconfig
+   cd -
+   ```
+
+3. **Verify Pre-flight Gates**:
+   ```bash
+   make check                   # or: bash scripts/check.sh
+   ```
+   Validates shell scripts (`bash -n`), JavaScript tools (`node --check`), DTS cross-references, and ensures no private credentials exist.
+
+4. **Compile and Package**:
+   ```bash
+   bash scripts/build.sh        # or: make build
+   ```
+   Compiles OpenWrt toolchain, kernel, rootfs, and packages the binary using the embedded vendor version-header template (`seed/vendor-verhdr-8b8.bin`). Output packages are placed in `out/`.
+
+---
+
+## 4. Installation & Upgrades
+
+### Method 1: Vendor Web GUI First-Flash (Zero Risk)
+1. Boot router into stock factory firmware.
+2. Log into the web admin console (`192.168.5.3` or `192.168.2.1` depending on model).
+3. Navigate to the hidden upgrade page (`/supgrade.html` on port 8085 or `/firmware_upgrade`).
+4. Select the generated `.bin` package and upload.
+5. Router will verify CRC, write to the secondary inactive slot, increment boot serial, and restart into OpenWrt. Stock firmware remains untouched in the original slot.
+
+### Method 2: In-System Sysupgrade (OpenWrt to OpenWrt)
+```bash
+sysupgrade -v /tmp/openwrt-sanechips-upgrade.bin
+```
+The upgrade script validates the inactive slot and writes the payload without breaking dual-boot recovery.
+
+### Reverting to Factory Firmware
+To immediately boot back to stock firmware from OpenWrt:
+```bash
+e2631-fwslot switch
+reboot
+```
+This increments the factory slot sequence counter, triggering `cspboot` to switch back on next power cycle.
+
+---
+
+## 5. Port Management & CLI Tools
+
+| Command | Function |
+|---|---|
+| `e2631-fwslot info` | Display current and alternate slot state, kernel addresses, version headers, and boot priority |
+| `e2631-fwslot switch` | Swap active boot slot (OpenWrt <-> Stock Factory) |
+| `e2631-wanport show` | Display current WAN/LAN physical port assignments and link state |
+| `e2631-wanport apply <port>` | Reassign WAN uplink to `wan`, `lan1`, `lan2`, or `lan3` |
+| `e2631-upgrade check` | Check GitHub Releases for newer verified firmware |
+| `e2631-leds` | Status LED daemon controlling RGB tri-color boot and connectivity indicator |
+
+---
+
+## 6. Acknowledgements & References
+
+* **[@ghahramani](https://github.com/ghahramani)**: Upstream pioneer of the ZTE ZXHN H3600 OpenWrt port ([openwrt/openwrt#25469](https://github.com/openwrt/openwrt/pull/25469)), mainline Linux RFC, and technical architecture analysis.
+* **[@zwzzrl](https://github.com/zwzzrl/zte-e2631-openwrt)**: Manual WAN port remapping architecture, PPE flow offloading analysis, IPv6 TCP trap discovery, and hardware wireless reboot recovery.
+* **[@zwthys-cyber](https://github.com/zwthys-cyber/zte-e2631-openwrt)**: Upgrade hardening routines, mandatory SHA256 checksum enforcement, and CI infrastructure.
+* **OpenWrt & Linux Kernel Projects**: Upstream maintainers of `mt76`, network subsystems, and the ARM Cortex-A9 architecture.

@@ -1,17 +1,8 @@
 #!/bin/sh
 . /lib/functions.sh
 
-case "$(board_name)" in
-zte,zxhn-e2615)
-	# E2615 Global: Default to English, no Chinese UI lock
-	uci -q set luci.main.lang="en"
-	uci -q commit luci
-	;;
-*)
-	# v1.3: browser language auto-detect can land on English; pin the UI to the
-	# Chinese translation that ships in the image (luci-i18n-base-zh-cn).
-	uci -q set luci.main.lang="zh_cn"
-	uci -q commit luci
-	;;
-esac
+# Global default: English UI for all Sanechips ZX279128 boards
+uci -q set luci.main.lang="en"
+uci -q commit luci
+
 exit 0

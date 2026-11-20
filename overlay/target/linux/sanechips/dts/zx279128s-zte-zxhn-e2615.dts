@@ -90,8 +90,72 @@
 	status = "okay";
 };
 
+&serial1 {
+	status = "okay";
+};
+
 &gmac {
 	status = "okay";
+};
+
+&gmac_port0 {
+	label = "lan3";
+	phy-handle = <&phy10>;
+	phy-mode = "internal";
+	nvmem-cells = <&macaddr_tag_1e 0>;
+	nvmem-cell-names = "mac-address";
+	status = "okay";
+};
+
+&gmac_port1 {
+	label = "lan2";
+	phy-handle = <&phy11>;
+	phy-mode = "internal";
+	nvmem-cells = <&macaddr_tag_1e 0>;
+	nvmem-cell-names = "mac-address";
+	status = "okay";
+};
+
+&gmac_port2 {
+	label = "lan1";
+	phy-handle = <&phy12>;
+	phy-mode = "internal";
+	nvmem-cells = <&macaddr_tag_1e 0>;
+	nvmem-cell-names = "mac-address";
+	status = "okay";
+};
+
+&gmac_port3 {
+	label = "wan";
+	phy-handle = <&phy13>;
+	phy-mode = "internal";
+	nvmem-cells = <&macaddr_tag_1e 1>;
+	nvmem-cell-names = "mac-address";
+	status = "okay";
+};
+
+&gmac_port4 {
+	status = "disabled";
+};
+
+&mdio {
+	status = "okay";
+
+	phy10: ethernet-phy@a {
+		reg = <10>;
+	};
+
+	phy11: ethernet-phy@b {
+		reg = <11>;
+	};
+
+	phy12: ethernet-phy@c {
+		reg = <12>;
+	};
+
+	phy13: ethernet-phy@d {
+		reg = <13>;
+	};
 };
 
 &pcie {
@@ -115,9 +179,18 @@
 	status = "okay";
 
 	partitions {
-		compatible = "fixed-partitions";
+		compatible = "zte,zx279128s-slotpart";
 		#address-cells = <1>;
 		#size-cells = <1>;
+
+		/* Slot geometry for the dynamic slot parser:
+		 * bases are the two whole-system 28 MiB windows.
+		 * On E2615, rootfs is at +0x400000, version header is at +0x1500000.
+		 */
+		zte,slot0 = <0x00700000 0x01c00000>;
+		zte,slot1 = <0x02300000 0x01c00000>;
+		zte,fs-delta = <0x00400000>;
+		zte,hdr-delta = <0x01500000>;
 
 		partition@0 {
 			label = "bootloader";
@@ -129,6 +202,18 @@
 			label = "tag";
 			reg = <0x00100000 0x00100000>;
 			read-only;
+
+			nvmem-layout {
+				compatible = "fixed-layout";
+				#address-cells = <1>;
+				#size-cells = <1>;
+
+				macaddr_tag_1e: macaddr@1e {
+					compatible = "mac-base";
+					reg = <0x1e 0x6>;
+					#nvmem-cell-cells = <1>;
+				};
+			};
 		};
 
 		partition@200000 {
